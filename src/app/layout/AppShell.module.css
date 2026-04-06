@@ -1,0 +1,28 @@
+.shell {
+  display: grid;
+  grid-template-columns: var(--rail-width) minmax(0, 1fr);
+  width: 100%;
+  min-width: var(--app-min-width);
+  min-height: var(--app-min-height);
+  height: 100vh;
+  background: var(--color-app-background);
+}
+
+.content {
+  min-width: 0;
+  min-height: 0;
+  padding: 30px 32px;
+  overflow: auto;
+  background:
+    radial-gradient(circle at top left, rgba(255, 255, 255, 0.92), transparent 28%),
+    var(--color-app-background);
+}
+
+.contentInner {
+  width: 100%;
+  min-height: 100%;
+}
+
+.contentInner > * {
+  min-width: 0;
+}

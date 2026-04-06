@@ -1,0 +1,72 @@
+:root,
+:root[data-theme="blue"] {
+  --color-app-background: #f8fafc;
+  --color-surface-primary: #ffffff;
+  --color-surface-muted: #f1f5f9;
+  --color-border-soft: rgba(148, 163, 184, 0.24);
+  --color-border-strong: rgba(96, 165, 250, 0.4);
+  --color-text-primary: #0f172a;
+  --color-text-secondary: #475569;
+  --color-text-tertiary: #64748b;
+  --color-rail-background: #1e3a8a;
+  --color-rail-text: #eff6ff;
+  --color-rail-text-muted: rgba(219, 234, 254, 0.76);
+  --color-accent: #60a5fa;
+  --color-accent-soft: #dbeafe;
+  --color-accent-strong: #2563eb;
+  --color-selected-foreground: #eff6ff;
+}
+
+:root[data-theme="pink"] {
+  --color-app-background: #fdf2f8;
+  --color-surface-primary: #fffdfd;
+  --color-surface-muted: #fce7f3;
+  --color-border-soft: rgba(190, 24, 93, 0.16);
+  --color-border-strong: rgba(236, 72, 153, 0.32);
+  --color-text-primary: #4a0f2d;
+  --color-text-secondary: #7a3457;
+  --color-text-tertiary: #9d5f80;
+  --color-rail-background: #9d174d;
+  --color-rail-text: #fff1f6;
+  --color-rail-text-muted: rgba(253, 226, 239, 0.78);
+  --color-accent: #f472b6;
+  --color-accent-soft: #fce7f3;
+  --color-accent-strong: #db2777;
+  --color-selected-foreground: #fff8fb;
+}
+
+:root[data-theme="red"] {
+  --color-app-background: #fef2f2;
+  --color-surface-primary: #fffdfd;
+  --color-surface-muted: #fee2e2;
+  --color-border-soft: rgba(220, 38, 38, 0.16);
+  --color-border-strong: rgba(248, 113, 113, 0.3);
+  --color-text-primary: #4b1212;
+  --color-text-secondary: #7f3030;
+  --color-text-tertiary: #a25656;
+  --color-rail-background: #991b1b;
+  --color-rail-text: #fff5f5;
+  --color-rail-text-muted: rgba(254, 226, 226, 0.78);
+  --color-accent: #f87171;
+  --color-accent-soft: #fee2e2;
+  --color-accent-strong: #dc2626;
+  --color-selected-foreground: #fff7f7;
+}
+
+:root[data-theme="yellow"] {
+  --color-app-background: #fffbeb;
+  --color-surface-primary: #fffdf7;
+  --color-surface-muted: #fef3c7;
+  --color-border-soft: rgba(202, 138, 4, 0.16);
+  --color-border-strong: rgba(251, 191, 36, 0.34);
+  --color-text-primary: #4a3711;
+  --color-text-secondary: #775921;
+  --color-text-tertiary: #9d7936;
+  --color-rail-background: #92400e;
+  --color-rail-text: #fffbeb;
+  --color-rail-text-muted: rgba(254, 243, 199, 0.78);
+  --color-accent: #fbbf24;
+  --color-accent-soft: #fef3c7;
+  --color-accent-strong: #d97706;
+  --color-selected-foreground: #fff8e1;
+}
