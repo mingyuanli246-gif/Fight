@@ -37,8 +37,12 @@ import type {
 } from "./types";
 import styles from "./NotebookWorkspace.module.css";
 
-const LEAVE_BLOCKED_MESSAGE =
+const SECTION_LEAVE_BLOCKED_MESSAGE =
   "当前笔记保存失败，已阻止切换。请先重试保存或复制内容后再操作。";
+const WINDOW_LEAVE_BLOCKED_MESSAGE =
+  "当前笔记仍有未保存内容，已阻止关闭或刷新。请先等待保存完成，或复制内容后再操作。";
+const RESTORE_BLOCKED_MESSAGE =
+  "恢复备份前保存失败，已阻止恢复操作。请先等待保存完成，或复制内容后再操作。";
 
 function getErrorMessage(error: unknown) {
   if (error instanceof Error) {
@@ -86,8 +90,15 @@ interface NotebookWorkspaceProps {
   openRequest: NoteOpenRequest | null;
 }
 
+export type NotebookLeaveReason =
+  | "section-change"
+  | "window-close"
+  | "before-unload"
+  | "restore-backup";
+
 export interface NotebookWorkspaceRef {
-  flushBeforeLeave: () => Promise<boolean>;
+  hasUnsavedChanges: () => boolean;
+  flushBeforeLeave: (reason?: NotebookLeaveReason) => Promise<boolean>;
 }
 
 export const NotebookWorkspace = forwardRef<
@@ -112,18 +123,37 @@ export const NotebookWorkspace = forwardRef<
   const noteEditorRef = useRef<NoteEditorPaneRef | null>(null);
   const lastHandledOpenRequestRef = useRef<number | null>(null);
 
-  async function flushCurrentNoteIfNeeded() {
-    if (
-      selectedEntity?.kind !== "note" ||
-      !noteEditorRef.current?.hasUnsavedChanges()
-    ) {
+  function hasUnsavedChanges() {
+    return (
+      selectedEntity?.kind === "note" &&
+      (noteEditorRef.current?.hasUnsavedChanges() ?? false)
+    );
+  }
+
+  function getLeaveBlockedMessage(reason: NotebookLeaveReason) {
+    switch (reason) {
+      case "window-close":
+      case "before-unload":
+        return WINDOW_LEAVE_BLOCKED_MESSAGE;
+      case "restore-backup":
+        return RESTORE_BLOCKED_MESSAGE;
+      case "section-change":
+      default:
+        return SECTION_LEAVE_BLOCKED_MESSAGE;
+    }
+  }
+
+  async function flushCurrentNoteIfNeeded(
+    reason: NotebookLeaveReason = "section-change",
+  ) {
+    if (!hasUnsavedChanges()) {
       return true;
     }
 
-    const saved = await noteEditorRef.current.flushPendingSave();
+    const saved = (await noteEditorRef.current?.flushPendingSave()) ?? true;
 
     if (!saved) {
-      setErrorMessage(LEAVE_BLOCKED_MESSAGE);
+      setErrorMessage(getLeaveBlockedMessage(reason));
       return false;
     }
 
@@ -134,8 +164,9 @@ export const NotebookWorkspace = forwardRef<
   useImperativeHandle(
     ref,
     () => ({
-      async flushBeforeLeave() {
-        return flushCurrentNoteIfNeeded();
+      hasUnsavedChanges,
+      async flushBeforeLeave(reason = "section-change") {
+        return flushCurrentNoteIfNeeded(reason);
       },
     }),
     [selectedEntity],

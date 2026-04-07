@@ -1,8 +1,13 @@
-import { useRef, useState, type RefObject } from "react";
+import { isTauri } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import type {
   NoteOpenRequest,
 } from "../../features/notebooks/types";
-import type { NotebookWorkspaceRef } from "../../features/notebooks/NotebookWorkspace";
+import type {
+  NotebookLeaveReason,
+  NotebookWorkspaceRef,
+} from "../../features/notebooks/NotebookWorkspace";
 import type { SettingsNotice } from "../../features/settings/types";
 import { GlobalSearch } from "./GlobalSearch";
 import { NavigationRail } from "../../features/navigation/NavigationRail";
@@ -27,6 +32,7 @@ function renderPage(
   onOpenNote: (target: Pick<NoteOpenRequest, "noteId" | "notebookId">) => void,
   settingsStartupNotice: SettingsNotice | null,
   notebookWorkspaceRef: RefObject<NotebookWorkspaceRef | null>,
+  beforeRestoreBackup: () => Promise<boolean>,
 ) {
   switch (section) {
     case "notebooks":
@@ -41,7 +47,12 @@ function renderPage(
     case "tagPlaza":
       return <TagPlazaPage onOpenNote={onOpenNote} />;
     case "settings":
-      return <SettingsPage startupNotice={settingsStartupNotice} />;
+      return (
+        <SettingsPage
+          startupNotice={settingsStartupNotice}
+          beforeRestoreBackup={beforeRestoreBackup}
+        />
+      );
     default:
       return (
         <NotebooksPage
@@ -60,7 +71,104 @@ export default function AppShell({
   settingsStartupNotice,
 }: AppShellProps) {
   const notebookWorkspaceRef = useRef<NotebookWorkspaceRef | null>(null);
+  const currentSectionRef = useRef(currentSection);
+  const allowNextWindowCloseRef = useRef(false);
   const [isSectionChanging, setIsSectionChanging] = useState(false);
+  currentSectionRef.current = currentSection;
+
+  async function guardNotebookBeforeDangerousLeave(
+    reason: NotebookLeaveReason,
+  ) {
+    if (currentSectionRef.current !== "notebooks") {
+      return true;
+    }
+
+    const notebookWorkspace = notebookWorkspaceRef.current;
+
+    if (!notebookWorkspace?.hasUnsavedChanges()) {
+      return true;
+    }
+
+    return notebookWorkspace.flushBeforeLeave(reason);
+  }
+
+  useEffect(() => {
+    function handleBeforeUnload(event: BeforeUnloadEvent) {
+      if (currentSectionRef.current !== "notebooks") {
+        return;
+      }
+
+      if (!notebookWorkspaceRef.current?.hasUnsavedChanges()) {
+        return;
+      }
+
+      event.preventDefault();
+      event.returnValue = "";
+      void guardNotebookBeforeDangerousLeave("before-unload");
+    }
+
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isTauri()) {
+      return;
+    }
+
+    const currentWindow = getCurrentWindow();
+    let isDisposed = false;
+    let unlisten: (() => void) | null = null;
+
+    void currentWindow
+      .onCloseRequested(async (event) => {
+        if (allowNextWindowCloseRef.current) {
+          allowNextWindowCloseRef.current = false;
+          return;
+        }
+
+        if (
+          currentSectionRef.current !== "notebooks" ||
+          !notebookWorkspaceRef.current?.hasUnsavedChanges()
+        ) {
+          return;
+        }
+
+        event.preventDefault();
+        const canClose = await guardNotebookBeforeDangerousLeave("window-close");
+
+        if (!canClose) {
+          return;
+        }
+
+        allowNextWindowCloseRef.current = true;
+
+        try {
+          await currentWindow.destroy();
+        } catch (error) {
+          allowNextWindowCloseRef.current = false;
+          console.error("[app] 关闭窗口失败", error);
+        }
+      })
+      .then((nextUnlisten) => {
+        if (isDisposed) {
+          nextUnlisten();
+          return;
+        }
+
+        unlisten = nextUnlisten;
+      })
+      .catch((error) => {
+        console.error("[app] 注册窗口关闭保护失败", error);
+      });
+
+    return () => {
+      isDisposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   async function requestSectionChange(nextSection: AppSection) {
     if (nextSection === currentSection || isSectionChanging) {
@@ -71,8 +179,7 @@ export default function AppShell({
 
     try {
       if (currentSection === "notebooks" && nextSection !== "notebooks") {
-        const canLeave =
-          (await notebookWorkspaceRef.current?.flushBeforeLeave()) ?? true;
+        const canLeave = await guardNotebookBeforeDangerousLeave("section-change");
 
         if (!canLeave) {
           return;
@@ -105,6 +212,7 @@ export default function AppShell({
             onOpenNote,
             settingsStartupNotice,
             notebookWorkspaceRef,
+            () => guardNotebookBeforeDangerousLeave("restore-backup"),
           )}
         </div>
       </main>

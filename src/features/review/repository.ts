@@ -121,6 +121,17 @@ async function createReviewPlanCommand(name: string, offsets: number[]) {
   });
 }
 
+async function renameReviewPlanCommand(planId: number, name: string) {
+  return invoke<ReviewPlanWithSteps>("rename_review_plan_tx", {
+    planId,
+    name,
+  });
+}
+
+async function deleteReviewPlanCommand(planId: number) {
+  return invoke<void>("delete_review_plan_tx", { planId });
+}
+
 async function bindReviewPlanToNoteCommand(
   noteId: number,
   planId: number,
@@ -135,6 +146,13 @@ async function bindReviewPlanToNoteCommand(
 
 async function removeReviewPlanBindingCommand(noteId: number) {
   return invoke<void>("remove_review_plan_binding_tx", { noteId });
+}
+
+async function setReviewTaskCompletedCommand(taskId: number, completed: boolean) {
+  return invoke<ReviewTask>("set_review_task_completed_tx", {
+    taskId,
+    completed,
+  });
 }
 
 function normalizeReviewPlanName(value: string) {
@@ -346,27 +364,6 @@ async function fetchBindingDetailByNoteId(
   };
 }
 
-async function fetchReviewTaskById(database: Database, taskId: number) {
-  return selectOne<ReviewTaskBaseRow>(
-    database,
-    `
-      SELECT
-        id,
-        note_id AS noteId,
-        plan_id AS planId,
-        due_date AS dueDate,
-        step_index AS stepIndex,
-        is_completed AS isCompleted,
-        completed_at AS completedAt,
-        created_at AS createdAt
-      FROM review_tasks
-      WHERE id = $1
-    `,
-    [taskId],
-    "目标复习任务不存在。",
-  );
-}
-
 export async function listReviewPlans() {
   return withReviewError("读取复习方案", async () => {
     const database = await getNotebookDatabase();
@@ -424,36 +421,16 @@ export async function createReviewPlan(name: string, offsets: number[]) {
 
 export async function renameReviewPlan(id: number, name: string) {
   return withReviewError("重命名复习方案", async () => {
-    const database = await getNotebookDatabase();
     const normalizedName = normalizeReviewPlanName(name);
-    const result = await database.execute(
-      `
-        UPDATE review_plans
-        SET name = $1, updated_at = CURRENT_TIMESTAMP
-        WHERE id = $2
-      `,
-      [normalizedName, id],
-    );
-
-    if (result.rowsAffected === 0) {
-      throw new ReviewValidationError("目标复习方案不存在。");
-    }
-
-    return fetchReviewPlanWithStepsById(database, id);
+    await getNotebookDatabase();
+    return renameReviewPlanCommand(id, normalizedName);
   });
 }
 
 export async function deleteReviewPlan(id: number) {
   return withReviewError("删除复习方案", async () => {
-    const database = await getNotebookDatabase();
-    const result = await database.execute(
-      "DELETE FROM review_plans WHERE id = $1",
-      [id],
-    );
-
-    if (result.rowsAffected === 0) {
-      throw new ReviewValidationError("目标复习方案不存在。");
-    }
+    await getNotebookDatabase();
+    await deleteReviewPlanCommand(id);
   });
 }
 
@@ -543,22 +520,7 @@ export async function listReviewTasksByMonth(
 
 export async function setReviewTaskCompleted(taskId: number, completed: boolean) {
   return withReviewError(completed ? "标记复习完成" : "取消复习完成", async () => {
-    const database = await getNotebookDatabase();
-    const result = await database.execute(
-      `
-        UPDATE review_tasks
-        SET
-          is_completed = $1,
-          completed_at = CASE WHEN $1 = 1 THEN CURRENT_TIMESTAMP ELSE NULL END
-        WHERE id = $2
-      `,
-      [completed ? 1 : 0, taskId],
-    );
-
-    if (result.rowsAffected === 0) {
-      throw new ReviewValidationError("目标复习任务不存在。");
-    }
-
-    return mapReviewTask(await fetchReviewTaskById(database, taskId));
+    await getNotebookDatabase();
+    return setReviewTaskCompletedCommand(taskId, completed);
   });
 }

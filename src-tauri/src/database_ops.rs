@@ -22,14 +22,7 @@ const APP_META_KEY_NOTE_SEARCH_META_VERSION: &str = "note_search_meta_version";
 const APP_META_KEY_NOTE_SEARCH_INITIALIZED: &str = "note_search_initialized";
 const APP_META_KEY_NOTE_SEARCH_LAST_REBUILD_AT: &str = "note_search_last_rebuild_at";
 const TAG_COLOR_PALETTE: [&str; 8] = [
-    "#2563EB",
-    "#DC2626",
-    "#CA8A04",
-    "#059669",
-    "#7C3AED",
-    "#DB2777",
-    "#0891B2",
-    "#EA580C",
+    "#2563EB", "#DC2626", "#CA8A04", "#059669", "#7C3AED", "#DB2777", "#0891B2", "#EA580C",
 ];
 
 #[derive(Debug, Serialize)]
@@ -88,6 +81,19 @@ pub struct NoteReviewBindingRecord {
 pub struct NoteReviewBindingDetailRecord {
     pub binding: NoteReviewBindingRecord,
     pub plan: ReviewPlanWithStepsRecord,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewTaskRecord {
+    pub id: i64,
+    pub note_id: i64,
+    pub plan_id: i64,
+    pub due_date: String,
+    pub step_index: i64,
+    pub is_completed: bool,
+    pub completed_at: Option<String>,
+    pub created_at: String,
 }
 
 fn classify_database_error(message: &str) -> &'static str {
@@ -175,9 +181,11 @@ fn ensure_note_search_table(connection: &Connection) -> Result<(), String> {
 
 fn get_app_meta_value(connection: &Connection, key: &str) -> Result<Option<String>, String> {
     connection
-        .query_row("SELECT value FROM app_meta WHERE key = ?1 LIMIT 1", [key], |row| {
-            row.get::<_, String>(0)
-        })
+        .query_row(
+            "SELECT value FROM app_meta WHERE key = ?1 LIMIT 1",
+            [key],
+            |row| row.get::<_, String>(0),
+        )
         .optional()
         .map_err(|error| to_command_error("读取 app_meta", error))
 }
@@ -354,7 +362,11 @@ fn fetch_note_by_id(connection: &Connection, note_id: i64) -> Result<NoteRecord,
 
 fn ensure_note_exists(connection: &Connection, note_id: i64) -> Result<(), String> {
     let exists = connection
-        .query_row("SELECT 1 FROM notes WHERE id = ?1 LIMIT 1", [note_id], |_| Ok(()))
+        .query_row(
+            "SELECT 1 FROM notes WHERE id = ?1 LIMIT 1",
+            [note_id],
+            |_| Ok(()),
+        )
         .optional()
         .map_err(|error| to_command_error("校验文件是否存在", error))?;
 
@@ -684,6 +696,42 @@ fn fetch_binding_row_by_note_id(
         .map_err(|error| to_command_error("读取复习绑定", error))
 }
 
+fn fetch_review_task_by_id(
+    connection: &Connection,
+    task_id: i64,
+) -> Result<ReviewTaskRecord, String> {
+    connection
+        .query_row(
+            "
+              SELECT
+                id,
+                note_id,
+                plan_id,
+                due_date,
+                step_index,
+                is_completed,
+                completed_at,
+                created_at
+              FROM review_tasks
+              WHERE id = ?1
+            ",
+            [task_id],
+            |row| {
+                Ok(ReviewTaskRecord {
+                    id: row.get(0)?,
+                    note_id: row.get(1)?,
+                    plan_id: row.get(2)?,
+                    due_date: row.get(3)?,
+                    step_index: row.get(4)?,
+                    is_completed: row.get::<_, i64>(5)? == 1,
+                    completed_at: row.get(6)?,
+                    created_at: row.get(7)?,
+                })
+            },
+        )
+        .map_err(|error| to_command_error("读取复习任务", error))
+}
+
 fn clear_pending_tasks_for_note(connection: &Connection, note_id: i64) -> Result<(), String> {
     connection
         .execute(
@@ -743,7 +791,90 @@ fn create_review_plan_tx_internal(
     fetch_review_plan_with_steps(connection, plan_id)
 }
 
-fn delete_notebook_tx_internal(connection: &mut Connection, notebook_id: i64) -> Result<(), String> {
+fn rename_review_plan_tx_internal(
+    connection: &mut Connection,
+    plan_id: i64,
+    name: &str,
+) -> Result<ReviewPlanWithStepsRecord, String> {
+    let transaction = connection
+        .transaction()
+        .map_err(|error| to_command_error("开启重命名复习方案事务", error))?;
+    let updated = transaction
+        .execute(
+            "
+              UPDATE review_plans
+              SET name = ?1, updated_at = CURRENT_TIMESTAMP
+              WHERE id = ?2
+            ",
+            params![name, plan_id],
+        )
+        .map_err(|error| to_command_error("重命名复习方案", error))?;
+
+    if updated == 0 {
+        return Err("目标复习方案不存在。".to_string());
+    }
+
+    transaction
+        .commit()
+        .map_err(|error| to_command_error("提交重命名复习方案事务", error))?;
+
+    fetch_review_plan_with_steps(connection, plan_id)
+}
+
+fn delete_review_plan_tx_internal(connection: &mut Connection, plan_id: i64) -> Result<(), String> {
+    let transaction = connection
+        .transaction()
+        .map_err(|error| to_command_error("开启删除复习方案事务", error))?;
+    let deleted = transaction
+        .execute("DELETE FROM review_plans WHERE id = ?1", [plan_id])
+        .map_err(|error| to_command_error("删除复习方案", error))?;
+
+    if deleted == 0 {
+        return Err("目标复习方案不存在。".to_string());
+    }
+
+    transaction
+        .commit()
+        .map_err(|error| to_command_error("提交删除复习方案事务", error))?;
+    Ok(())
+}
+
+fn set_review_task_completed_tx_internal(
+    connection: &mut Connection,
+    task_id: i64,
+    completed: bool,
+) -> Result<ReviewTaskRecord, String> {
+    let transaction = connection
+        .transaction()
+        .map_err(|error| to_command_error("开启更新复习任务事务", error))?;
+    let updated = transaction
+        .execute(
+            "
+              UPDATE review_tasks
+              SET
+                is_completed = ?1,
+                completed_at = CASE WHEN ?1 = 1 THEN CURRENT_TIMESTAMP ELSE NULL END
+              WHERE id = ?2
+            ",
+            params![if completed { 1_i64 } else { 0_i64 }, task_id],
+        )
+        .map_err(|error| to_command_error("更新复习任务状态", error))?;
+
+    if updated == 0 {
+        return Err("目标复习任务不存在。".to_string());
+    }
+
+    transaction
+        .commit()
+        .map_err(|error| to_command_error("提交更新复习任务事务", error))?;
+
+    fetch_review_task_by_id(connection, task_id)
+}
+
+fn delete_notebook_tx_internal(
+    connection: &mut Connection,
+    notebook_id: i64,
+) -> Result<(), String> {
     ensure_note_search_ready_internal(connection)?;
 
     let transaction = connection
@@ -1017,7 +1148,10 @@ fn remove_review_plan_binding_tx_internal(
         .map_err(|error| to_command_error("开启移除复习绑定事务", error))?;
     ensure_note_exists(&transaction, note_id)?;
     transaction
-        .execute("DELETE FROM note_review_bindings WHERE note_id = ?1", [note_id])
+        .execute(
+            "DELETE FROM note_review_bindings WHERE note_id = ?1",
+            [note_id],
+        )
         .map_err(|error| to_command_error("删除复习绑定", error))?;
     clear_pending_tasks_for_note(&transaction, note_id)?;
     transaction
@@ -1026,47 +1160,271 @@ fn remove_review_plan_binding_tx_internal(
     Ok(())
 }
 
+fn push_normalized_text(text: &mut String, last_was_space: &mut bool, value: &str) {
+    for character in value.chars() {
+        if character == '\u{00A0}' || character.is_whitespace() {
+            if !*last_was_space {
+                text.push(' ');
+                *last_was_space = true;
+            }
+        } else {
+            text.push(character);
+            *last_was_space = false;
+        }
+    }
+}
+
+fn push_separator(text: &mut String, last_was_space: &mut bool) {
+    if !text.is_empty() && !*last_was_space {
+        text.push(' ');
+        *last_was_space = true;
+    }
+}
+
+fn decode_html_entity(entity: &str) -> Option<String> {
+    match entity {
+        "amp" => Some("&".to_string()),
+        "lt" => Some("<".to_string()),
+        "gt" => Some(">".to_string()),
+        "quot" => Some("\"".to_string()),
+        "apos" => Some("'".to_string()),
+        "nbsp" => Some(" ".to_string()),
+        _ if entity.starts_with("#x") || entity.starts_with("#X") => {
+            u32::from_str_radix(&entity[2..], 16)
+                .ok()
+                .and_then(char::from_u32)
+                .map(|character| character.to_string())
+        }
+        _ if entity.starts_with('#') => entity[1..]
+            .parse::<u32>()
+            .ok()
+            .and_then(char::from_u32)
+            .map(|character| character.to_string()),
+        _ => None,
+    }
+}
+
+fn decode_html_entities(value: &str) -> String {
+    let mut decoded = String::with_capacity(value.len());
+    let mut characters = value.chars().peekable();
+
+    while let Some(character) = characters.next() {
+        if character != '&' {
+            decoded.push(character);
+            continue;
+        }
+
+        let mut entity = String::new();
+        let mut consumed_semicolon = false;
+
+        while let Some(next_character) = characters.peek().copied() {
+            if next_character == ';' {
+                consumed_semicolon = true;
+                characters.next();
+                break;
+            }
+
+            if next_character == '&'
+                || next_character == '<'
+                || next_character == '>'
+                || next_character.is_whitespace()
+                || entity.len() >= 32
+            {
+                break;
+            }
+
+            entity.push(next_character);
+            characters.next();
+        }
+
+        if consumed_semicolon {
+            if let Some(entity_value) = decode_html_entity(&entity) {
+                decoded.push_str(&entity_value);
+                continue;
+            }
+
+            decoded.push('&');
+            decoded.push_str(&entity);
+            decoded.push(';');
+            continue;
+        }
+
+        decoded.push('&');
+        decoded.push_str(&entity);
+    }
+
+    decoded
+}
+
+fn extract_tag_name(tag: &str) -> Option<String> {
+    let trimmed = tag.trim();
+    let inner = trimmed.strip_prefix('<')?.strip_suffix('>')?.trim();
+    let inner = inner
+        .strip_prefix('/')
+        .unwrap_or(inner)
+        .trim_start_matches(|character: char| character.is_whitespace());
+
+    let name: String = inner
+        .chars()
+        .take_while(|character| character.is_ascii_alphanumeric())
+        .collect();
+
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_ascii_lowercase())
+    }
+}
+
+fn is_closing_tag(tag: &str) -> bool {
+    let trimmed = tag.trim_start();
+    trimmed.starts_with("</")
+}
+
+fn is_separator_tag(tag_name: &str) -> bool {
+    matches!(
+        tag_name,
+        "p" | "div"
+            | "li"
+            | "ul"
+            | "ol"
+            | "blockquote"
+            | "section"
+            | "article"
+            | "header"
+            | "footer"
+            | "aside"
+            | "br"
+            | "hr"
+            | "tr"
+            | "td"
+            | "th"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+    )
+}
+
+fn extract_tag_attribute(tag: &str, name: &str) -> Option<String> {
+    let name_position = tag.find(name)?;
+    let remainder = &tag[name_position + name.len()..];
+    let remainder = remainder.trim_start();
+    let remainder = remainder.strip_prefix('=')?.trim_start();
+
+    if let Some(rest) = remainder.strip_prefix('"') {
+        let value_end = rest.find('"')?;
+        return Some(rest[..value_end].to_string());
+    }
+
+    if let Some(rest) = remainder.strip_prefix('\'') {
+        let value_end = rest.find('\'')?;
+        return Some(rest[..value_end].to_string());
+    }
+
+    let value_end = remainder
+        .find(|character: char| character.is_whitespace() || character == '>')
+        .unwrap_or(remainder.len());
+    Some(remainder[..value_end].to_string())
+}
+
+fn extract_math_latex_from_tag(tag: &str) -> Option<String> {
+    if !tag.contains("data-note-math") {
+        return None;
+    }
+
+    let latex = extract_tag_attribute(tag, "data-latex")?;
+    Some(decode_html_entities(&latex).trim().to_string())
+}
+
 fn extract_indexable_plain_text(content: &str) -> String {
     let mut text = String::with_capacity(content.len());
-    let mut in_tag = false;
     let mut last_was_space = false;
+    let mut characters = content.chars().peekable();
+    let mut skip_math_tag_name: Option<String> = None;
 
-    for character in content.chars() {
-        match character {
-            '<' => {
-                in_tag = true;
-                if !last_was_space {
-                    text.push(' ');
-                    last_was_space = true;
+    while let Some(character) = characters.next() {
+        if character == '<' {
+            let mut tag = String::from("<");
+
+            while let Some(next_character) = characters.next() {
+                tag.push(next_character);
+                if next_character == '>' {
+                    break;
                 }
             }
-            '>' => {
-                in_tag = false;
-            }
-            _ if in_tag => {}
-            '&' => {
-                if !last_was_space {
-                    text.push(' ');
-                    last_was_space = true;
+
+            if let Some(tag_name) = extract_tag_name(&tag) {
+                if is_separator_tag(&tag_name) {
+                    push_separator(&mut text, &mut last_was_space);
+                }
+
+                if is_closing_tag(&tag) {
+                    if skip_math_tag_name.as_deref() == Some(tag_name.as_str()) {
+                        skip_math_tag_name = None;
+                    }
+                    continue;
+                }
+
+                if skip_math_tag_name.is_none() {
+                    if let Some(latex) = extract_math_latex_from_tag(&tag) {
+                        push_separator(&mut text, &mut last_was_space);
+                        push_normalized_text(&mut text, &mut last_was_space, &latex);
+                        skip_math_tag_name = Some(tag_name);
+                    }
                 }
             }
-            '\n' | '\r' | '\t' => {
-                if !last_was_space {
-                    text.push(' ');
-                    last_was_space = true;
-                }
-            }
-            character if character.is_whitespace() => {
-                if !last_was_space {
-                    text.push(' ');
-                    last_was_space = true;
-                }
-            }
-            _ => {
-                text.push(character);
-                last_was_space = false;
-            }
+
+            continue;
         }
+
+        if skip_math_tag_name.is_some() {
+            continue;
+        }
+
+        if character == '&' {
+            let mut entity = String::new();
+            let mut consumed_semicolon = false;
+
+            while let Some(next_character) = characters.peek().copied() {
+                if next_character == ';' {
+                    consumed_semicolon = true;
+                    characters.next();
+                    break;
+                }
+
+                if next_character == '<'
+                    || next_character == '>'
+                    || next_character.is_whitespace()
+                    || entity.len() >= 32
+                {
+                    break;
+                }
+
+                entity.push(next_character);
+                characters.next();
+            }
+
+            if consumed_semicolon {
+                if let Some(decoded) = decode_html_entity(&entity) {
+                    push_normalized_text(&mut text, &mut last_was_space, &decoded);
+                    continue;
+                }
+
+                push_normalized_text(&mut text, &mut last_was_space, &format!("&{entity};"));
+                continue;
+            }
+
+            push_normalized_text(&mut text, &mut last_was_space, "&");
+            push_normalized_text(&mut text, &mut last_was_space, &entity);
+            continue;
+        }
+
+        let mut literal = String::new();
+        literal.push(character);
+        push_normalized_text(&mut text, &mut last_was_space, &literal);
     }
 
     text.trim().to_string()
@@ -1106,6 +1464,22 @@ pub fn create_review_plan_tx(
 ) -> Result<ReviewPlanWithStepsRecord, String> {
     let mut connection = open_database_connection(&app)?;
     create_review_plan_tx_internal(&mut connection, &name, &offsets)
+}
+
+#[tauri::command]
+pub fn rename_review_plan_tx(
+    app: AppHandle,
+    plan_id: i64,
+    name: String,
+) -> Result<ReviewPlanWithStepsRecord, String> {
+    let mut connection = open_database_connection(&app)?;
+    rename_review_plan_tx_internal(&mut connection, plan_id, &name)
+}
+
+#[tauri::command]
+pub fn delete_review_plan_tx(app: AppHandle, plan_id: i64) -> Result<(), String> {
+    let mut connection = open_database_connection(&app)?;
+    delete_review_plan_tx_internal(&mut connection, plan_id)
 }
 
 #[tauri::command]
@@ -1174,26 +1548,37 @@ pub fn bind_review_plan_to_note_tx(
 }
 
 #[tauri::command]
-pub fn remove_review_plan_binding_tx(
-    app: AppHandle,
-    note_id: i64,
-) -> Result<(), String> {
+pub fn remove_review_plan_binding_tx(app: AppHandle, note_id: i64) -> Result<(), String> {
     let mut connection = open_database_connection(&app)?;
     remove_review_plan_binding_tx_internal(&mut connection, note_id)
+}
+
+#[tauri::command]
+pub fn set_review_task_completed_tx(
+    app: AppHandle,
+    task_id: i64,
+    completed: bool,
+) -> Result<ReviewTaskRecord, String> {
+    let mut connection = open_database_connection(&app)?;
+    set_review_task_completed_tx_internal(&mut connection, task_id, completed)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         add_tag_to_note_by_name_tx_internal, bind_review_plan_to_note_tx_internal,
-        create_note_tx_internal, create_review_plan_tx_internal, ensure_app_meta_table,
-        ensure_note_search_ready_internal, ensure_note_search_table,
-        rebuild_note_search_index_internal,
+        create_note_tx_internal, create_review_plan_tx_internal, delete_review_plan_tx_internal,
+        ensure_app_meta_table, ensure_note_search_ready_internal, ensure_note_search_table,
+        extract_indexable_plain_text, rebuild_note_search_index_internal,
+        rename_review_plan_tx_internal, set_review_task_completed_tx_internal,
     };
     use rusqlite::Connection;
 
     fn test_connection() -> Connection {
         let connection = Connection::open_in_memory().expect("open in-memory sqlite");
+        connection
+            .pragma_update(None, "foreign_keys", "ON")
+            .expect("enable foreign keys");
         connection
             .execute_batch(
                 "
@@ -1211,7 +1596,9 @@ mod tests {
                   name TEXT NOT NULL,
                   sort_order INTEGER NOT NULL DEFAULT 0,
                   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  FOREIGN KEY (notebook_id) REFERENCES notebooks(id) ON DELETE CASCADE,
+                  FOREIGN KEY (parent_folder_id) REFERENCES folders(id) ON DELETE CASCADE
                 );
                 CREATE TABLE notes (
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1220,7 +1607,9 @@ mod tests {
                   title TEXT NOT NULL,
                   content_plaintext TEXT,
                   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  FOREIGN KEY (notebook_id) REFERENCES notebooks(id) ON DELETE CASCADE,
+                  FOREIGN KEY (folder_id) REFERENCES folders(id) ON DELETE SET NULL
                 );
                 CREATE TABLE review_plans (
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1232,7 +1621,8 @@ mod tests {
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
                   plan_id INTEGER NOT NULL,
                   step_index INTEGER NOT NULL,
-                  offset_days INTEGER NOT NULL
+                  offset_days INTEGER NOT NULL,
+                  FOREIGN KEY (plan_id) REFERENCES review_plans(id) ON DELETE CASCADE
                 );
                 CREATE TABLE tags (
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1245,14 +1635,18 @@ mod tests {
                   note_id INTEGER NOT NULL,
                   tag_id INTEGER NOT NULL,
                   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                  PRIMARY KEY (note_id, tag_id)
+                  PRIMARY KEY (note_id, tag_id),
+                  FOREIGN KEY (note_id) REFERENCES notes(id) ON DELETE CASCADE,
+                  FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
                 );
                 CREATE TABLE note_review_bindings (
                   note_id INTEGER PRIMARY KEY,
                   plan_id INTEGER NOT NULL,
                   start_date TEXT NOT NULL,
                   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  FOREIGN KEY (note_id) REFERENCES notes(id) ON DELETE CASCADE,
+                  FOREIGN KEY (plan_id) REFERENCES review_plans(id) ON DELETE CASCADE
                 );
                 CREATE TABLE review_tasks (
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1263,7 +1657,9 @@ mod tests {
                   is_completed INTEGER NOT NULL DEFAULT 0,
                   completed_at TEXT,
                   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                  UNIQUE(note_id, plan_id, step_index, due_date)
+                  UNIQUE(note_id, plan_id, step_index, due_date),
+                  FOREIGN KEY (note_id) REFERENCES notes(id) ON DELETE CASCADE,
+                  FOREIGN KEY (plan_id) REFERENCES review_plans(id) ON DELETE CASCADE
                 );
                 ",
             )
@@ -1318,6 +1714,56 @@ mod tests {
     }
 
     #[test]
+    fn extract_indexable_plain_text_keeps_math_source_and_decodes_entities() {
+        let content =
+            "<p>矩阵 <span data-note-math=\"inline\" data-latex=\"a &amp; b\">a &amp; b</span> 展开</p>";
+
+        let extracted = extract_indexable_plain_text(content);
+
+        assert!(extracted.contains("矩阵"));
+        assert!(extracted.contains("a & b"));
+        assert!(extracted.contains("展开"));
+    }
+
+    #[test]
+    fn rebuild_note_search_index_indexes_math_source() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (?1, ?2, ?3, ?4)",
+                (
+                    1_i64,
+                    1_i64,
+                    "公式文件",
+                    "<p>能量公式 <span data-note-math=\"inline\" data-latex=\"E=mc^3\">E=mc^3</span></p><div data-note-math=\"block\" data-latex=\"\\frac{a}{b}\">\\frac{a}{b}</div>",
+                ),
+            )
+            .expect("insert note");
+
+        rebuild_note_search_index_internal(&mut connection).expect("rebuild note_search");
+
+        let body_plaintext: String = connection
+            .query_row(
+                "SELECT body_plaintext FROM note_search WHERE rowid = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read note_search body_plaintext");
+
+        assert!(body_plaintext.contains("E=mc^3"));
+        assert!(body_plaintext.contains("\\frac{a}{b}"));
+    }
+
+    #[test]
     fn create_review_plan_path_can_commit_three_times() {
         let mut connection = test_connection();
 
@@ -1326,8 +1772,8 @@ mod tests {
             ("方案二", vec![1_i64, 4]),
             ("方案三", vec![2_i64, 7]),
         ] {
-            let plan =
-                create_review_plan_tx_internal(&mut connection, name, &offsets).expect("create plan");
+            let plan = create_review_plan_tx_internal(&mut connection, name, &offsets)
+                .expect("create plan");
             assert_eq!(plan.steps.len(), offsets.len());
         }
     }
@@ -1374,8 +1820,7 @@ mod tests {
                 [],
             )
             .expect("insert note");
-        create_review_plan_tx_internal(&mut connection, "方案一", &[0, 3])
-            .expect("create plan");
+        create_review_plan_tx_internal(&mut connection, "方案一", &[0, 3]).expect("create plan");
 
         let first = bind_review_plan_to_note_tx_internal(&mut connection, 1, 1, "2026-04-07")
             .expect("bind review plan");
@@ -1422,5 +1867,94 @@ mod tests {
         assert_eq!(first.len(), 1);
         assert_eq!(second.len(), 1);
         assert_eq!(relation_count, 1);
+    }
+
+    #[test]
+    fn rename_review_plan_path_can_commit_three_times() {
+        let mut connection = test_connection();
+        create_review_plan_tx_internal(&mut connection, "方案一", &[0, 3]).expect("create plan");
+
+        for next_name in ["方案一-改", "方案一-再改", "方案一-最终"] {
+            let updated =
+                rename_review_plan_tx_internal(&mut connection, 1, next_name).expect("rename plan");
+            assert_eq!(updated.name, next_name);
+            assert_eq!(updated.steps.len(), 2);
+        }
+    }
+
+    #[test]
+    fn delete_review_plan_path_cascades_related_rows() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', NULL)",
+                [],
+            )
+            .expect("insert note");
+        create_review_plan_tx_internal(&mut connection, "方案一", &[0, 3]).expect("create plan");
+        bind_review_plan_to_note_tx_internal(&mut connection, 1, 1, "2026-04-07")
+            .expect("bind review plan");
+
+        delete_review_plan_tx_internal(&mut connection, 1).expect("delete review plan");
+
+        let step_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM review_plan_steps", [], |row| {
+                row.get(0)
+            })
+            .expect("count review plan steps");
+        let binding_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM note_review_bindings", [], |row| {
+                row.get(0)
+            })
+            .expect("count note review bindings");
+        let task_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM review_tasks", [], |row| row.get(0))
+            .expect("count review tasks");
+        let repeated_delete = delete_review_plan_tx_internal(&mut connection, 1)
+            .expect_err("delete missing review plan should fail");
+
+        assert_eq!(step_count, 0);
+        assert_eq!(binding_count, 0);
+        assert_eq!(task_count, 0);
+        assert_eq!(repeated_delete, "目标复习方案不存在。");
+    }
+
+    #[test]
+    fn set_review_task_completed_path_can_toggle_five_times() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', NULL)",
+                [],
+            )
+            .expect("insert note");
+        create_review_plan_tx_internal(&mut connection, "方案一", &[0, 3]).expect("create plan");
+        bind_review_plan_to_note_tx_internal(&mut connection, 1, 1, "2026-04-07")
+            .expect("bind review plan");
+
+        for completed in [true, false, true, false, true] {
+            let task = set_review_task_completed_tx_internal(&mut connection, 1, completed)
+                .expect("toggle review task");
+            assert_eq!(task.is_completed, completed);
+            assert_eq!(task.completed_at.is_some(), completed);
+        }
     }
 }

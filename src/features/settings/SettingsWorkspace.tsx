@@ -21,9 +21,12 @@ import type {
 import styles from "./SettingsWorkspace.module.css";
 
 const RETENTION_OPTIONS = [3, 5, 10] as const;
+const RESTORE_BLOCKED_MESSAGE =
+  "恢复备份前保存失败，已阻止恢复操作。请先等待保存完成，或复制内容后再操作。";
 
 interface SettingsWorkspaceProps {
   startupNotice: SettingsNotice | null;
+  beforeRestoreBackup: () => Promise<boolean>;
 }
 
 function formatBytes(value: number) {
@@ -61,7 +64,10 @@ function buildNotice(
   return { tone, message };
 }
 
-export function SettingsWorkspace({ startupNotice }: SettingsWorkspaceProps) {
+export function SettingsWorkspace({
+  startupNotice,
+  beforeRestoreBackup,
+}: SettingsWorkspaceProps) {
   const themeContext = useContext(ThemeContext);
 
   if (!themeContext) {
@@ -261,7 +267,25 @@ export function SettingsWorkspace({ startupNotice }: SettingsWorkspaceProps) {
   }
 
   async function handleRestoreBackup(fileName: string) {
+    try {
+      const canRestore = await beforeRestoreBackup();
+
+      if (!canRestore) {
+        setNotice(buildNotice("error", RESTORE_BLOCKED_MESSAGE));
+        return;
+      }
+    } catch (error) {
+      setNotice(
+        buildNotice(
+          "error",
+          getErrorMessage(error, RESTORE_BLOCKED_MESSAGE),
+        ),
+      );
+      return;
+    }
+
     setOperationState("restoring");
+    setConfirmRestoreFileName(null);
     setNotice(
       buildNotice(
         "warning",

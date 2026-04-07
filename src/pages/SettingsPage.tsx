@@ -4,9 +4,13 @@ import styles from "./PageLayout.module.css";
 
 interface SettingsPageProps {
   startupNotice: SettingsNotice | null;
+  beforeRestoreBackup: () => Promise<boolean>;
 }
 
-export function SettingsPage({ startupNotice }: SettingsPageProps) {
+export function SettingsPage({
+  startupNotice,
+  beforeRestoreBackup,
+}: SettingsPageProps) {
   return (
     <section className={styles.page}>
       <header className={styles.header}>
@@ -17,7 +21,10 @@ export function SettingsPage({ startupNotice }: SettingsPageProps) {
         </p>
       </header>
 
-      <SettingsWorkspace startupNotice={startupNotice} />
+      <SettingsWorkspace
+        startupNotice={startupNotice}
+        beforeRestoreBackup={beforeRestoreBackup}
+      />
     </section>
   );
 }

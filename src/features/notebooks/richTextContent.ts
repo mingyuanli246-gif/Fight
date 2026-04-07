@@ -1,7 +1,14 @@
+import {
+  NOTE_MATH_SELECTOR,
+  readMathLatexFromElement,
+} from "./mathSerialization";
+
 const KNOWN_RICH_TEXT_ROOT_PATTERN =
   /^<(p|h1|h2|ul|ol|li|blockquote)(\s|>)/i;
 const KNOWN_RICH_TEXT_INLINE_PATTERN = /<(strong|u|br)\b|<\/(strong|u)>/i;
-const SEARCHABLE_BLOCK_SELECTOR = "h1, h2, h3, h4, h5, h6, p, li, blockquote";
+const KNOWN_RICH_TEXT_MATH_PATTERN = /^<(span|div)\b[^>]*data-note-math=/i;
+const SEARCHABLE_BLOCK_SELECTOR =
+  "h1, h2, h3, h4, h5, h6, p, li, blockquote, [data-note-math='block']";
 const EMPTY_EDITOR_DOCUMENT_HTML = "<p></p>";
 
 function createHtmlDocument(content: string) {
@@ -24,6 +31,22 @@ function normalizeText(value: string) {
     .trim();
 }
 
+function normalizeMathElements(document: Document) {
+  const mathElements = Array.from(
+    document.body.querySelectorAll(NOTE_MATH_SELECTOR),
+  );
+
+  for (const element of mathElements) {
+    if (!(element instanceof HTMLElement)) {
+      continue;
+    }
+
+    const latex = readMathLatexFromElement(element);
+    element.setAttribute("data-latex", latex);
+    element.textContent = latex;
+  }
+}
+
 function looksLikeStoredRichTextHtml(value: string) {
   const trimmed = value.trim();
 
@@ -33,7 +56,8 @@ function looksLikeStoredRichTextHtml(value: string) {
 
   return (
     KNOWN_RICH_TEXT_ROOT_PATTERN.test(trimmed) ||
-    KNOWN_RICH_TEXT_INLINE_PATTERN.test(trimmed)
+    KNOWN_RICH_TEXT_INLINE_PATTERN.test(trimmed) ||
+    KNOWN_RICH_TEXT_MATH_PATTERN.test(trimmed)
   );
 }
 
@@ -64,6 +88,7 @@ export function normalizeEditorHtmlForStorage(html: string) {
   }
 
   const document = createHtmlDocument(trimmed);
+  normalizeMathElements(document);
   const textContent = normalizeText(document.body.textContent ?? "");
 
   if (!textContent) {
@@ -90,8 +115,8 @@ export function toEditorDocumentContent(storedContent: string | null) {
   return normalizedHtml || EMPTY_EDITOR_DOCUMENT_HTML;
 }
 
-// 未来接入 FTS 时，不直接索引 HTML，而是先从当前存库内容中提取纯文本。
-// 该函数保留段落/列表的换行边界，供后续搜索索引层复用。
+// 当前搜索索引的权威提取实现位于 Rust command 中。
+// 这里保留等价语义的前端辅助函数，供后续编辑器扩展和开发态调试复用。
 export function extractIndexablePlainText(storedContent: string | null) {
   if (!storedContent) {
     return "";
@@ -102,6 +127,7 @@ export function extractIndexablePlainText(storedContent: string | null) {
   }
 
   const document = createHtmlDocument(storedContent);
+  normalizeMathElements(document);
   const blockTexts = Array.from(
     document.body.querySelectorAll(SEARCHABLE_BLOCK_SELECTOR),
   )

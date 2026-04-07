@@ -1,34 +1,110 @@
 # 本地笔记
 
-面向长期自用的中文本地桌面笔记应用，技术栈固定为 `Tauri + React + TypeScript + Vite + SQLite`。
+面向长期自用的中文本地桌面笔记应用，按“本地优先”的桌面工具来设计，技术栈固定为 `Tauri + React + TypeScript + Vite + SQLite`。
 
-## 当前能力
+## 当前定位
 
-- 本地笔记本 / 文件夹 / 文件三层结构 CRUD
-- note 富文本编辑、自动保存、切 note 前 flush、防串写
-- SQLite FTS5 搜索
-- note 级标签与标签广场
-- 复习方案、复习任务与复习日历
-- 主题持久化、手动备份、自动备份、备份恢复
+- 数据完全存储在本地电脑
+- 中文界面，面向学习笔记、标签、复习计划、复习日历、备份恢复
+- 正文编辑器使用 Tiptap
+- 搜索索引使用 SQLite FTS5
+- 备份格式使用本地 zip，恢复走真实目录替换
 
-## 第九阶段重点
+## 当前已实现能力
 
-- 离开 notebooks 工作区前统一做未保存正文保护
-- restore 前通过同一出口保护避免静默丢稿
-- 搜索索引按需初始化，不再每次冷启动全量重建
-- 备份 manifest 增加 `schemaVersion`，并兼容恢复旧版本合法备份
+- 主导航 Rail：笔记本、复习日历、标签广场、设置
+- 笔记本模块：笔记本 -> 文件夹 -> 文件三层结构，本地 SQLite 持久化，新建、重命名、删除
+- note 编辑：Tiptap 富文本正文、Markdown 快捷输入 MVP（`#`、`##`、`-`、`*`、`1.`）、LaTeX 公式 MVP（行内 / 块级）、自动保存、切 note 前 flush、防串写
+- 未保存正文保护：切 section 前统一 flush；窗口关闭、刷新前增加保护链路；恢复备份前增加保存检查入口
+- 全局搜索：搜索 note 标题和正文，点击结果直达目标 note
+- 标签系统：note 级标签、标签广场、标签关联 note 打开链路
+- 复习系统：复习方案、note 绑定、任务生成、月历查看、完成/取消完成
+- 设置页：主题持久化、数据目录展示、手动备份、自动备份、备份恢复、手动重建搜索索引
+- 备份恢复：支持 `schemaVersion`，兼容合法旧版本备份推断恢复
 
-## 启动方式
+## 第十阶段新增
+
+- 关闭窗口 / WebView 刷新前的未保存正文保护补齐
+- Settings 恢复备份前增加统一正文保存检查入口
+- review 高风险写路径迁到 Rust command：
+  - `renameReviewPlan`
+  - `deleteReviewPlan`
+  - `setReviewTaskCompleted`
+- 新增编辑器扩展边界文件：
+  - `src/features/notebooks/editorCapabilities.ts`
+  - `src/features/notebooks/editorCommands.ts`
+  - `src/features/notebooks/editorResources.ts`
+- 工具栏改为 descriptor 结构，预留未来插入类按钮分组
+- 新增阶段十手动回归清单：
+  - [docs/stage-10-smoke-checklist.md](/Users/lihongxia/Downloads/Fight/docs/stage-10-smoke-checklist.md)
+
+## 第十一阶段新增
+
+- 新增 Markdown 快捷输入 MVP：
+  - `# ` -> 一级标题
+  - `## ` -> 二级标题
+  - `- ` / `* ` -> 无序列表
+  - `1. ` -> 有序列表
+- 空列表项按回车退出列表，标题行回车后下一行回到普通段落
+- 新增专用编辑器边界文件：
+  - `src/features/notebooks/editorShortcuts.ts`
+  - `src/features/notebooks/editorInputRules.ts`
+  - `src/features/notebooks/editorExtensions.ts`
+- 编辑器只对白名单扩展启用 `markdownShortcuts` 输入规则，避免 `StarterKit` 默认更宽的 Markdown 规则直接进入主干
+- 编辑区新增最小提示文案，并把快捷输入验证步骤并入现有 smoke checklist
+
+## 第十二阶段新增
+
+- 新增 LaTeX 最小闭环：
+  - 支持行内公式与块级公式
+  - 通过工具栏按钮插入
+  - 双击已插入公式重新编辑源码
+  - 非法公式会在轻量对话框内给出中文错误提示，不写入正文
+- 公式渲染使用 `KaTeX`
+- HTML 主存储新增公式节点约定：
+  - 行内公式：`<span data-note-math="inline" data-latex="...">源码</span>`
+  - 块级公式：`<div data-note-math="block" data-latex="...">源码</div>`
+- 搜索索引会提取公式源码，而不是 KaTeX 运行时 DOM
+- 当前不启用 `$...$` 或 `$$...$$` 自动解析，LaTeX 入口以工具栏插入 + 双击编辑为准
+
+## 事务写路径审计
+
+当前仓库仍是“部分 Rust command + 部分前端直写”的混合态，这里只收口真实高风险路径，不做一把梭重写。
+
+| 风险级别 | 路径 | 当前处理 | 说明 |
+| --- | --- | --- | --- |
+| A | `createNote` `renameNote` `updateNoteContent` `deleteNote` | Rust command | 涉及正文落盘、搜索索引同步或高频切换路径 |
+| A | `deleteNotebook` `deleteFolder` | Rust command | 删除链路依赖事务一致性 |
+| A | `addTagToNoteByName` `removeTagFromNote` | Rust command | 涉及 note/tag 关系写入 |
+| A | `createReviewPlan` `renameReviewPlan` `deleteReviewPlan` | Rust command | 复习方案及其步骤/关联任务需要单连接事务 |
+| A | `bindReviewPlanToNote` `removeReviewPlanBinding` | Rust command | 涉及绑定与任务生成/清理 |
+| A | `setReviewTaskCompleted` | Rust command | 复习任务完成状态是高频关键写路径 |
+| B | `createFolder` `deleteTag` | 前端直写保留 | 当前未发现明显事务嵌套问题，但仍属于后续可继续审计对象 |
+| C | `createNotebook` `renameNotebook` `renameFolder` `createTag` `renameTag` | 前端直写保留 | 单表、低耦合、当前阶段不属于真实高风险点 |
+
+## 存储与索引约定
+
+- `notes.content_plaintext` 字段名仍沿用旧 schema，但当前实际承载 HTML
+- 这是已知命名债，本阶段只补注释和文档，不做 schema 迁移
+- 当前搜索索引的权威纯文本提取在 Rust `database_ops.rs` 中完成；前端仅保留等价辅助边界，供后续编辑器扩展复用
+- 公式节点在索引中按 LaTeX 源码降级，不索引 KaTeX 渲染结果
+
+## 当前未实现的产品能力
+
+- 图片插入与本地资源管理闭环
+- 更完整的 Markdown 规则集与 Markdown 导出
+- 笔记本封面网格视图
+
+## 启动与验证
 
 ```bash
 npm install
 npm run tauri dev
 ```
 
-## 验证命令
-
 ```bash
 npm run typecheck
 npm run build
 cargo check --manifest-path src-tauri/Cargo.toml
+cargo test --manifest-path src-tauri/Cargo.toml
 ```

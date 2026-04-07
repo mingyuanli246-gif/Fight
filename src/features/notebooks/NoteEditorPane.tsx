@@ -1,11 +1,8 @@
-import TextAlign from "@tiptap/extension-text-align";
-import Underline from "@tiptap/extension-underline";
 import {
   EditorContent,
   useEditor,
   type Editor,
 } from "@tiptap/react";
-import StarterKit from "@tiptap/starter-kit";
 import {
   forwardRef,
   useEffect,
@@ -13,15 +10,32 @@ import {
   useRef,
   useState,
 } from "react";
+import { MathEditorDialog } from "./MathEditorDialog";
 import { NoteTagManager } from "./NoteTagManager";
 import { NoteReviewPlanManager } from "../review/NoteReviewPlanManager";
 import { RichTextToolbar } from "./RichTextToolbar";
+import {
+  insertBlockMath,
+  insertInlineMath,
+  updateMathNodeLatex,
+} from "./editorCommands";
 import { getNoteById, updateNoteContent } from "./repository";
 import {
   normalizeEditorHtmlForStorage,
   toEditorDocumentContent,
   toEditorHtml,
 } from "./richTextContent";
+import {
+  createNotebookEditorExtensions,
+  NOTE_EDITOR_ENABLED_INPUT_RULES,
+} from "./editorExtensions";
+import { MARKDOWN_SHORTCUT_HINT } from "./editorShortcuts";
+import type { EditorMathBridge, MathEditRequest } from "./mathNodes";
+import {
+  getMathNodeName,
+  type MathDisplayMode,
+  type MathNodeName,
+} from "./mathSerialization";
 import type { Folder, Note, NoteSaveStatus, Notebook } from "./types";
 import styles from "./NotebookWorkspace.module.css";
 
@@ -42,6 +56,13 @@ interface NoteEditorPaneProps {
   onDeleteNote: (id: number) => Promise<void>;
   onNoteUpdated: (note: Note) => void;
   onError: (message: string) => void;
+}
+
+interface MathDialogState {
+  intent: "insert" | "edit";
+  displayMode: MathDisplayMode;
+  nodeType: MathNodeName;
+  position: number | null;
 }
 
 function formatDate(value: string) {
@@ -91,6 +112,11 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
     const [lastSavedAt, setLastSavedAt] = useState(note.updatedAt);
     const [isLoadingNote, setIsLoadingNote] = useState(true);
     const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
+    const [mathDialogState, setMathDialogState] = useState<MathDialogState | null>(
+      null,
+    );
+    const [mathDraftLatex, setMathDraftLatex] = useState("");
+    const [mathDialogError, setMathDialogError] = useState<string | null>(null);
 
     const activeNoteIdRef = useRef(note.id);
     const pendingSaveTimerRef = useRef<number | null>(null);
@@ -102,20 +128,37 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
     const onErrorRef = useRef(onError);
     const ongoingSaveRef = useRef<Promise<boolean> | null>(null);
     const ongoingSaveContentRef = useRef<string | null>(null);
+    const mathBridgeRef = useRef<EditorMathBridge>({
+      onEditMathRequest() {
+        // 运行时由当前组件覆写。
+      },
+    });
+    mathBridgeRef.current.onEditMathRequest = (request: MathEditRequest) => {
+      setMathDialogState({
+        intent: "edit",
+        displayMode: request.displayMode,
+        nodeType: request.nodeType,
+        position: request.position,
+      });
+      setMathDraftLatex(request.latex);
+      setMathDialogError(null);
+    };
+    mathBridgeRef.current.onMathRenderError = ({ nodeType, message, latex }) => {
+      console.error(`[notebooks.math] ${nodeType}渲染失败`, {
+        message,
+        latex,
+      });
+    };
+    const editorExtensionsRef = useRef(
+      createNotebookEditorExtensions({
+        mathBridge: mathBridgeRef.current,
+      }),
+    );
+    const enabledInputRulesRef = useRef([...NOTE_EDITOR_ENABLED_INPUT_RULES]);
 
     const editor = useEditor({
-      extensions: [
-        StarterKit.configure({
-          heading: {
-            levels: [1, 2],
-          },
-        }),
-        Underline,
-        TextAlign.configure({
-          types: ["heading", "paragraph"],
-          alignments: ["center"],
-        }),
-      ],
+      extensions: editorExtensionsRef.current,
+      enableInputRules: enabledInputRulesRef.current,
       content: toEditorDocumentContent(note.contentPlaintext),
       immediatelyRender: false,
       autofocus: false,
@@ -143,6 +186,23 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
         ? `${notebook.name} / 未归档笔记`
         : `${notebook.name} / ${noteFolder?.name ?? "文件夹"}`;
 
+    function openMathInsertDialog(displayMode: MathDisplayMode) {
+      setMathDialogState({
+        intent: "insert",
+        displayMode,
+        nodeType: getMathNodeName(displayMode),
+        position: null,
+      });
+      setMathDraftLatex("");
+      setMathDialogError(null);
+    }
+
+    function closeMathDialog() {
+      setMathDialogState(null);
+      setMathDraftLatex("");
+      setMathDialogError(null);
+    }
+
     function setDraftState(value: string) {
       draftContentRef.current = value;
       setDraftContent(value);
@@ -161,6 +221,30 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
       currentEditor.commands.setContent(toEditorDocumentContent(content), {
         emitUpdate: false,
       });
+    }
+
+    function handleConfirmMathDialog() {
+      if (!mathDialogState) {
+        return;
+      }
+
+      const result =
+        mathDialogState.intent === "insert"
+          ? mathDialogState.displayMode === "inline"
+            ? insertInlineMath(editor, mathDraftLatex)
+            : insertBlockMath(editor, mathDraftLatex)
+          : updateMathNodeLatex(editor, {
+              position: mathDialogState.position ?? -1,
+              nodeType: mathDialogState.nodeType,
+              latex: mathDraftLatex,
+            });
+
+      if (result.status === "handled") {
+        closeMathDialog();
+        return;
+      }
+
+      setMathDialogError(result.message);
     }
 
     function clearPendingSaveTimer() {
@@ -314,6 +398,9 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
       setSaveStatus("unchanged");
       setRenameValue(note.title);
       setIsConfirmingDelete(false);
+      setMathDialogState(null);
+      setMathDraftLatex("");
+      setMathDialogError(null);
 
       void (async () => {
         try {
@@ -460,7 +547,13 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
           />
 
           <div className={styles.editorSurface}>
-            <RichTextToolbar editor={editor} disabled={disabled || isLoadingNote} />
+            <RichTextToolbar
+              editor={editor}
+              disabled={disabled || isLoadingNote}
+              onInsertInlineMath={() => openMathInsertDialog("inline")}
+              onInsertBlockMath={() => openMathInsertDialog("block")}
+            />
+            <p className={styles.editorShortcutHint}>{MARKDOWN_SHORTCUT_HINT}</p>
             <div className={styles.editorContent}>
               <EditorContent editor={editor} className={styles.editorCanvas} />
             </div>
@@ -530,6 +623,22 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
             </section>
           </div>
         </div>
+
+        <MathEditorDialog
+          open={mathDialogState !== null}
+          intent={mathDialogState?.intent ?? "insert"}
+          displayMode={mathDialogState?.displayMode ?? "inline"}
+          latex={mathDraftLatex}
+          errorMessage={mathDialogError}
+          onLatexChange={(value) => {
+            setMathDraftLatex(value);
+            if (mathDialogError) {
+              setMathDialogError(null);
+            }
+          }}
+          onCancel={closeMathDialog}
+          onConfirm={handleConfirmMathDialog}
+        />
       </section>
     );
   },
