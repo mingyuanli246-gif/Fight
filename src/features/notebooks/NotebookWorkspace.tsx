@@ -6,6 +6,7 @@ import {
   useState,
 } from "react";
 import {
+  clearNotebookCoverImage,
   createFolder,
   createNote,
   createNotebook,
@@ -20,7 +21,9 @@ import {
   renameFolder,
   renameNote,
   renameNotebook,
+  updateNotebookCoverImage,
 } from "./repository";
+import { clearManagedResourceResolution } from "./editorResources";
 import {
   NoteEditorPane,
   type NoteEditorPaneRef,
@@ -28,6 +31,10 @@ import {
 import { NotebookDetailsPane } from "./NotebookDetailsPane";
 import { NotebookSidebar } from "./NotebookSidebar";
 import { NotebookTreePane } from "./NotebookTreePane";
+import {
+  deleteManagedResource,
+  selectAndImportImage,
+} from "./resourceCommands";
 import type {
   Folder,
   Note,
@@ -339,6 +346,26 @@ export const NotebookWorkspace = forwardRef<
     }
   }
 
+  async function cleanupManagedResourceBestEffort(
+    resourcePath: string | null,
+    reason: string,
+  ) {
+    if (!resourcePath) {
+      return;
+    }
+
+    clearManagedResourceResolution(resourcePath);
+
+    try {
+      await deleteManagedResource(resourcePath);
+    } catch (error) {
+      console.error(`[notebooks.resources] ${reason}失败`, {
+        resourcePath,
+        error,
+      });
+    }
+  }
+
   async function handleSelectNotebook(notebookId: number) {
     setErrorMessage(null);
     setIsBusy(true);
@@ -392,6 +419,56 @@ export const NotebookWorkspace = forwardRef<
     return runMutation(async () => {
       await deleteNotebook(id);
       await syncWorkspace();
+    });
+  }
+
+  async function handleSetNotebookCoverImage(id: number) {
+    const notebook =
+      notebooks.find((candidate) => candidate.id === id) ?? null;
+
+    if (!notebook) {
+      throw new Error("目标笔记本不存在。");
+    }
+
+    return runMutation(async () => {
+      const importResult = await selectAndImportImage("notebook-cover");
+
+      if (importResult.status === "cancelled") {
+        return;
+      }
+
+      const nextCoverPath = importResult.resourcePath;
+      const previousCoverPath = notebook.coverImagePath;
+      clearManagedResourceResolution(nextCoverPath);
+
+      try {
+        await updateNotebookCoverImage(id, nextCoverPath);
+      } catch {
+        await cleanupManagedResourceBestEffort(nextCoverPath, "清理未保存的新封面");
+        throw new Error("笔记本封面保存失败，请稍后重试。");
+      }
+
+      if (previousCoverPath && previousCoverPath !== nextCoverPath) {
+        await cleanupManagedResourceBestEffort(previousCoverPath, "清理旧封面");
+      }
+
+      await syncWorkspace(id, { kind: "notebook", id });
+    });
+  }
+
+  async function handleClearNotebookCoverImage(id: number) {
+    const notebook =
+      notebooks.find((candidate) => candidate.id === id) ?? null;
+
+    if (!notebook) {
+      throw new Error("目标笔记本不存在。");
+    }
+
+    return runMutation(async () => {
+      const previousCoverPath = notebook.coverImagePath;
+      await clearNotebookCoverImage(id);
+      await cleanupManagedResourceBestEffort(previousCoverPath, "清理旧封面");
+      await syncWorkspace(id, { kind: "notebook", id });
     });
   }
 
@@ -544,6 +621,8 @@ export const NotebookWorkspace = forwardRef<
             disabled={isBusy}
             onRenameNotebook={handleRenameNotebook}
             onDeleteNotebook={handleDeleteNotebook}
+            onSetNotebookCoverImage={handleSetNotebookCoverImage}
+            onClearNotebookCoverImage={handleClearNotebookCoverImage}
             onRenameFolder={handleRenameFolder}
             onDeleteFolder={handleDeleteFolder}
           />

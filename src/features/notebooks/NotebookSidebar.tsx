@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { ManagedResourceImage } from "./ManagedResourceImage";
 import type { Notebook } from "./types";
 import styles from "./NotebookWorkspace.module.css";
 
@@ -106,9 +107,22 @@ export function NotebookSidebar({
                     onClick={() => onSelectNotebook(notebook.id)}
                     disabled={disabled}
                   >
-                    <span className={styles.sidebarItemTitle}>{notebook.name}</span>
-                    <span className={styles.sidebarItemMeta}>
-                      创建于 {formatDate(notebook.createdAt)}
+                    <span className={styles.sidebarItemThumbnail}>
+                      <ManagedResourceImage
+                        resourcePath={notebook.coverImagePath}
+                        alt={`${notebook.name} 封面`}
+                        imageClassName={styles.sidebarItemThumbnailImage}
+                        fallbackClassName={styles.sidebarItemThumbnailFallback}
+                        loadingClassName={styles.sidebarItemThumbnailFallback}
+                        fallbackTitle="封面"
+                        fallbackMessage=""
+                      />
+                    </span>
+                    <span className={styles.sidebarItemBody}>
+                      <span className={styles.sidebarItemTitle}>{notebook.name}</span>
+                      <span className={styles.sidebarItemMeta}>
+                        创建于 {formatDate(notebook.createdAt)}
+                      </span>
                     </span>
                   </button>
                 </li>

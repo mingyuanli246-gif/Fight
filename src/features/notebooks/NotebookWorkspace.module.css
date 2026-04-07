@@ -166,6 +166,12 @@
   transform: translateY(-1px);
 }
 
+.sidebarItem {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
 .sidebarItemActive,
 .treeItemActive,
 .noteItemActive {
@@ -191,6 +197,44 @@
   font-size: 12px;
   line-height: 1.5;
   color: var(--color-text-secondary);
+}
+
+.sidebarItemBody {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.sidebarItemThumbnail {
+  flex-shrink: 0;
+  width: 64px;
+  aspect-ratio: 4 / 3;
+  border-radius: 14px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid var(--color-border-soft);
+}
+
+.sidebarItemThumbnailImage {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.sidebarItemThumbnailFallback {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  padding: 8px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--color-text-tertiary);
+  background:
+    linear-gradient(135deg, rgba(148, 163, 184, 0.2), rgba(96, 165, 250, 0.14));
 }
 
 .treeContainer {
@@ -592,6 +636,71 @@
   color: var(--color-text-secondary);
 }
 
+.noteImageNode {
+  display: block;
+  margin: 14px 0;
+  cursor: pointer;
+}
+
+.noteImageSelected {
+  filter: drop-shadow(0 0 0.65rem rgba(96, 165, 250, 0.16));
+}
+
+.noteImageFrame {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 120px;
+  padding: 10px;
+  background: rgba(248, 250, 252, 0.88);
+  border: 1px solid var(--color-border-soft);
+  border-radius: 18px;
+  overflow: hidden;
+}
+
+.noteImageFrameError {
+  border-color: rgba(248, 113, 113, 0.3);
+  background: rgba(254, 242, 242, 0.92);
+}
+
+.noteImageElement {
+  display: block;
+  max-width: min(100%, 720px);
+  width: auto;
+  height: auto;
+  max-height: 560px;
+  border-radius: 14px;
+  object-fit: contain;
+}
+
+.noteImageLoading {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+}
+
+.noteImageFallback {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  padding: 18px;
+  text-align: left;
+}
+
+.noteImageFallbackTitle {
+  font-size: 13px;
+  line-height: 1.4;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.noteImageFallbackText {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+}
+
 .editorFooter {
   display: flex;
   flex-direction: column;
@@ -683,6 +792,47 @@
   font-size: 13px;
   line-height: 1.6;
   color: var(--color-text-primary);
+}
+
+.coverPreviewCard {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.coverPreviewMedia {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border-radius: 18px;
+  border: 1px solid var(--color-border-soft);
+  background:
+    linear-gradient(135deg, rgba(96, 165, 250, 0.12), rgba(148, 163, 184, 0.12)),
+    rgba(255, 255, 255, 0.84);
+}
+
+.coverPreviewImage {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.coverPreviewFallback {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  height: 100%;
+  padding: 18px;
+}
+
+.coverActions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 .confirmBox {

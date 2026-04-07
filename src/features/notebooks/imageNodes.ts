@@ -1,0 +1,193 @@
+import { mergeAttributes, Node } from "@tiptap/core";
+import type { NodeViewRendererProps } from "@tiptap/core";
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
+import {
+  MISSING_RESOURCE_MESSAGE,
+  resolveLocalResourcePath,
+} from "./editorResources";
+import styles from "./NotebookWorkspace.module.css";
+
+export const NOTE_IMAGE_NODE_NAME = "noteImage";
+const NOTE_IMAGE_ATTRIBUTE = "data-note-image";
+const NOTE_IMAGE_RESOURCE_ATTRIBUTE = "data-resource-path";
+
+interface NoteImageNodeOptions {
+  HTMLAttributes: Record<string, string>;
+}
+
+function createImageFallback(
+  container: HTMLElement,
+  title: string,
+  detail: string,
+) {
+  container.innerHTML = "";
+  container.classList.add(styles.noteImageFallback);
+
+  const titleElement = document.createElement("strong");
+  titleElement.className = styles.noteImageFallbackTitle;
+  titleElement.textContent = title;
+
+  const detailElement = document.createElement("span");
+  detailElement.className = styles.noteImageFallbackText;
+  detailElement.textContent = detail;
+
+  container.append(titleElement, detailElement);
+}
+
+function createNoteImageNodeView(props: NodeViewRendererProps) {
+  const dom = document.createElement("div");
+  const frame = document.createElement("div");
+  let currentNode = props.node;
+  let renderVersion = 0;
+
+  dom.contentEditable = "false";
+  dom.classList.add(styles.noteImageNode);
+  frame.classList.add(styles.noteImageFrame);
+  dom.append(frame);
+
+  function paint(node: ProseMirrorNode) {
+    currentNode = node;
+    renderVersion += 1;
+    const currentVersion = renderVersion;
+    const resourcePath = String(node.attrs.resourcePath ?? "");
+    const alt = String(node.attrs.alt ?? "").trim();
+
+    dom.dataset.noteImageResourcePath = resourcePath;
+    frame.classList.remove(styles.noteImageFrameError);
+    frame.classList.remove(styles.noteImageFallback);
+    frame.innerHTML = "";
+
+    const loadingText = document.createElement("span");
+    loadingText.className = styles.noteImageLoading;
+    loadingText.textContent = "正在加载图片…";
+    frame.append(loadingText);
+
+    void resolveLocalResourcePath(resourcePath).then((result) => {
+      if (currentVersion !== renderVersion) {
+        return;
+      }
+
+      if (result.status !== "resolved") {
+        frame.classList.add(styles.noteImageFrameError);
+        createImageFallback(
+          frame,
+          "图片资源不可用",
+          result.status === "invalid" ? result.message : MISSING_RESOURCE_MESSAGE,
+        );
+        return;
+      }
+
+      frame.innerHTML = "";
+      frame.classList.remove(styles.noteImageFallback);
+      const image = document.createElement("img");
+      image.className = styles.noteImageElement;
+      image.alt = alt || "笔记图片";
+      image.src = result.assetUrl;
+      image.loading = "lazy";
+      image.decoding = "async";
+      image.draggable = false;
+      image.addEventListener("error", () => {
+        if (currentVersion !== renderVersion) {
+          return;
+        }
+
+        frame.classList.add(styles.noteImageFrameError);
+        createImageFallback(frame, "图片资源不可用", MISSING_RESOURCE_MESSAGE);
+      });
+
+      frame.append(image);
+    });
+  }
+
+  paint(currentNode);
+
+  return {
+    dom,
+    update(updatedNode: ProseMirrorNode) {
+      if (updatedNode.type !== currentNode.type) {
+        return false;
+      }
+
+      paint(updatedNode);
+      return true;
+    },
+    selectNode() {
+      dom.classList.add(styles.noteImageSelected);
+    },
+    deselectNode() {
+      dom.classList.remove(styles.noteImageSelected);
+    },
+    ignoreMutation() {
+      return true;
+    },
+  };
+}
+
+export const NoteImage = Node.create<NoteImageNodeOptions>({
+  name: NOTE_IMAGE_NODE_NAME,
+  group: "block",
+  atom: true,
+  selectable: true,
+
+  addOptions() {
+    return {
+      HTMLAttributes: {},
+    };
+  },
+
+  addAttributes() {
+    return {
+      resourcePath: {
+        default: "",
+        parseHTML: (element) =>
+          element instanceof HTMLElement
+            ? element.getAttribute(NOTE_IMAGE_RESOURCE_ATTRIBUTE) ?? ""
+            : "",
+        renderHTML: (attributes) => ({
+          [NOTE_IMAGE_RESOURCE_ATTRIBUTE]: String(attributes.resourcePath ?? ""),
+        }),
+      },
+      alt: {
+        default: "",
+        parseHTML: (element) =>
+          element instanceof HTMLElement ? element.getAttribute("alt") ?? "" : "",
+        renderHTML: (attributes) => ({
+          alt: String(attributes.alt ?? ""),
+        }),
+      },
+    };
+  },
+
+  parseHTML() {
+    return [
+      {
+        tag: `img[${NOTE_IMAGE_ATTRIBUTE}="true"]`,
+        getAttrs: (element) => {
+          if (!(element instanceof HTMLElement)) {
+            return false;
+          }
+
+          return {
+            resourcePath: element.getAttribute(NOTE_IMAGE_RESOURCE_ATTRIBUTE) ?? "",
+            alt: element.getAttribute("alt") ?? "",
+          };
+        },
+      },
+    ];
+  },
+
+  renderHTML({ HTMLAttributes, node }) {
+    return [
+      "img",
+      mergeAttributes(this.options.HTMLAttributes, HTMLAttributes, {
+        [NOTE_IMAGE_ATTRIBUTE]: "true",
+        [NOTE_IMAGE_RESOURCE_ATTRIBUTE]: String(node.attrs.resourcePath ?? ""),
+        alt: String(node.attrs.alt ?? ""),
+      }),
+    ];
+  },
+
+  addNodeView() {
+    return (props) => createNoteImageNodeView(props);
+  },
+});

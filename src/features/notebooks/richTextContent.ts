@@ -7,8 +7,10 @@ const KNOWN_RICH_TEXT_ROOT_PATTERN =
   /^<(p|h1|h2|ul|ol|li|blockquote)(\s|>)/i;
 const KNOWN_RICH_TEXT_INLINE_PATTERN = /<(strong|u|br)\b|<\/(strong|u)>/i;
 const KNOWN_RICH_TEXT_MATH_PATTERN = /^<(span|div)\b[^>]*data-note-math=/i;
+const KNOWN_RICH_TEXT_IMAGE_PATTERN = /^<img\b[^>]*data-note-image=/i;
 const SEARCHABLE_BLOCK_SELECTOR =
   "h1, h2, h3, h4, h5, h6, p, li, blockquote, [data-note-math='block']";
+const NOTE_IMAGE_SELECTOR = "img[data-note-image='true']";
 const EMPTY_EDITOR_DOCUMENT_HTML = "<p></p>";
 
 function createHtmlDocument(content: string) {
@@ -47,6 +49,26 @@ function normalizeMathElements(document: Document) {
   }
 }
 
+function normalizeImageElements(document: Document) {
+  const imageElements = Array.from(document.body.querySelectorAll(NOTE_IMAGE_SELECTOR));
+
+  for (const element of imageElements) {
+    if (!(element instanceof HTMLElement)) {
+      continue;
+    }
+
+    element.setAttribute("data-note-image", "true");
+
+    if (!element.hasAttribute("alt")) {
+      element.setAttribute("alt", "");
+    }
+  }
+}
+
+function hasContentfulImage(document: Document) {
+  return document.body.querySelector(NOTE_IMAGE_SELECTOR) !== null;
+}
+
 function looksLikeStoredRichTextHtml(value: string) {
   const trimmed = value.trim();
 
@@ -57,7 +79,8 @@ function looksLikeStoredRichTextHtml(value: string) {
   return (
     KNOWN_RICH_TEXT_ROOT_PATTERN.test(trimmed) ||
     KNOWN_RICH_TEXT_INLINE_PATTERN.test(trimmed) ||
-    KNOWN_RICH_TEXT_MATH_PATTERN.test(trimmed)
+    KNOWN_RICH_TEXT_MATH_PATTERN.test(trimmed) ||
+    KNOWN_RICH_TEXT_IMAGE_PATTERN.test(trimmed)
   );
 }
 
@@ -89,9 +112,10 @@ export function normalizeEditorHtmlForStorage(html: string) {
 
   const document = createHtmlDocument(trimmed);
   normalizeMathElements(document);
+  normalizeImageElements(document);
   const textContent = normalizeText(document.body.textContent ?? "");
 
-  if (!textContent) {
+  if (!textContent && !hasContentfulImage(document)) {
     return "";
   }
 
@@ -128,14 +152,23 @@ export function extractIndexablePlainText(storedContent: string | null) {
 
   const document = createHtmlDocument(storedContent);
   normalizeMathElements(document);
+  normalizeImageElements(document);
   const blockTexts = Array.from(
     document.body.querySelectorAll(SEARCHABLE_BLOCK_SELECTOR),
   )
     .map((element) => normalizeText(element.textContent ?? ""))
     .filter(Boolean);
+  const imageAltTexts = Array.from(document.body.querySelectorAll(NOTE_IMAGE_SELECTOR))
+    .map((element) =>
+      element instanceof HTMLElement
+        ? normalizeText(element.getAttribute("alt") ?? "")
+        : "",
+    )
+    .filter(Boolean);
+  const searchableTexts = [...blockTexts, ...imageAltTexts];
 
-  if (blockTexts.length > 0) {
-    return blockTexts.join("\n");
+  if (searchableTexts.length > 0) {
+    return searchableTexts.join("\n");
   }
 
   return normalizeText(document.body.textContent ?? "");

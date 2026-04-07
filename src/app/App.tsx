@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { ensureResourceDirectories } from "../features/notebooks/resourceCommands";
 import type { NoteOpenRequest } from "../features/notebooks/types";
 import { maybeRunAutoBackup } from "../features/settings/commands";
 import type { SettingsNotice } from "../features/settings/types";
@@ -19,6 +20,24 @@ function App() {
     let cancelled = false;
 
     void (async () => {
+      try {
+        await ensureResourceDirectories();
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+
+        console.error("[resources] 资源目录初始化失败", error);
+        setSettingsStartupNotice({
+          tone: "error",
+          message:
+            error instanceof Error && error.message.trim()
+              ? error.message
+              : "初始化资源目录失败，请稍后重试。",
+        });
+        return;
+      }
+
       try {
         const result = await maybeRunAutoBackup();
 

@@ -532,6 +532,55 @@ export async function renameNotebook(id: number, name: string) {
   });
 }
 
+export async function updateNotebookCoverImage(
+  id: number,
+  coverImagePath: string,
+) {
+  return withRepositoryError("保存笔记本封面", async () => {
+    const database = await getNotebookDatabase();
+    const normalizedPath = coverImagePath.trim();
+
+    if (!normalizedPath) {
+      throw new RepositoryValidationError("封面路径不能为空。");
+    }
+
+    const result = await database.execute(
+      `
+        UPDATE notebooks
+        SET cover_image_path = $1, updated_at = CURRENT_TIMESTAMP
+        WHERE id = $2
+      `,
+      [normalizedPath, id],
+    );
+
+    if (result.rowsAffected === 0) {
+      throw new RepositoryValidationError("目标笔记本不存在。");
+    }
+
+    return fetchNotebookById(database, id);
+  });
+}
+
+export async function clearNotebookCoverImage(id: number) {
+  return withRepositoryError("清除笔记本封面", async () => {
+    const database = await getNotebookDatabase();
+    const result = await database.execute(
+      `
+        UPDATE notebooks
+        SET cover_image_path = NULL, updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1
+      `,
+      [id],
+    );
+
+    if (result.rowsAffected === 0) {
+      throw new RepositoryValidationError("目标笔记本不存在。");
+    }
+
+    return fetchNotebookById(database, id);
+  });
+}
+
 export async function deleteNotebook(id: number) {
   return withRepositoryError("删除笔记本", async () => {
     await getNotebookDatabase();

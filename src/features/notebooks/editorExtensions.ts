@@ -3,6 +3,7 @@ import TextAlign from "@tiptap/extension-text-align";
 import Underline from "@tiptap/extension-underline";
 import StarterKit from "@tiptap/starter-kit";
 import { MarkdownShortcuts } from "./editorInputRules";
+import { NoteImage } from "./imageNodes";
 import { BlockMath, InlineMath, type EditorMathBridge } from "./mathNodes";
 
 // 仅对白名单扩展启用输入规则，避免 StarterKit 默认更宽的 Markdown 规则进入 MVP。
@@ -26,6 +27,7 @@ export function createNotebookEditorExtensions(
       types: ["heading", "paragraph"],
       alignments: ["center"],
     }),
+    NoteImage,
     InlineMath.configure({
       bridge: bridge.mathBridge,
     }),

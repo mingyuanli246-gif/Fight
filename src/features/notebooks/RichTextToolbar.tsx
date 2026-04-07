@@ -7,6 +7,7 @@ interface RichTextToolbarProps {
   disabled: boolean;
   onInsertInlineMath: () => void;
   onInsertBlockMath: () => void;
+  onInsertImage: () => void;
 }
 
 interface ToolbarButtonDescriptor {
@@ -48,6 +49,7 @@ export function RichTextToolbar({
   disabled,
   onInsertInlineMath,
   onInsertBlockMath,
+  onInsertImage,
 }: RichTextToolbarProps) {
   const isUnavailable = disabled || editor === null;
   const isCentered = editor?.isActive({ textAlign: "center" }) ?? false;
@@ -187,9 +189,9 @@ export function RichTextToolbar({
     insertionButtons.push({
       key: "image",
       label: "图片",
-      disabled: true,
+      disabled: isUnavailable,
       onClick() {
-        // 第十阶段仅预留按钮位，不在工具栏中启用。
+        onInsertImage();
       },
     });
   }

@@ -15,10 +15,18 @@ import { NoteTagManager } from "./NoteTagManager";
 import { NoteReviewPlanManager } from "../review/NoteReviewPlanManager";
 import { RichTextToolbar } from "./RichTextToolbar";
 import {
+  insertNoteImage,
   insertBlockMath,
   insertInlineMath,
   updateMathNodeLatex,
 } from "./editorCommands";
+import {
+  clearManagedResourceResolution,
+} from "./editorResources";
+import {
+  deleteManagedResource,
+  selectAndImportImage,
+} from "./resourceCommands";
 import { getNoteById, updateNoteContent } from "./repository";
 import {
   normalizeEditorHtmlForStorage,
@@ -203,6 +211,19 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
       setMathDialogError(null);
     }
 
+    async function cleanupImportedResourceOnFailure(resourcePath: string) {
+      clearManagedResourceResolution(resourcePath);
+
+      try {
+        await deleteManagedResource(resourcePath);
+      } catch (error) {
+        console.error("[notebooks.resources] 清理未引用图片失败", {
+          resourcePath,
+          error,
+        });
+      }
+    }
+
     function setDraftState(value: string) {
       draftContentRef.current = value;
       setDraftContent(value);
@@ -245,6 +266,33 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
       }
 
       setMathDialogError(result.message);
+    }
+
+    async function handleInsertImage() {
+      try {
+        const importResult = await selectAndImportImage("note-image");
+
+        if (importResult.status === "cancelled") {
+          return;
+        }
+
+        clearManagedResourceResolution(importResult.resourcePath);
+        const insertResult = insertNoteImage(editor, {
+          resourcePath: importResult.resourcePath,
+          alt: "",
+        });
+
+        if (insertResult.status === "handled") {
+          return;
+        }
+
+        await cleanupImportedResourceOnFailure(importResult.resourcePath);
+        onErrorRef.current(insertResult.message);
+      } catch (error) {
+        onErrorRef.current(
+          error instanceof Error ? error.message : "图片导入失败，请稍后重试。",
+        );
+      }
     }
 
     function clearPendingSaveTimer() {
@@ -552,6 +600,9 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
               disabled={disabled || isLoadingNote}
               onInsertInlineMath={() => openMathInsertDialog("inline")}
               onInsertBlockMath={() => openMathInsertDialog("block")}
+              onInsertImage={() => {
+                void handleInsertImage();
+              }}
             />
             <p className={styles.editorShortcutHint}>{MARKDOWN_SHORTCUT_HINT}</p>
             <div className={styles.editorContent}>

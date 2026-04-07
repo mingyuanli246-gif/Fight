@@ -1,4 +1,5 @@
 mod database_ops;
+mod resource_ops;
 mod settings_backup;
 
 use database_ops::{
@@ -7,6 +8,10 @@ use database_ops::{
     ensure_note_search_ready, rebuild_note_search_index, remove_review_plan_binding_tx,
     remove_tag_from_note_tx, rename_note_tx, rename_review_plan_tx, set_review_task_completed_tx,
     update_note_content_tx,
+};
+use resource_ops::{
+    delete_managed_resource, ensure_resource_directories, resolve_managed_resource,
+    select_and_import_image,
 };
 use settings_backup::{
     create_backup, get_data_environment_info, list_backups, load_app_settings,
@@ -71,6 +76,10 @@ pub fn run() {
             bind_review_plan_to_note_tx,
             remove_review_plan_binding_tx,
             set_review_task_completed_tx,
+            ensure_resource_directories,
+            resolve_managed_resource,
+            select_and_import_image,
+            delete_managed_resource,
             list_backups,
             create_backup,
             maybe_run_auto_backup,

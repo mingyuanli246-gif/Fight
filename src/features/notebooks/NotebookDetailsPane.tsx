@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { ManagedResourceImage } from "./ManagedResourceImage";
 import type { Folder, Notebook } from "./types";
 import styles from "./NotebookWorkspace.module.css";
 
@@ -11,6 +12,8 @@ interface NotebookDetailsPaneProps {
   disabled: boolean;
   onRenameNotebook: (id: number, name: string) => Promise<void>;
   onDeleteNotebook: (id: number) => Promise<void>;
+  onSetNotebookCoverImage: (id: number) => Promise<void>;
+  onClearNotebookCoverImage: (id: number) => Promise<void>;
   onRenameFolder: (id: number, name: string) => Promise<void>;
   onDeleteFolder: (id: number) => Promise<void>;
 }
@@ -34,6 +37,8 @@ export function NotebookDetailsPane({
   disabled,
   onRenameNotebook,
   onDeleteNotebook,
+  onSetNotebookCoverImage,
+  onClearNotebookCoverImage,
   onRenameFolder,
   onDeleteFolder,
 }: NotebookDetailsPaneProps) {
@@ -82,6 +87,30 @@ export function NotebookDetailsPane({
     }
   }
 
+  async function handleSetCoverImage() {
+    if (!selectedNotebook) {
+      return;
+    }
+
+    try {
+      await onSetNotebookCoverImage(selectedNotebook.id);
+    } catch {
+      // 错误由上层统一展示
+    }
+  }
+
+  async function handleClearCoverImage() {
+    if (!selectedNotebook) {
+      return;
+    }
+
+    try {
+      await onClearNotebookCoverImage(selectedNotebook.id);
+    } catch {
+      // 错误由上层统一展示
+    }
+  }
+
   const folderNoteCount =
     selectedFolder === null
       ? 0
@@ -108,6 +137,41 @@ export function NotebookDetailsPane({
               <section className={styles.infoCard}>
                 <p className={styles.infoLabel}>笔记本</p>
                 <h4 className={styles.infoTitle}>{selectedNotebook.name}</h4>
+                <div className={styles.coverPreviewCard}>
+                  <div className={styles.coverPreviewMedia}>
+                    <ManagedResourceImage
+                      resourcePath={selectedNotebook.coverImagePath}
+                      alt={`${selectedNotebook.name} 封面`}
+                      imageClassName={styles.coverPreviewImage}
+                      fallbackClassName={styles.coverPreviewFallback}
+                      loadingClassName={styles.coverPreviewFallback}
+                      fallbackTitle="暂无封面"
+                      fallbackMessage="可为当前笔记本设置一张本地封面图。"
+                    />
+                  </div>
+                  <div className={styles.coverActions}>
+                    <button
+                      type="button"
+                      className={styles.actionButton}
+                      onClick={() => {
+                        void handleSetCoverImage();
+                      }}
+                      disabled={disabled}
+                    >
+                      {selectedNotebook.coverImagePath ? "更换封面" : "设置封面"}
+                    </button>
+                    <button
+                      type="button"
+                      className={styles.secondaryButton}
+                      onClick={() => {
+                        void handleClearCoverImage();
+                      }}
+                      disabled={disabled || selectedNotebook.coverImagePath === null}
+                    >
+                      清除封面
+                    </button>
+                  </div>
+                </div>
                 <dl className={styles.infoGrid}>
                   <div>
                     <dt>创建时间</dt>

@@ -12,16 +12,16 @@ export const EDITOR_CAPABILITIES = {
     note: "第十二阶段已启用行内公式与块级公式 MVP，通过工具栏插入、双击编辑。",
   },
   images: {
-    enabled: false,
-    note: "第十阶段仅预留图片与资源接口，不复制文件、不落盘资源。",
+    enabled: true,
+    note: "第十三阶段已启用正文图片 MVP，通过本地导入并保存到 resources/images/。",
   },
   markdownShortcuts: {
     enabled: true,
     note: "第十一阶段已启用最小 Markdown 快捷输入，仅支持 #、##、-、*、1.。",
   },
   localResources: {
-    enabled: false,
-    note: "第十阶段仅预留本地资源路径解析约定，不实现资源目录闭环。",
+    enabled: true,
+    note: "第十三阶段已启用本地资源目录闭环，统一使用 resources/images/ 与 resources/covers/。",
   },
 } satisfies Record<
   "richTextToolbar" | "latex" | "images" | "markdownShortcuts" | "localResources",

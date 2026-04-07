@@ -1,10 +1,12 @@
 import type { Editor } from "@tiptap/react";
+import { normalizeManagedResourcePath } from "./editorResources";
 import {
   findMarkdownShortcut,
   findReservedEditorShortcut,
   type MarkdownShortcutId,
   type ReservedEditorShortcutId,
 } from "./editorShortcuts";
+import { NOTE_IMAGE_NODE_NAME } from "./imageNodes";
 import { validateMathLatex } from "./mathRender";
 import {
   BLOCK_MATH_NODE_NAME,
@@ -13,11 +15,25 @@ import {
   type MathNodeName,
 } from "./mathSerialization";
 
-export interface EditorCommandPlaceholderResult {
-  status: "not-implemented";
+export interface ImageCommandHandledResult {
+  status: "handled";
   capability: "images";
+  resourcePath: string;
+  alt: string;
   message: string;
 }
+
+export interface ImageCommandFailedResult {
+  status: "failed";
+  capability: "images";
+  resourcePath: string;
+  alt: string;
+  message: string;
+}
+
+export type ImageCommandResult =
+  | ImageCommandHandledResult
+  | ImageCommandFailedResult;
 
 export interface MathCommandHandledResult {
   status: "handled";
@@ -114,17 +130,77 @@ function toHandledMathResult(
   };
 }
 
-export function insertImagePlaceholder(
+export interface InsertNoteImageInput {
+  resourcePath: string;
+  alt?: string;
+}
+
+export function insertNoteImage(
   editor: Editor | null,
-  sourcePath: string,
-): EditorCommandPlaceholderResult {
-  void editor;
-  void sourcePath;
+  input: InsertNoteImageInput,
+): ImageCommandResult {
+  let normalizedResourcePath: string;
+
+  try {
+    normalizedResourcePath = normalizeManagedResourcePath(input.resourcePath);
+  } catch (error) {
+    return {
+      status: "failed",
+      capability: "images",
+      resourcePath: input.resourcePath,
+      alt: input.alt?.trim() ?? "",
+      message:
+        error instanceof Error && error.message.trim()
+          ? error.message
+          : "图片资源路径无效。",
+    };
+  }
+
+  const normalizedAlt = input.alt?.trim() ?? "";
+
+  if (!editor) {
+    return {
+      status: "failed",
+      capability: "images",
+      resourcePath: normalizedResourcePath,
+      alt: normalizedAlt,
+      message: "编辑器尚未就绪，暂时无法插入图片。",
+    };
+  }
+
+  const success = editor
+    .chain()
+    .focus()
+    .insertContent([
+      {
+        type: NOTE_IMAGE_NODE_NAME,
+        attrs: {
+          resourcePath: normalizedResourcePath,
+          alt: normalizedAlt,
+        },
+      },
+      {
+        type: "paragraph",
+      },
+    ])
+    .run();
+
+  if (!success) {
+    return {
+      status: "failed",
+      capability: "images",
+      resourcePath: normalizedResourcePath,
+      alt: normalizedAlt,
+      message: "插入图片失败，请稍后重试。",
+    };
+  }
 
   return {
-    status: "not-implemented",
+    status: "handled",
     capability: "images",
-    message: "图片插入将在后续阶段接入，本阶段仅保留命令边界。",
+    resourcePath: normalizedResourcePath,
+    alt: normalizedAlt,
+    message: "图片已插入。",
   };
 }
 

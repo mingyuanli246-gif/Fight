@@ -1147,9 +1147,15 @@ pub fn restore_backup(
 
 #[cfg(test)]
 mod tests {
-    use super::validate_database_file_for_schema;
+    use super::{
+        add_resources_to_zip, extract_backup_archive, validate_database_file_for_schema,
+        zip_dir_options, zip_file_options, AppSettings, BackupManifest, CURRENT_SCHEMA_VERSION,
+    };
     use rusqlite::Connection;
+    use std::fs::{self, File};
+    use std::io::Write;
     use tempfile::tempdir;
+    use zip::ZipWriter;
 
     fn create_temp_database(schema_sql: &str) -> std::path::PathBuf {
         let temp_dir = tempdir().expect("create temp dir");
@@ -1226,5 +1232,78 @@ mod tests {
             validate_database_file_for_schema(&path, Some(5)).expect("validate v5 backup");
 
         assert_eq!(version, 5);
+    }
+
+    #[test]
+    fn extract_backup_archive_restores_images_and_covers_subdirectories() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let backup_path = temp_dir.path().join("sample-backup.zip");
+        let database_path = temp_dir.path().join("fight-notes.db");
+        let settings_path = temp_dir.path().join("app-settings.json");
+        let resources_dir = temp_dir.path().join("resources");
+        let images_dir = resources_dir.join("images");
+        let covers_dir = resources_dir.join("covers");
+
+        fs::create_dir_all(&images_dir).expect("create images dir");
+        fs::create_dir_all(&covers_dir).expect("create covers dir");
+        fs::write(&database_path, b"sqlite-placeholder").expect("write database placeholder");
+        fs::write(
+            &settings_path,
+            serde_json::to_vec(&AppSettings::default()).expect("serialize app settings"),
+        )
+        .expect("write settings");
+        fs::write(images_dir.join("note-image.png"), b"note-image").expect("write note image");
+        fs::write(covers_dir.join("cover-image.jpg"), b"cover-image").expect("write cover image");
+
+        let manifest = BackupManifest {
+            format_version: 1,
+            schema_version: Some(CURRENT_SCHEMA_VERSION),
+            app_version: "test".to_string(),
+            created_at: "2026-04-07 10:00:00".to_string(),
+            database_file: "fight-notes.db".to_string(),
+            resource_directory: "resources".to_string(),
+            settings_file: "app-settings.json".to_string(),
+            note: String::new(),
+        };
+
+        let file = File::create(&backup_path).expect("create backup archive");
+        let mut zip = ZipWriter::new(file);
+        zip.add_directory("database/", zip_dir_options())
+            .expect("add database dir");
+        zip.add_directory("settings/", zip_dir_options())
+            .expect("add settings dir");
+        zip.start_file("manifest.json", zip_file_options())
+            .expect("start manifest");
+        zip.write_all(
+            serde_json::to_string(&manifest)
+                .expect("serialize manifest")
+                .as_bytes(),
+        )
+        .expect("write manifest");
+        zip.start_file("database/fight-notes.db", zip_file_options())
+            .expect("start db");
+        zip.write_all(b"sqlite-placeholder").expect("write db");
+        zip.start_file("settings/app-settings.json", zip_file_options())
+            .expect("start settings");
+        zip.write_all(
+            serde_json::to_string(&AppSettings::default())
+                .expect("serialize settings")
+                .as_bytes(),
+        )
+        .expect("write settings");
+        add_resources_to_zip(&mut zip, &resources_dir, "resources")
+            .expect("add resources");
+        zip.finish().expect("finish archive");
+
+        let extract_dir = temp_dir.path().join("extracted");
+        fs::create_dir_all(&extract_dir).expect("create extract dir");
+
+        let (_manifest, _database, _settings, restored_resources) =
+            extract_backup_archive(&backup_path, &extract_dir).expect("extract archive");
+
+        assert!(restored_resources.join("images").is_dir());
+        assert!(restored_resources.join("images/note-image.png").is_file());
+        assert!(restored_resources.join("covers").is_dir());
+        assert!(restored_resources.join("covers/cover-image.jpg").is_file());
     }
 }

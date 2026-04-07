@@ -1339,6 +1339,21 @@ fn extract_math_latex_from_tag(tag: &str) -> Option<String> {
     Some(decode_html_entities(&latex).trim().to_string())
 }
 
+fn extract_image_alt_from_tag(tag: &str) -> Option<String> {
+    if !tag.contains("data-note-image") {
+        return None;
+    }
+
+    let alt = extract_tag_attribute(tag, "alt")?;
+    let normalized = decode_html_entities(&alt).trim().to_string();
+
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
 fn extract_indexable_plain_text(content: &str) -> String {
     let mut text = String::with_capacity(content.len());
     let mut last_was_space = false;
@@ -1373,6 +1388,12 @@ fn extract_indexable_plain_text(content: &str) -> String {
                         push_separator(&mut text, &mut last_was_space);
                         push_normalized_text(&mut text, &mut last_was_space, &latex);
                         skip_math_tag_name = Some(tag_name);
+                        continue;
+                    }
+
+                    if let Some(alt) = extract_image_alt_from_tag(&tag) {
+                        push_separator(&mut text, &mut last_was_space);
+                        push_normalized_text(&mut text, &mut last_was_space, &alt);
                     }
                 }
             }
@@ -1761,6 +1782,53 @@ mod tests {
 
         assert!(body_plaintext.contains("E=mc^3"));
         assert!(body_plaintext.contains("\\frac{a}{b}"));
+    }
+
+    #[test]
+    fn extract_indexable_plain_text_keeps_note_image_alt_text() {
+        let content = "<p>图示如下</p><img data-note-image=\"true\" data-resource-path=\"resources/images/demo.png\" alt=\"流程图 A\" />";
+
+        let extracted = extract_indexable_plain_text(content);
+
+        assert!(extracted.contains("图示如下"));
+        assert!(extracted.contains("流程图 A"));
+    }
+
+    #[test]
+    fn rebuild_note_search_index_accepts_image_only_note_content() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (?1, ?2, ?3, ?4)",
+                (
+                    1_i64,
+                    1_i64,
+                    "图片文件",
+                    "<img data-note-image=\"true\" data-resource-path=\"resources/images/demo.png\" alt=\"示意图\" />",
+                ),
+            )
+            .expect("insert note");
+
+        rebuild_note_search_index_internal(&mut connection).expect("rebuild note_search");
+
+        let body_plaintext: String = connection
+            .query_row(
+                "SELECT body_plaintext FROM note_search WHERE rowid = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read note_search body_plaintext");
+
+        assert!(body_plaintext.contains("示意图"));
     }
 
     #[test]
