@@ -1,0 +1,131 @@
+.searchRoot {
+  position: relative;
+  max-width: 540px;
+}
+
+.searchLabel {
+  display: block;
+  margin-bottom: 10px;
+  font-size: 12px;
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--color-text-tertiary);
+  text-transform: uppercase;
+}
+
+.searchBox {
+  display: flex;
+  align-items: center;
+  min-height: 52px;
+  padding: 0 16px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid var(--color-border-soft);
+  border-radius: 16px;
+  box-shadow: var(--shadow-surface);
+}
+
+.searchBox:focus-within {
+  border-color: var(--color-accent);
+  box-shadow:
+    var(--shadow-surface),
+    0 0 0 3px rgba(96, 165, 250, 0.16);
+}
+
+.searchInput {
+  width: 100%;
+  min-width: 0;
+  color: var(--color-text-primary);
+  background: transparent;
+  border: 0;
+  outline: none;
+  font: inherit;
+  font-size: 14px;
+}
+
+.searchInput::placeholder {
+  color: var(--color-text-tertiary);
+}
+
+.searchPanel {
+  position: absolute;
+  top: calc(100% + 12px);
+  left: 0;
+  right: 0;
+  max-height: 480px;
+  overflow: auto;
+  padding: 12px;
+  background: rgba(248, 250, 252, 0.97);
+  border: 1px solid var(--color-border-soft);
+  border-radius: 18px;
+  box-shadow: var(--shadow-surface);
+  backdrop-filter: blur(10px);
+}
+
+.panelState,
+.panelError {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 12px;
+  color: var(--color-text-secondary);
+}
+
+.panelError strong {
+  font-size: 14px;
+  font-weight: 700;
+  color: #7f1d1d;
+}
+
+.panelError span,
+.panelState {
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.resultList {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.resultItem {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  padding: 14px 15px;
+  text-align: left;
+  background: rgba(255, 255, 255, 0.84);
+  border: 1px solid transparent;
+  border-radius: 16px;
+  cursor: pointer;
+  transition:
+    transform 140ms ease,
+    border-color 140ms ease,
+    background-color 140ms ease;
+}
+
+.resultItem:hover {
+  transform: translateY(-1px);
+  border-color: var(--color-border-strong);
+  background: var(--color-accent-soft);
+}
+
+.resultTitle {
+  font-size: 14px;
+  line-height: 1.5;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.resultPath,
+.resultExcerpt,
+.resultMeta {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+}

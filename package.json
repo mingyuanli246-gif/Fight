@@ -11,6 +11,13 @@
     "tauri": "tauri"
   },
   "dependencies": {
+    "@tauri-apps/api": "^2.10.1",
+    "@tauri-apps/plugin-sql": "^2.4.0",
+    "@tiptap/extension-text-align": "^3.22.2",
+    "@tiptap/extension-underline": "^3.22.2",
+    "@tiptap/pm": "^3.22.2",
+    "@tiptap/react": "^3.22.2",
+    "@tiptap/starter-kit": "^3.22.2",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },

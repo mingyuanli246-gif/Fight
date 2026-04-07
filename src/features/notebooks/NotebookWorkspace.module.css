@@ -1,0 +1,584 @@
+.workspace {
+  display: grid;
+  grid-template-columns: 248px 360px minmax(0, 1fr);
+  gap: 20px;
+  min-height: 0;
+  flex: 1;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--color-surface-primary);
+  border: 1px solid var(--color-border-soft);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--shadow-surface);
+  overflow: hidden;
+}
+
+.panelHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 22px 22px 18px;
+  border-bottom: 1px solid var(--color-border-soft);
+}
+
+.panelTitle {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.3;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.panelDescription {
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+}
+
+.panelActions {
+  display: flex;
+  gap: 10px;
+}
+
+.panelBody {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 0;
+  padding: 20px 22px 22px;
+  overflow: auto;
+}
+
+.actionButton,
+.secondaryButton,
+.dangerButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 38px;
+  padding: 0 14px;
+  border-radius: 12px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  transition:
+    transform 140ms ease,
+    background-color 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease;
+}
+
+.actionButton {
+  color: var(--color-selected-foreground);
+  background: var(--color-accent-strong);
+}
+
+.actionButton:hover:enabled,
+.secondaryButton:hover:enabled,
+.dangerButton:hover:enabled {
+  transform: translateY(-1px);
+}
+
+.secondaryButton {
+  color: var(--color-text-primary);
+  background: transparent;
+  border: 1px solid var(--color-border-soft);
+}
+
+.dangerButton {
+  color: #fff7f7;
+  background: #dc2626;
+}
+
+.actionButton:disabled,
+.secondaryButton:disabled,
+.dangerButton:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.createForm {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 0 22px 18px;
+}
+
+.input {
+  width: 100%;
+  min-height: 42px;
+  padding: 0 14px;
+  color: var(--color-text-primary);
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid var(--color-border-soft);
+  border-radius: 12px;
+  outline: none;
+}
+
+.input:focus {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.18);
+}
+
+.formActions {
+  display: flex;
+  gap: 10px;
+}
+
+.sidebarList,
+.noteList {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.sidebarItem,
+.treeItem,
+.noteItem {
+  width: 100%;
+  padding: 14px 15px;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 16px;
+  cursor: pointer;
+  transition:
+    border-color 140ms ease,
+    background-color 140ms ease,
+    transform 140ms ease;
+}
+
+.sidebarItem:hover:enabled,
+.treeItem:hover:enabled,
+.noteItem:hover:enabled {
+  border-color: var(--color-border-soft);
+  background: rgba(255, 255, 255, 0.8);
+  transform: translateY(-1px);
+}
+
+.sidebarItemActive,
+.treeItemActive,
+.noteItemActive {
+  border-color: var(--color-border-strong);
+  background: var(--color-accent-soft);
+}
+
+.sidebarItemTitle,
+.treeItemTitle,
+.noteItemTitle {
+  display: block;
+  font-size: 14px;
+  line-height: 1.5;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.sidebarItemMeta,
+.treeItemMeta,
+.noteItemMeta {
+  display: block;
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--color-text-secondary);
+}
+
+.treeContainer {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.treeGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.treeEmpty {
+  padding: 0 4px 0 16px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--color-text-secondary);
+}
+
+.treeSectionLabel {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.4;
+  font-weight: 700;
+  color: var(--color-text-tertiary);
+}
+
+.noteList {
+  padding-left: 14px;
+}
+
+.noteItem {
+  background: rgba(255, 255, 255, 0.64);
+}
+
+.detailsStack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.editorHeader {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.editorTitle {
+  margin: 0;
+  font-size: 24px;
+  line-height: 1.2;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.editorPath,
+.editorMeta {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+}
+
+.saveStatusBadge {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  min-height: 30px;
+  padding: 0 12px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid var(--color-border-soft);
+  border-radius: 999px;
+}
+
+.saveStatusDirty {
+  color: var(--color-accent-strong);
+  background: var(--color-accent-soft);
+}
+
+.saveStatusSaving {
+  color: #92400e;
+  background: rgba(251, 191, 36, 0.18);
+  border-color: rgba(251, 191, 36, 0.32);
+}
+
+.saveStatusSaved {
+  color: #166534;
+  background: rgba(187, 247, 208, 0.46);
+  border-color: rgba(34, 197, 94, 0.24);
+}
+
+.saveStatusError {
+  color: #991b1b;
+  background: rgba(254, 226, 226, 0.9);
+  border-color: rgba(248, 113, 113, 0.36);
+}
+
+.editorBody {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 0;
+  flex: 1;
+  padding: 20px 22px 22px;
+}
+
+.editorSurface {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid var(--color-border-soft);
+  border-radius: 18px;
+  overflow: hidden;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 14px;
+  border-bottom: 1px solid var(--color-border-soft);
+  background: linear-gradient(
+    180deg,
+    rgba(248, 250, 252, 0.96) 0%,
+    rgba(255, 255, 255, 0.84) 100%
+  );
+}
+
+.toolbarGroup {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.toolbarButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  padding: 0 12px;
+  color: var(--color-text-primary);
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid var(--color-border-soft);
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition:
+    transform 140ms ease,
+    background-color 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease;
+}
+
+.toolbarButton:hover:enabled {
+  transform: translateY(-1px);
+  border-color: var(--color-border-strong);
+}
+
+.toolbarButton:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+.toolbarButtonActive {
+  color: var(--color-selected-foreground);
+  background: var(--color-accent-strong);
+  border-color: transparent;
+}
+
+.editorContent {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  padding: 18px 20px;
+}
+
+.editorCanvas {
+  min-height: 100%;
+}
+
+.proseMirrorRoot {
+  min-height: 100%;
+  color: var(--color-text-primary);
+  outline: none;
+  font-size: 14px;
+  line-height: 1.9;
+  white-space: pre-wrap;
+}
+
+.editorCanvas :global(.ProseMirror) {
+  min-height: 100%;
+  outline: none;
+}
+
+.editorCanvas :global(.ProseMirror > *:first-child) {
+  margin-top: 0;
+}
+
+.editorCanvas :global(.ProseMirror > *:last-child) {
+  margin-bottom: 0;
+}
+
+.editorCanvas :global(.ProseMirror p),
+.editorCanvas :global(.ProseMirror ul),
+.editorCanvas :global(.ProseMirror ol),
+.editorCanvas :global(.ProseMirror h1),
+.editorCanvas :global(.ProseMirror h2) {
+  margin: 0 0 14px;
+}
+
+.editorCanvas :global(.ProseMirror h1) {
+  font-size: 28px;
+  line-height: 1.25;
+  font-weight: 800;
+}
+
+.editorCanvas :global(.ProseMirror h2) {
+  font-size: 22px;
+  line-height: 1.3;
+  font-weight: 800;
+}
+
+.editorCanvas :global(.ProseMirror ul),
+.editorCanvas :global(.ProseMirror ol) {
+  padding-left: 24px;
+}
+
+.editorCanvas :global(.ProseMirror li + li) {
+  margin-top: 6px;
+}
+
+.editorCanvas :global(.ProseMirror strong) {
+  font-weight: 800;
+}
+
+.editorCanvas :global(.ProseMirror u) {
+  text-underline-offset: 0.18em;
+}
+
+.editorFooter {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  flex-shrink: 0;
+}
+
+.editorForm {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.infoCard,
+.actionCard,
+.statusCard,
+.errorBanner {
+  padding: 18px;
+  border-radius: 18px;
+}
+
+.infoCard {
+  background: var(--color-surface-muted);
+  border: 1px solid var(--color-border-soft);
+}
+
+.actionCard {
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid var(--color-border-soft);
+}
+
+.statusCard {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  justify-content: center;
+  align-items: flex-start;
+  min-height: 220px;
+  background: var(--color-surface-primary);
+  border: 1px dashed var(--color-border-soft);
+}
+
+.infoLabel {
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--color-text-tertiary);
+  text-transform: uppercase;
+}
+
+.infoTitle,
+.cardTitle {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.4;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.cardText,
+.inlineHint,
+.statusText,
+.confirmText {
+  margin: 10px 0 0;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--color-text-secondary);
+}
+
+.infoGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 18px;
+  margin: 16px 0 0;
+}
+
+.infoGrid dt {
+  margin: 0 0 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--color-text-tertiary);
+}
+
+.infoGrid dd {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--color-text-primary);
+}
+
+.confirmBox {
+  margin-top: 12px;
+  padding: 14px;
+  background: rgba(220, 38, 38, 0.08);
+  border: 1px solid rgba(220, 38, 38, 0.18);
+  border-radius: 14px;
+}
+
+.emptyState {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  justify-content: center;
+  min-height: 180px;
+  padding: 18px;
+  color: var(--color-text-secondary);
+  background: rgba(255, 255, 255, 0.66);
+  border: 1px dashed var(--color-border-soft);
+  border-radius: 18px;
+}
+
+.emptyState strong,
+.statusTitle {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.errorBanner {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+  color: #7f1d1d;
+  background: rgba(254, 226, 226, 0.9);
+  border: 1px solid rgba(248, 113, 113, 0.36);
+}
+
+.errorTitle {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.errorText {
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 1.7;
+}
