@@ -68,6 +68,10 @@ function createNoteImageNodeView(props: NodeViewRendererProps) {
       }
 
       if (result.status !== "resolved") {
+        console.error("[resources] 正文图片资源解析失败", {
+          resourcePath,
+          result,
+        });
         frame.classList.add(styles.noteImageFrameError);
         createImageFallback(
           frame,
@@ -91,11 +95,26 @@ function createNoteImageNodeView(props: NodeViewRendererProps) {
           return;
         }
 
+        console.error("[resources] 正文图片加载失败", {
+          resourcePath,
+          assetUrl: result.assetUrl,
+        });
         frame.classList.add(styles.noteImageFrameError);
         createImageFallback(frame, "图片资源不可用", MISSING_RESOURCE_MESSAGE);
       });
 
       frame.append(image);
+    }).catch((error) => {
+      if (currentVersion !== renderVersion) {
+        return;
+      }
+
+      console.error("[resources] 正文图片渲染失败", {
+        resourcePath,
+        error,
+      });
+      frame.classList.add(styles.noteImageFrameError);
+      createImageFallback(frame, "图片资源不可用", MISSING_RESOURCE_MESSAGE);
     });
   }
 

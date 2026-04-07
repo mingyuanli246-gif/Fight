@@ -1202,6 +1202,7 @@ name = "fight-notes"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "percent-encoding",
  "rfd",
  "rusqlite",
  "serde",

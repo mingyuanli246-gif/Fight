@@ -1,5 +1,4 @@
-import { convertFileSrc } from "@tauri-apps/api/core";
-import { appConfigDir, join } from "@tauri-apps/api/path";
+import type { ManagedResourcePayload } from "./resourceCommands";
 import { resolveManagedResource } from "./resourceCommands";
 
 export const RESOURCE_ROOT_PATH = "resources";
@@ -39,7 +38,6 @@ export type LocalResourceResolutionResult =
   | MissingLocalResourceResult
   | InvalidLocalResourceResult;
 
-let appConfigDirPromise: Promise<string> | null = null;
 const resolvedResourceCache = new Map<
   string,
   Promise<LocalResourceResolutionResult>
@@ -75,35 +73,18 @@ export function normalizeManagedResourcePath(resourcePath: string) {
   return segments.join("/");
 }
 
-async function getAppConfigRoot() {
-  if (!appConfigDirPromise) {
-    appConfigDirPromise = appConfigDir().catch((error) => {
-      appConfigDirPromise = null;
-      throw error;
-    });
-  }
-
-  return appConfigDirPromise;
-}
-
-async function buildAbsoluteResourcePath(resourcePath: string) {
-  return join(await getAppConfigRoot(), resourcePath);
-}
-
 async function resolveLocalResourcePathUncached(
   normalizedResourcePath: string,
 ): Promise<LocalResourceResolutionResult> {
   try {
     const resolved = await resolveManagedResource(normalizedResourcePath);
-    const absolutePath = await buildAbsoluteResourcePath(resolved.resourcePath);
-    const assetUrl = convertFileSrc(absolutePath);
 
     if (resolved.status === "missing") {
       return {
         status: "missing",
         resourcePath: resolved.resourcePath,
-        absolutePath,
-        assetUrl,
+        absolutePath: resolved.absolutePath,
+        assetUrl: resolved.assetUrl,
         message: MISSING_RESOURCE_MESSAGE,
       };
     }
@@ -111,10 +92,14 @@ async function resolveLocalResourcePathUncached(
     return {
       status: "resolved",
       resourcePath: resolved.resourcePath,
-      absolutePath,
-      assetUrl,
+      absolutePath: resolved.absolutePath,
+      assetUrl: resolved.assetUrl,
     };
   } catch (error) {
+    console.error("[resources] 资源解析失败", {
+      resourcePath: normalizedResourcePath,
+      error,
+    });
     return {
       status: "invalid",
       resourcePath: normalizedResourcePath,
@@ -134,6 +119,10 @@ export async function resolveLocalResourcePath(
   try {
     normalizedPath = normalizeManagedResourcePath(resourcePath);
   } catch (error) {
+    console.error("[resources] 资源解析失败", {
+      resourcePath,
+      error,
+    });
     return {
       status: "invalid",
       resourcePath,
@@ -162,6 +151,19 @@ export async function resolveLocalResourcePath(
 
   resolvedResourceCache.set(normalizedPath, resultPromise);
   return resultPromise;
+}
+
+export function primeManagedResourceResolution(result: ManagedResourcePayload) {
+  const normalizedPath = normalizeManagedResourcePath(result.resourcePath);
+  resolvedResourceCache.set(
+    normalizedPath,
+    Promise.resolve({
+      status: "resolved",
+      resourcePath: normalizedPath,
+      absolutePath: result.absolutePath,
+      assetUrl: result.assetUrl,
+    }),
+  );
 }
 
 export function clearManagedResourceResolution(resourcePath?: string) {

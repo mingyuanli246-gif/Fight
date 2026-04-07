@@ -1,3 +1,4 @@
+use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use rfd::FileDialog;
 use serde::Serialize;
 use std::fs;
@@ -12,6 +13,29 @@ const INVALID_RESOURCE_PATH_MESSAGE: &str = "资源路径无效。";
 const IMAGE_IMPORT_FAILED_MESSAGE: &str = "图片导入失败，请稍后重试。";
 const UNSUPPORTED_IMAGE_MESSAGE: &str = "当前文件不是支持的图片格式。";
 const SUPPORTED_IMAGE_EXTENSIONS: [&str; 5] = ["png", "jpg", "jpeg", "webp", "gif"];
+const ENCODE_URI_COMPONENT_SET: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'$')
+    .add(b'%')
+    .add(b'&')
+    .add(b'+')
+    .add(b',')
+    .add(b'/')
+    .add(b':')
+    .add(b';')
+    .add(b'=')
+    .add(b'?')
+    .add(b'@')
+    .add(b'[')
+    .add(b'\\')
+    .add(b']')
+    .add(b'^')
+    .add(b'`')
+    .add(b'{')
+    .add(b'|')
+    .add(b'}');
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ImportedImageTarget {
@@ -20,20 +44,35 @@ enum ImportedImageTarget {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedResourceDescriptor {
+    pub resource_path: String,
+    pub absolute_path: String,
+    pub asset_url: String,
+}
+
+#[derive(Debug, Serialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum SelectAndImportImageResult {
     Cancelled,
     Imported {
         target: String,
-        resource_path: String,
+        #[serde(flatten)]
+        resource: ManagedResourceDescriptor,
     },
 }
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum ResolveManagedResourceResult {
-    Resolved { resource_path: String },
-    Missing { resource_path: String },
+    Resolved {
+        #[serde(flatten)]
+        resource: ManagedResourceDescriptor,
+    },
+    Missing {
+        #[serde(flatten)]
+        resource: ManagedResourceDescriptor,
+    },
 }
 
 impl ImportedImageTarget {
@@ -129,6 +168,38 @@ fn managed_resource_absolute_path(root: &Path, resource_path: &str) -> Result<Pa
     Ok(root.join(normalize_managed_resource_path(resource_path)?))
 }
 
+fn encode_asset_path_component(path: &Path) -> String {
+    utf8_percent_encode(path.to_string_lossy().as_ref(), ENCODE_URI_COMPONENT_SET).to_string()
+}
+
+fn to_asset_url(path: &Path) -> String {
+    let encoded_path = encode_asset_path_component(path);
+
+    #[cfg(target_os = "windows")]
+    {
+        format!("http://asset.localhost/{encoded_path}")
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        format!("asset://localhost/{encoded_path}")
+    }
+}
+
+fn describe_managed_resource(
+    root: &Path,
+    resource_path: &str,
+) -> Result<ManagedResourceDescriptor, String> {
+    let normalized_path = normalize_managed_resource_path(resource_path)?;
+    let absolute_path = root.join(&normalized_path);
+
+    Ok(ManagedResourceDescriptor {
+        resource_path: normalized_path,
+        absolute_path: absolute_path.to_string_lossy().to_string(),
+        asset_url: to_asset_url(&absolute_path),
+    })
+}
+
 fn normalize_image_extension(source_path: &Path) -> Result<String, String> {
     let extension = source_path
         .extension()
@@ -191,17 +262,13 @@ fn resolve_managed_resource_internal(
     root: &Path,
     resource_path: &str,
 ) -> Result<ResolveManagedResourceResult, String> {
-    let normalized_path = normalize_managed_resource_path(resource_path)?;
-    let absolute_path = root.join(&normalized_path);
+    let resource = describe_managed_resource(root, resource_path)?;
+    let absolute_path = PathBuf::from(&resource.absolute_path);
 
     if absolute_path.is_file() {
-        Ok(ResolveManagedResourceResult::Resolved {
-            resource_path: normalized_path,
-        })
+        Ok(ResolveManagedResourceResult::Resolved { resource })
     } else {
-        Ok(ResolveManagedResourceResult::Missing {
-            resource_path: normalized_path,
-        })
+        Ok(ResolveManagedResourceResult::Missing { resource })
     }
 }
 
@@ -229,10 +296,11 @@ pub fn select_and_import_image(
     };
 
     let resource_path = import_image_file(&root, &source_path, image_target)?;
+    let resource = describe_managed_resource(&root, &resource_path)?;
 
     Ok(SelectAndImportImageResult::Imported {
         target: image_target.as_str().to_string(),
-        resource_path,
+        resource,
     })
 }
 
@@ -338,8 +406,10 @@ mod tests {
             .expect("resolve missing resource");
         assert!(matches!(
             missing,
-            ResolveManagedResourceResult::Missing { ref resource_path }
-                if resource_path == "resources/covers/example.png"
+            ResolveManagedResourceResult::Missing { ref resource }
+                if resource.resource_path == "resources/covers/example.png"
+                    && resource.absolute_path.ends_with("resources/covers/example.png")
+                    && !resource.asset_url.is_empty()
         ));
 
         let absolute_path = temp_dir.path().join(resource_path);
@@ -349,8 +419,10 @@ mod tests {
             .expect("resolve existing resource");
         assert!(matches!(
             resolved,
-            ResolveManagedResourceResult::Resolved { ref resource_path }
-                if resource_path == "resources/covers/example.png"
+            ResolveManagedResourceResult::Resolved { ref resource }
+                if resource.resource_path == "resources/covers/example.png"
+                    && resource.absolute_path.ends_with("resources/covers/example.png")
+                    && !resource.asset_url.is_empty()
         ));
     }
 }

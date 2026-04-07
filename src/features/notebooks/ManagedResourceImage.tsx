@@ -101,7 +101,11 @@ export function ManagedResourceImage({
       loading="lazy"
       decoding="async"
       draggable={false}
-      onError={() => {
+      onError={(event) => {
+        console.error("[resources] 封面图片加载失败", {
+          resourcePath,
+          src: event.currentTarget.currentSrc || event.currentTarget.src,
+        });
         setDidImageFail(true);
       }}
     />

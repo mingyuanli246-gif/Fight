@@ -540,24 +540,38 @@ export async function updateNotebookCoverImage(
     const database = await getNotebookDatabase();
     const normalizedPath = coverImagePath.trim();
 
-    if (!normalizedPath) {
-      throw new RepositoryValidationError("封面路径不能为空。");
+    try {
+      if (!normalizedPath) {
+        throw new RepositoryValidationError("封面路径不能为空。");
+      }
+
+      const result = await database.execute(
+        `
+          UPDATE notebooks
+          SET cover_image_path = $1, updated_at = CURRENT_TIMESTAMP
+          WHERE id = $2
+        `,
+        [normalizedPath, id],
+      );
+
+      if (result.rowsAffected === 0) {
+        throw new RepositoryValidationError("目标笔记本不存在。");
+      }
+
+      const notebook = await fetchNotebookById(database, id);
+      console.info("[notebooks.repository] updateNotebookCoverImage成功", {
+        notebookId: id,
+        coverImagePath: normalizedPath,
+      });
+      return notebook;
+    } catch (error) {
+      console.error("[notebooks.repository] updateNotebookCoverImage失败", {
+        notebookId: id,
+        coverImagePath: normalizedPath,
+        error,
+      });
+      throw error;
     }
-
-    const result = await database.execute(
-      `
-        UPDATE notebooks
-        SET cover_image_path = $1, updated_at = CURRENT_TIMESTAMP
-        WHERE id = $2
-      `,
-      [normalizedPath, id],
-    );
-
-    if (result.rowsAffected === 0) {
-      throw new RepositoryValidationError("目标笔记本不存在。");
-    }
-
-    return fetchNotebookById(database, id);
   });
 }
 

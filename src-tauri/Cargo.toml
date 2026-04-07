@@ -16,6 +16,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+percent-encoding = "2"
 rfd = "0.14"
 rusqlite = "0.31"
 serde = { version = "1", features = ["derive"] }

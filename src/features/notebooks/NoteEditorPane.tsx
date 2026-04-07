@@ -22,6 +22,7 @@ import {
 } from "./editorCommands";
 import {
   clearManagedResourceResolution,
+  primeManagedResourceResolution,
 } from "./editorResources";
 import {
   deleteManagedResource,
@@ -277,6 +278,7 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
         }
 
         clearManagedResourceResolution(importResult.resourcePath);
+        primeManagedResourceResolution(importResult);
         const insertResult = insertNoteImage(editor, {
           resourcePath: importResult.resourcePath,
           alt: "",

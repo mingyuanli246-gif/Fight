@@ -23,7 +23,10 @@ import {
   renameNotebook,
   updateNotebookCoverImage,
 } from "./repository";
-import { clearManagedResourceResolution } from "./editorResources";
+import {
+  clearManagedResourceResolution,
+  primeManagedResourceResolution,
+} from "./editorResources";
 import {
   NoteEditorPane,
   type NoteEditorPaneRef,
@@ -33,6 +36,7 @@ import { NotebookSidebar } from "./NotebookSidebar";
 import { NotebookTreePane } from "./NotebookTreePane";
 import {
   deleteManagedResource,
+  ensureResourceDirectories,
   selectAndImportImage,
 } from "./resourceCommands";
 import type {
@@ -222,6 +226,7 @@ export const NotebookWorkspace = forwardRef<
     setIsInitializing(true);
 
     try {
+      await ensureResourceDirectories();
       await initializeNotebookDatabase();
       await syncWorkspace();
     } catch (error) {
@@ -440,15 +445,31 @@ export const NotebookWorkspace = forwardRef<
       const nextCoverPath = importResult.resourcePath;
       const previousCoverPath = notebook.coverImagePath;
       clearManagedResourceResolution(nextCoverPath);
+      primeManagedResourceResolution(importResult);
 
       try {
-        await updateNotebookCoverImage(id, nextCoverPath);
-      } catch {
+        const updatedNotebook = await updateNotebookCoverImage(id, nextCoverPath);
+        console.info("[notebooks.cover] 封面更新成功", {
+          notebookId: id,
+          coverImagePath: nextCoverPath,
+        });
+        setNotebooks((currentNotebooks) =>
+          currentNotebooks.map((currentNotebook) =>
+            currentNotebook.id === id ? updatedNotebook : currentNotebook,
+          ),
+        );
+      } catch (error) {
+        console.error("[notebooks.cover] 封面更新失败", {
+          notebookId: id,
+          coverImagePath: nextCoverPath,
+          error,
+        });
         await cleanupManagedResourceBestEffort(nextCoverPath, "清理未保存的新封面");
         throw new Error("笔记本封面保存失败，请稍后重试。");
       }
 
       if (previousCoverPath && previousCoverPath !== nextCoverPath) {
+        clearManagedResourceResolution(previousCoverPath);
         await cleanupManagedResourceBestEffort(previousCoverPath, "清理旧封面");
       }
 
@@ -466,7 +487,13 @@ export const NotebookWorkspace = forwardRef<
 
     return runMutation(async () => {
       const previousCoverPath = notebook.coverImagePath;
-      await clearNotebookCoverImage(id);
+      const updatedNotebook = await clearNotebookCoverImage(id);
+      setNotebooks((currentNotebooks) =>
+        currentNotebooks.map((currentNotebook) =>
+          currentNotebook.id === id ? updatedNotebook : currentNotebook,
+        ),
+      );
+      clearManagedResourceResolution(previousCoverPath ?? undefined);
       await cleanupManagedResourceBestEffort(previousCoverPath, "清理旧封面");
       await syncWorkspace(id, { kind: "notebook", id });
     });
