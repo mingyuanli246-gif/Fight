@@ -1,4 +1,5 @@
 import type Database from "@tauri-apps/plugin-sql";
+import { invoke } from "@tauri-apps/api/core";
 import { getNotebookDatabase } from "../notebooks/db";
 import type {
   NoteReviewBinding,
@@ -23,11 +24,70 @@ type ReviewTaskBaseRow = Omit<ReviewTask, "isCompleted"> & {
   isCompleted: number;
 };
 
+function getRawErrorMessage(error: unknown) {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  if (typeof error === "string") {
+    return error;
+  }
+
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
+function classifyDatabaseError(message: string) {
+  const normalized = message.toLowerCase();
+
+  if (normalized.includes("database is locked")) {
+    return "database is locked";
+  }
+
+  if (normalized.includes("cannot start a transaction within a transaction")) {
+    return "cannot start a transaction within a transaction";
+  }
+
+  if (normalized.includes("cannot rollback - no transaction is active")) {
+    return "cannot rollback - no transaction is active";
+  }
+
+  if (normalized.includes("no such table: app_meta")) {
+    return "no such table: app_meta";
+  }
+
+  if (normalized.includes("no such table: note_search")) {
+    return "no such table: note_search";
+  }
+
+  return "sqlite error";
+}
+
 function logReviewError(action: string, error: unknown) {
-  console.error(`[review.repository] ${action}失败`, error);
+  const rawMessage = getRawErrorMessage(error);
+  console.error(
+    `[review.repository] ${action}失败 [${classifyDatabaseError(rawMessage)}]`,
+    error,
+  );
+}
+
+function isReviewValidationMessage(message: string) {
+  return [
+    "目标文件不存在。",
+    "目标复习方案不存在。",
+    "当前复习方案的步骤数据无效。",
+    "绑定复习方案失败，请稍后重试。",
+  ].includes(message);
 }
 
 function toReviewError(action: string, error: unknown) {
+  if (error instanceof Error && isReviewValidationMessage(error.message)) {
+    return new ReviewValidationError(error.message);
+  }
+
   if (error instanceof ReviewValidationError) {
     return error;
   }
@@ -54,25 +114,27 @@ async function withReviewError<T>(
   }
 }
 
-async function runInTransaction<T>(
-  database: Database,
-  operation: () => Promise<T>,
+async function createReviewPlanCommand(name: string, offsets: number[]) {
+  return invoke<ReviewPlanWithSteps>("create_review_plan_tx", {
+    name,
+    offsets,
+  });
+}
+
+async function bindReviewPlanToNoteCommand(
+  noteId: number,
+  planId: number,
+  startDate: string,
 ) {
-  await database.execute("BEGIN IMMEDIATE");
+  return invoke<NoteReviewBindingDetail>("bind_review_plan_to_note_tx", {
+    noteId,
+    planId,
+    startDate,
+  });
+}
 
-  try {
-    const result = await operation();
-    await database.execute("COMMIT");
-    return result;
-  } catch (error) {
-    try {
-      await database.execute("ROLLBACK");
-    } catch (rollbackError) {
-      logReviewError("事务回滚", rollbackError);
-    }
-
-    throw error;
-  }
+async function removeReviewPlanBindingCommand(noteId: number) {
+  return invoke<void>("remove_review_plan_binding_tx", { noteId });
 }
 
 function normalizeReviewPlanName(value: string) {
@@ -148,12 +210,6 @@ function normalizeStartDate(value: string) {
   }
 
   return normalized;
-}
-
-function addDays(dateKey: string, offsetDays: number) {
-  const date = createLocalDate(dateKey);
-  date.setDate(date.getDate() + offsetDays);
-  return formatLocalDate(date);
 }
 
 function mapReviewTask(row: ReviewTaskBaseRow): ReviewTask {
@@ -290,16 +346,6 @@ async function fetchBindingDetailByNoteId(
   };
 }
 
-async function clearPendingTasksForNote(database: Database, noteId: number) {
-  await database.execute(
-    `
-      DELETE FROM review_tasks
-      WHERE note_id = $1 AND is_completed = 0
-    `,
-    [noteId],
-  );
-}
-
 async function fetchReviewTaskById(database: Database, taskId: number) {
   return selectOne<ReviewTaskBaseRow>(
     database,
@@ -369,35 +415,10 @@ export async function listReviewPlans() {
 
 export async function createReviewPlan(name: string, offsets: number[]) {
   return withReviewError("创建复习方案", async () => {
-    const database = await getNotebookDatabase();
     const normalizedName = normalizeReviewPlanName(name);
     const normalizedOffsets = normalizeOffsets(offsets);
-
-    return runInTransaction(database, async () => {
-      const result = await database.execute(
-        `
-          INSERT INTO review_plans (name)
-          VALUES ($1)
-        `,
-        [normalizedName],
-      );
-
-      if (typeof result.lastInsertId !== "number") {
-        throw new ReviewValidationError("创建复习方案失败，请稍后重试。");
-      }
-
-      for (const [index, offsetDays] of normalizedOffsets.entries()) {
-        await database.execute(
-          `
-            INSERT INTO review_plan_steps (plan_id, step_index, offset_days)
-            VALUES ($1, $2, $3)
-          `,
-          [result.lastInsertId, index + 1, offsetDays],
-        );
-      }
-
-      return fetchReviewPlanWithStepsById(database, result.lastInsertId);
-    });
+    await getNotebookDatabase();
+    return createReviewPlanCommand(normalizedName, normalizedOffsets);
   });
 }
 
@@ -458,82 +479,16 @@ export async function bindReviewPlanToNote(
   startDate: string,
 ) {
   return withReviewError("绑定复习方案", async () => {
-    const database = await getNotebookDatabase();
     const normalizedStartDate = normalizeStartDate(startDate);
-
-    return runInTransaction(database, async () => {
-      await ensureNoteExists(database, noteId);
-      const plan = await fetchReviewPlanWithStepsById(database, planId);
-      const currentBinding = await fetchBindingRowByNoteId(database, noteId);
-
-      if (
-        currentBinding !== null &&
-        currentBinding.planId === planId &&
-        currentBinding.startDate === normalizedStartDate
-      ) {
-        return {
-          binding: currentBinding,
-          plan,
-        } satisfies NoteReviewBindingDetail;
-      }
-
-      await clearPendingTasksForNote(database, noteId);
-
-      await database.execute(
-        `
-          INSERT INTO note_review_bindings (note_id, plan_id, start_date)
-          VALUES ($1, $2, $3)
-          ON CONFLICT(note_id) DO UPDATE SET
-            plan_id = excluded.plan_id,
-            start_date = excluded.start_date,
-            updated_at = CURRENT_TIMESTAMP
-        `,
-        [noteId, planId, normalizedStartDate],
-      );
-
-      for (const step of plan.steps) {
-        await database.execute(
-          `
-            INSERT OR IGNORE INTO review_tasks (
-              note_id,
-              plan_id,
-              due_date,
-              step_index,
-              is_completed,
-              completed_at
-            )
-            VALUES ($1, $2, $3, $4, 0, NULL)
-          `,
-          [noteId, planId, addDays(normalizedStartDate, step.offsetDays), step.stepIndex],
-        );
-      }
-
-      const binding = await fetchBindingRowByNoteId(database, noteId);
-
-      if (!binding) {
-        throw new ReviewValidationError("绑定复习方案失败，请稍后重试。");
-      }
-
-      return {
-        binding,
-        plan,
-      } satisfies NoteReviewBindingDetail;
-    });
+    await getNotebookDatabase();
+    return bindReviewPlanToNoteCommand(noteId, planId, normalizedStartDate);
   });
 }
 
 export async function removeReviewPlanBinding(noteId: number) {
   return withReviewError("移除复习绑定", async () => {
-    const database = await getNotebookDatabase();
-
-    await runInTransaction(database, async () => {
-      await ensureNoteExists(database, noteId);
-      await database.execute(
-        "DELETE FROM note_review_bindings WHERE note_id = $1",
-        [noteId],
-      );
-      await clearPendingTasksForNote(database, noteId);
-    });
+    await getNotebookDatabase();
+    await removeReviewPlanBindingCommand(noteId);
   });
 }
 

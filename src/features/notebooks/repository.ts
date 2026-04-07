@@ -1,4 +1,5 @@
 import type Database from "@tauri-apps/plugin-sql";
+import { invoke } from "@tauri-apps/api/core";
 import {
   FOLDER_ORDER,
   NOTEBOOK_ORDER,
@@ -8,7 +9,6 @@ import {
   TAG_ORDER,
 } from "./constants";
 import { getNotebookDatabase } from "./db";
-import { extractIndexablePlainText } from "./richTextContent";
 import type {
   Folder,
   Note,
@@ -50,11 +50,71 @@ type TaggedNoteRow = TaggedNoteResult;
 let noteSearchReadyPromise: Promise<void> | null = null;
 let hasInitializedNoteSearch = false;
 
+function getRawErrorMessage(error: unknown) {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  if (typeof error === "string") {
+    return error;
+  }
+
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
+function classifyDatabaseError(message: string) {
+  const normalized = message.toLowerCase();
+
+  if (normalized.includes("database is locked")) {
+    return "database is locked";
+  }
+
+  if (normalized.includes("cannot start a transaction within a transaction")) {
+    return "cannot start a transaction within a transaction";
+  }
+
+  if (normalized.includes("cannot rollback - no transaction is active")) {
+    return "cannot rollback - no transaction is active";
+  }
+
+  if (normalized.includes("no such table: app_meta")) {
+    return "no such table: app_meta";
+  }
+
+  if (normalized.includes("no such table: note_search")) {
+    return "no such table: note_search";
+  }
+
+  return "sqlite error";
+}
+
 function logRepositoryError(action: string, error: unknown) {
-  console.error(`[notebooks.repository] ${action}失败`, error);
+  const rawMessage = getRawErrorMessage(error);
+  console.error(
+    `[notebooks.repository] ${action}失败 [${classifyDatabaseError(rawMessage)}]`,
+    error,
+  );
+}
+
+function isRepositoryValidationMessage(message: string) {
+  return [
+    "目标笔记本不存在。",
+    "目标文件夹不存在。",
+    "目标文件不存在。",
+    "目标标签不存在。",
+    "创建标签失败，请稍后重试。",
+  ].includes(message);
 }
 
 function toRepositoryError(action: string, error: unknown) {
+  if (error instanceof Error && isRepositoryValidationMessage(error.message)) {
+    return new RepositoryValidationError(error.message);
+  }
+
   if (error instanceof RepositoryValidationError) {
     return error;
   }
@@ -80,6 +140,54 @@ async function withRepositoryError<T>(
   } catch (error) {
     throw toRepositoryError(action, error);
   }
+}
+
+async function ensureNoteSearchReadyCommand() {
+  return invoke<void>("ensure_note_search_ready");
+}
+
+async function rebuildNoteSearchIndexCommand() {
+  return invoke<void>("rebuild_note_search_index");
+}
+
+async function createNoteCommand(
+  notebookId: number,
+  folderId: number,
+  title: string,
+) {
+  return invoke<Note>("create_note_tx", {
+    notebookId,
+    folderId,
+    title,
+  });
+}
+
+async function deleteNotebookCommand(notebookId: number) {
+  return invoke<void>("delete_notebook_tx", { notebookId });
+}
+
+async function deleteFolderCommand(folderId: number) {
+  return invoke<void>("delete_folder_tx", { folderId });
+}
+
+async function renameNoteCommand(noteId: number, title: string) {
+  return invoke<Note>("rename_note_tx", { noteId, title });
+}
+
+async function updateNoteContentCommand(noteId: number, content: string) {
+  return invoke<Note>("update_note_content_tx", { noteId, content });
+}
+
+async function deleteNoteCommand(noteId: number) {
+  return invoke<void>("delete_note_tx", { noteId });
+}
+
+async function addTagToNoteByNameCommand(noteId: number, name: string) {
+  return invoke<Tag[]>("add_tag_to_note_by_name_tx", { noteId, name });
+}
+
+async function removeTagFromNoteCommand(noteId: number, tagId: number) {
+  return invoke<Tag[]>("remove_tag_from_note_tx", { noteId, tagId });
 }
 
 function requireName(value: string, label: string) {
@@ -173,27 +281,6 @@ async function selectOne<T>(
   return item;
 }
 
-async function runInTransaction<T>(
-  database: Database,
-  operation: () => Promise<T>,
-) {
-  await database.execute("BEGIN IMMEDIATE");
-
-  try {
-    const result = await operation();
-    await database.execute("COMMIT");
-    return result;
-  } catch (error) {
-    try {
-      await database.execute("ROLLBACK");
-    } catch (rollbackError) {
-      logRepositoryError("事务回滚", rollbackError);
-    }
-
-    throw error;
-  }
-}
-
 async function fetchNotebookById(database: Database, id: number) {
   return selectOne<Notebook>(
     database,
@@ -270,42 +357,6 @@ async function fetchTagById(database: Database, id: number) {
   );
 }
 
-async function fetchTagByName(database: Database, name: string) {
-  const rows = await database.select<Tag[]>(
-    `
-      SELECT
-        id,
-        name,
-        color,
-        created_at AS createdAt,
-        updated_at AS updatedAt
-      FROM tags
-      WHERE name = $1
-      LIMIT 1
-    `,
-    [name],
-  );
-
-  return rows[0] ?? null;
-}
-
-async function listAllNotesForSearchIndex(database: Database) {
-  return database.select<Note[]>(
-    `
-      SELECT
-        id,
-        notebook_id AS notebookId,
-        folder_id AS folderId,
-        title,
-        content_plaintext AS contentPlaintext,
-        created_at AS createdAt,
-        updated_at AS updatedAt
-      FROM notes
-      ORDER BY id ASC
-    `,
-  );
-}
-
 async function getNextTagColor(database: Database) {
   const rows = await database.select<{ count: number }[]>(
     "SELECT COUNT(*) AS count FROM tags",
@@ -349,92 +400,10 @@ async function listTagsByNoteInternal(database: Database, noteId: number) {
   );
 }
 
-async function checkFts5Support(database: Database) {
-  try {
-    await database.execute(
-      "CREATE VIRTUAL TABLE temp.note_search_probe USING fts5(content, tokenize = 'trigram')",
-    );
-    await database.execute("DROP TABLE temp.note_search_probe");
-  } catch (error) {
-    throw new RepositoryValidationError(
-      "当前 SQLite 环境不支持 FTS5 trigram，无法启用搜索。",
-    );
-  }
-}
-
-async function ensureNoteSearchTableReadable(database: Database) {
-  try {
-    await database.select<{ count: number }[]>(
-      "SELECT COUNT(*) AS count FROM note_search",
-    );
-  } catch (error) {
-    throw new RepositoryValidationError("搜索索引表初始化失败，请重启应用后重试。");
-  }
-}
-
-async function upsertNoteSearchIndex(database: Database, note: Note) {
-  await database.execute("DELETE FROM note_search WHERE rowid = $1", [note.id]);
-  await database.execute(
-    `
-      INSERT INTO note_search (rowid, title, body_plaintext)
-      VALUES ($1, $2, $3)
-    `,
-    [
-      note.id,
-      note.title,
-      extractIndexablePlainText(note.contentPlaintext),
-    ],
-  );
-}
-
-async function deleteNoteSearchIndex(database: Database, noteId: number) {
-  await database.execute("DELETE FROM note_search WHERE rowid = $1", [noteId]);
-}
-
-async function deleteNotebookSearchIndex(database: Database, notebookId: number) {
-  await database.execute(
-    `
-      DELETE FROM note_search
-      WHERE rowid IN (
-        SELECT id
-        FROM notes
-        WHERE notebook_id = $1
-      )
-    `,
-    [notebookId],
-  );
-}
-
-async function rebuildNoteSearchIndexInternal(database: Database) {
-  const notes = await listAllNotesForSearchIndex(database);
-
-  await runInTransaction(database, async () => {
-    await database.execute("DELETE FROM note_search");
-
-    for (const note of notes) {
-      await database.execute(
-        `
-          INSERT INTO note_search (rowid, title, body_plaintext)
-          VALUES ($1, $2, $3)
-        `,
-        [
-          note.id,
-          note.title,
-          extractIndexablePlainText(note.contentPlaintext),
-        ],
-      );
-    }
-  });
-}
-
 async function ensureNoteSearchReadyInternal(database: Database) {
-  await checkFts5Support(database);
-  await ensureNoteSearchTableReadable(database);
-
-  if (!hasInitializedNoteSearch) {
-    await rebuildNoteSearchIndexInternal(database);
-    hasInitializedNoteSearch = true;
-  }
+  void database;
+  await ensureNoteSearchReadyCommand();
+  hasInitializedNoteSearch = true;
 }
 
 async function ensureNoteSearchReady(database: Database) {
@@ -497,10 +466,8 @@ export async function initializeNotebookDatabase() {
 
 export async function rebuildNoteSearchIndex() {
   return withRepositoryError("重建搜索索引", async () => {
-    const database = await getNotebookDatabase();
-    await checkFts5Support(database);
-    await ensureNoteSearchTableReadable(database);
-    await rebuildNoteSearchIndexInternal(database);
+    await getNotebookDatabase();
+    await rebuildNoteSearchIndexCommand();
     hasInitializedNoteSearch = true;
   });
 }
@@ -567,21 +534,8 @@ export async function renameNotebook(id: number, name: string) {
 
 export async function deleteNotebook(id: number) {
   return withRepositoryError("删除笔记本", async () => {
-    const database = await getNotebookDatabase();
-    await ensureNoteSearchReady(database);
-
-    await runInTransaction(database, async () => {
-      await deleteNotebookSearchIndex(database, id);
-
-      const result = await database.execute(
-        "DELETE FROM notebooks WHERE id = $1",
-        [id],
-      );
-
-      if (result.rowsAffected === 0) {
-        throw new RepositoryValidationError("目标笔记本不存在。");
-      }
-    });
+    await getNotebookDatabase();
+    await deleteNotebookCommand(id);
   });
 }
 
@@ -652,28 +606,8 @@ export async function renameFolder(id: number, name: string) {
 
 export async function deleteFolder(id: number) {
   return withRepositoryError("删除文件夹", async () => {
-    const database = await getNotebookDatabase();
-    const folder = await fetchFolderById(database, id);
-
-    await runInTransaction(database, async () => {
-      await database.execute(
-        `
-          UPDATE notes
-          SET folder_id = NULL, updated_at = CURRENT_TIMESTAMP
-          WHERE folder_id = $1
-        `,
-        [folder.id],
-      );
-
-      const result = await database.execute(
-        "DELETE FROM folders WHERE id = $1",
-        [folder.id],
-      );
-
-      if (result.rowsAffected === 0) {
-        throw new RepositoryValidationError("目标文件夹不存在。");
-      }
-    });
+    await getNotebookDatabase();
+    await deleteFolderCommand(id);
   });
 }
 
@@ -706,107 +640,38 @@ export async function createNote(
   title: string,
 ) {
   return withRepositoryError("创建文件", async () => {
-    const database = await getNotebookDatabase();
-    await ensureNoteSearchReady(database);
+    await getNotebookDatabase();
     const normalizedTitle = requireName(title, "文件");
 
     if (folderId === null) {
       throw new RepositoryValidationError("请先选择文件夹，再创建文件。");
     }
 
-    const note = await runInTransaction(database, async () => {
-      const result = await database.execute(
-        `
-          INSERT INTO notes (notebook_id, folder_id, title, content_plaintext)
-          VALUES ($1, $2, $3, NULL)
-        `,
-        [notebookId, folderId, normalizedTitle],
-      );
-
-      if (typeof result.lastInsertId !== "number") {
-        throw new RepositoryValidationError("创建文件失败，请稍后重试。");
-      }
-
-      const createdNote = await fetchNoteById(database, result.lastInsertId);
-      await upsertNoteSearchIndex(database, createdNote);
-      return createdNote;
-    });
-
-    return note;
+    return createNoteCommand(notebookId, folderId, normalizedTitle);
   });
 }
 
 export async function renameNote(id: number, title: string) {
   return withRepositoryError("重命名文件", async () => {
-    const database = await getNotebookDatabase();
-    await ensureNoteSearchReady(database);
     const normalizedTitle = requireName(title, "文件");
-
-    return runInTransaction(database, async () => {
-      const result = await database.execute(
-        `
-          UPDATE notes
-          SET title = $1, updated_at = CURRENT_TIMESTAMP
-          WHERE id = $2
-        `,
-        [normalizedTitle, id],
-      );
-
-      if (result.rowsAffected === 0) {
-        throw new RepositoryValidationError("目标文件不存在。");
-      }
-
-      const note = await fetchNoteById(database, id);
-      await upsertNoteSearchIndex(database, note);
-      return note;
-    });
+    await getNotebookDatabase();
+    return renameNoteCommand(id, normalizedTitle);
   });
 }
 
 export async function updateNoteContent(id: number, content: string) {
   return withRepositoryError("保存正文", async () => {
-    const database = await getNotebookDatabase();
-    await ensureNoteSearchReady(database);
     // 第四阶段起，content_plaintext 继续作为唯一正文列使用，但允许保存富文本 HTML。
     // 这是已知命名债，本阶段不做 schema 变更，后续如需拆分字段再单独迁移。
-
-    return runInTransaction(database, async () => {
-      const result = await database.execute(
-        `
-          UPDATE notes
-          SET content_plaintext = $1, updated_at = CURRENT_TIMESTAMP
-          WHERE id = $2
-        `,
-        [content, id],
-      );
-
-      if (result.rowsAffected === 0) {
-        throw new RepositoryValidationError("目标文件不存在。");
-      }
-
-      const note = await fetchNoteById(database, id);
-      await upsertNoteSearchIndex(database, note);
-      return note;
-    });
+    await getNotebookDatabase();
+    return updateNoteContentCommand(id, content);
   });
 }
 
 export async function deleteNote(id: number) {
   return withRepositoryError("删除文件", async () => {
-    const database = await getNotebookDatabase();
-    await ensureNoteSearchReady(database);
-
-    await runInTransaction(database, async () => {
-      const result = await database.execute("DELETE FROM notes WHERE id = $1", [
-        id,
-      ]);
-
-      if (result.rowsAffected === 0) {
-        throw new RepositoryValidationError("目标文件不存在。");
-      }
-
-      await deleteNoteSearchIndex(database, id);
-    });
+    await getNotebookDatabase();
+    await deleteNoteCommand(id);
   });
 }
 
@@ -974,43 +839,15 @@ export async function deleteTag(id: number) {
 
 export async function addTagToNoteByName(noteId: number, name: string) {
   return withRepositoryError("添加标签", async () => {
-    const database = await getNotebookDatabase();
     const normalizedName = normalizeTagName(name);
-
-    return runInTransaction(database, async () => {
-      await fetchNoteById(database, noteId);
-
-      const existingTag = await fetchTagByName(database, normalizedName);
-      const tag = existingTag ?? (await createTagRecord(database, normalizedName));
-
-      await database.execute(
-        `
-          INSERT OR IGNORE INTO note_tags (note_id, tag_id)
-          VALUES ($1, $2)
-        `,
-        [noteId, tag.id],
-      );
-
-      return listTagsByNoteInternal(database, noteId);
-    });
+    await getNotebookDatabase();
+    return addTagToNoteByNameCommand(noteId, normalizedName);
   });
 }
 
 export async function removeTagFromNote(noteId: number, tagId: number) {
   return withRepositoryError("移除标签", async () => {
-    const database = await getNotebookDatabase();
-
-    return runInTransaction(database, async () => {
-      await fetchNoteById(database, noteId);
-      await database.execute(
-        `
-          DELETE FROM note_tags
-          WHERE note_id = $1 AND tag_id = $2
-        `,
-        [noteId, tagId],
-      );
-
-      return listTagsByNoteInternal(database, noteId);
-    });
+    await getNotebookDatabase();
+    return removeTagFromNoteCommand(noteId, tagId);
   });
 }

@@ -70,6 +70,16 @@
   border-color: rgba(255, 255, 255, 0.08);
 }
 
+.item:disabled {
+  cursor: wait;
+  opacity: 0.68;
+}
+
+.item:disabled:hover {
+  background: transparent;
+  border-color: transparent;
+}
+
 .item:focus-visible {
   outline: 2px solid rgba(255, 255, 255, 0.85);
   outline-offset: 2px;

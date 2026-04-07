@@ -7,6 +7,7 @@ import {
   getDataEnvironmentInfo,
   listBackups,
   loadAppSettings,
+  rebuildSearchIndex,
   restoreBackup,
   saveAppSettings,
 } from "./commands";
@@ -239,6 +240,26 @@ export function SettingsWorkspace({ startupNotice }: SettingsWorkspaceProps) {
     }
   }
 
+  async function handleRebuildSearchIndex() {
+    setOperationState("rebuildingSearch");
+    setConfirmRestoreFileName(null);
+    setNotice(buildNotice("info", "正在重建搜索索引，请稍候…"));
+
+    try {
+      await rebuildSearchIndex();
+      setNotice(buildNotice("info", "搜索索引已重建完成。"));
+    } catch (error) {
+      setNotice(
+        buildNotice(
+          "error",
+          getErrorMessage(error, "重建搜索索引失败，请稍后重试。"),
+        ),
+      );
+    } finally {
+      setOperationState("idle");
+    }
+  }
+
   async function handleRestoreBackup(fileName: string) {
     setOperationState("restoring");
     setNotice(
@@ -450,6 +471,17 @@ export function SettingsWorkspace({ startupNotice }: SettingsWorkspaceProps) {
               onClick={() => void handleCreateBackup()}
             >
               {operationState === "creating" ? "备份中…" : "立即创建备份"}
+            </button>
+
+            <button
+              type="button"
+              className={styles.secondaryButton}
+              disabled={isBusy || !settings}
+              onClick={() => void handleRebuildSearchIndex()}
+            >
+              {operationState === "rebuildingSearch"
+                ? "重建中…"
+                : "手动重建搜索索引"}
             </button>
           </div>
         </section>

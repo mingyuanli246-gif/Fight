@@ -1,12 +1,20 @@
+import type { RefObject } from "react";
 import type { NoteOpenRequest } from "../features/notebooks/types";
-import { NotebookWorkspace } from "../features/notebooks/NotebookWorkspace";
+import {
+  NotebookWorkspace,
+  type NotebookWorkspaceRef,
+} from "../features/notebooks/NotebookWorkspace";
 import styles from "./PageLayout.module.css";
 
 interface NotebooksPageProps {
   openRequest: NoteOpenRequest | null;
+  workspaceRef: RefObject<NotebookWorkspaceRef | null>;
 }
 
-export function NotebooksPage({ openRequest }: NotebooksPageProps) {
+export function NotebooksPage({
+  openRequest,
+  workspaceRef,
+}: NotebooksPageProps) {
   return (
     <section className={styles.page}>
       <header className={styles.header}>
@@ -18,7 +26,7 @@ export function NotebooksPage({ openRequest }: NotebooksPageProps) {
         </p>
       </header>
 
-      <NotebookWorkspace openRequest={openRequest} />
+      <NotebookWorkspace ref={workspaceRef} openRequest={openRequest} />
     </section>
   );
 }

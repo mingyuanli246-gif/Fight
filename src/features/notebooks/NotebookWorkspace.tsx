@@ -1,4 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import {
+  forwardRef,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState,
+} from "react";
 import {
   createFolder,
   createNote,
@@ -30,6 +36,9 @@ import type {
   SelectedEntity,
 } from "./types";
 import styles from "./NotebookWorkspace.module.css";
+
+const LEAVE_BLOCKED_MESSAGE =
+  "当前笔记保存失败，已阻止切换。请先重试保存或复制内容后再操作。";
 
 function getErrorMessage(error: unknown) {
   if (error instanceof Error) {
@@ -77,7 +86,14 @@ interface NotebookWorkspaceProps {
   openRequest: NoteOpenRequest | null;
 }
 
-export function NotebookWorkspace({ openRequest }: NotebookWorkspaceProps) {
+export interface NotebookWorkspaceRef {
+  flushBeforeLeave: () => Promise<boolean>;
+}
+
+export const NotebookWorkspace = forwardRef<
+  NotebookWorkspaceRef,
+  NotebookWorkspaceProps
+>(function NotebookWorkspace({ openRequest }, ref) {
   const [notebooks, setNotebooks] = useState<Notebook[]>([]);
   const [folders, setFolders] = useState<Folder[]>([]);
   const [notes, setNotes] = useState<Note[]>([]);
@@ -95,6 +111,35 @@ export function NotebookWorkspace({ openRequest }: NotebookWorkspaceProps) {
   const [isBusy, setIsBusy] = useState(false);
   const noteEditorRef = useRef<NoteEditorPaneRef | null>(null);
   const lastHandledOpenRequestRef = useRef<number | null>(null);
+
+  async function flushCurrentNoteIfNeeded() {
+    if (
+      selectedEntity?.kind !== "note" ||
+      !noteEditorRef.current?.hasUnsavedChanges()
+    ) {
+      return true;
+    }
+
+    const saved = await noteEditorRef.current.flushPendingSave();
+
+    if (!saved) {
+      setErrorMessage(LEAVE_BLOCKED_MESSAGE);
+      return false;
+    }
+
+    setErrorMessage(null);
+    return true;
+  }
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      async flushBeforeLeave() {
+        return flushCurrentNoteIfNeeded();
+      },
+    }),
+    [selectedEntity],
+  );
 
   async function syncWorkspace(
     preferredNotebookId: number | null = null,
@@ -169,21 +214,12 @@ export function NotebookWorkspace({ openRequest }: NotebookWorkspaceProps) {
     lastHandledOpenRequestRef.current = openRequest.requestId;
 
     void (async () => {
-      if (
-        selectedEntity?.kind === "note" &&
-        noteEditorRef.current?.hasUnsavedChanges()
-      ) {
-        const saved = await noteEditorRef.current.flushPendingSave();
+      const saved = await flushCurrentNoteIfNeeded();
 
-        if (!saved) {
-          setErrorMessage(
-            "当前笔记保存失败，已阻止切换。请先重试保存或复制内容后再操作。",
-          );
-          return;
-        }
+      if (!saved) {
+        return;
       }
 
-      setErrorMessage(null);
       setIsBusy(true);
 
       try {
@@ -244,18 +280,8 @@ export function NotebookWorkspace({ openRequest }: NotebookWorkspaceProps) {
       return;
     }
 
-    if (
-      selectedEntity?.kind === "note" &&
-      noteEditorRef.current?.hasUnsavedChanges()
-    ) {
-      const saved = await noteEditorRef.current.flushPendingSave();
-
-      if (!saved) {
-        setErrorMessage(
-          "当前笔记保存失败，已阻止切换。请先重试保存或复制内容后再操作。",
-        );
-        return;
-      }
+    if (!(await flushCurrentNoteIfNeeded())) {
+      return;
     }
 
     if (nextSelection.kind === "notebook" && nextNotebookId !== null) {
@@ -494,4 +520,4 @@ export function NotebookWorkspace({ openRequest }: NotebookWorkspaceProps) {
       </div>
     </>
   );
-}
+});

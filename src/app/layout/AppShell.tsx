@@ -1,6 +1,8 @@
+import { useRef, useState, type RefObject } from "react";
 import type {
   NoteOpenRequest,
 } from "../../features/notebooks/types";
+import type { NotebookWorkspaceRef } from "../../features/notebooks/NotebookWorkspace";
 import type { SettingsNotice } from "../../features/settings/types";
 import { GlobalSearch } from "./GlobalSearch";
 import { NavigationRail } from "../../features/navigation/NavigationRail";
@@ -24,10 +26,16 @@ function renderPage(
   noteOpenRequest: NoteOpenRequest | null,
   onOpenNote: (target: Pick<NoteOpenRequest, "noteId" | "notebookId">) => void,
   settingsStartupNotice: SettingsNotice | null,
+  notebookWorkspaceRef: RefObject<NotebookWorkspaceRef | null>,
 ) {
   switch (section) {
     case "notebooks":
-      return <NotebooksPage openRequest={noteOpenRequest} />;
+      return (
+        <NotebooksPage
+          openRequest={noteOpenRequest}
+          workspaceRef={notebookWorkspaceRef}
+        />
+      );
     case "reviewCalendar":
       return <ReviewCalendarPage onOpenNote={onOpenNote} />;
     case "tagPlaza":
@@ -35,7 +43,12 @@ function renderPage(
     case "settings":
       return <SettingsPage startupNotice={settingsStartupNotice} />;
     default:
-      return <NotebooksPage openRequest={noteOpenRequest} />;
+      return (
+        <NotebooksPage
+          openRequest={noteOpenRequest}
+          workspaceRef={notebookWorkspaceRef}
+        />
+      );
   }
 }
 
@@ -46,11 +59,40 @@ export default function AppShell({
   onOpenNote,
   settingsStartupNotice,
 }: AppShellProps) {
+  const notebookWorkspaceRef = useRef<NotebookWorkspaceRef | null>(null);
+  const [isSectionChanging, setIsSectionChanging] = useState(false);
+
+  async function requestSectionChange(nextSection: AppSection) {
+    if (nextSection === currentSection || isSectionChanging) {
+      return;
+    }
+
+    setIsSectionChanging(true);
+
+    try {
+      if (currentSection === "notebooks" && nextSection !== "notebooks") {
+        const canLeave =
+          (await notebookWorkspaceRef.current?.flushBeforeLeave()) ?? true;
+
+        if (!canLeave) {
+          return;
+        }
+      }
+
+      onSectionChange(nextSection);
+    } finally {
+      setIsSectionChanging(false);
+    }
+  }
+
   return (
     <div className={styles.shell}>
       <NavigationRail
         currentSection={currentSection}
-        onSectionChange={onSectionChange}
+        disabled={isSectionChanging}
+        onSectionChange={(section) => {
+          void requestSectionChange(section);
+        }}
       />
       <main className={styles.content}>
         <div className={styles.topBar}>
@@ -62,6 +104,7 @@ export default function AppShell({
             noteOpenRequest,
             onOpenNote,
             settingsStartupNotice,
+            notebookWorkspaceRef,
           )}
         </div>
       </main>

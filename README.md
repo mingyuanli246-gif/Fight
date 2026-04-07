@@ -1,12 +1,22 @@
 # 本地笔记
 
-第一阶段桌面骨架项目，技术栈固定为 `Tauri + React + TypeScript + Vite`。
+面向长期自用的中文本地桌面笔记应用，技术栈固定为 `Tauri + React + TypeScript + Vite + SQLite`。
 
-## 当前阶段
+## 当前能力
 
-- 已完成桌面端基础布局、左侧导航 Rail、四个中文页面占位
-- 已完成主题变量体系与四套主题切换预留
-- 已设置 Tauri 最小窗口尺寸为 `1320x820`
+- 本地笔记本 / 文件夹 / 文件三层结构 CRUD
+- note 富文本编辑、自动保存、切 note 前 flush、防串写
+- SQLite FTS5 搜索
+- note 级标签与标签广场
+- 复习方案、复习任务与复习日历
+- 主题持久化、手动备份、自动备份、备份恢复
+
+## 第九阶段重点
+
+- 离开 notebooks 工作区前统一做未保存正文保护
+- restore 前通过同一出口保护避免静默丢稿
+- 搜索索引按需初始化，不再每次冷启动全量重建
+- 备份 manifest 增加 `schemaVersion`，并兼容恢复旧版本合法备份
 
 ## 启动方式
 
@@ -20,4 +30,5 @@ npm run tauri dev
 ```bash
 npm run typecheck
 npm run build
+cargo check --manifest-path src-tauri/Cargo.toml
 ```

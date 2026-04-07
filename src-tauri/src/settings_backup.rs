@@ -18,20 +18,19 @@ const RESOURCES_DIR_NAME: &str = "resources";
 const BACKUPS_DIR_NAME: &str = "backups";
 const BACKUP_FILE_PREFIX: &str = "fight-notes-backup";
 const BACKUP_FORMAT_VERSION: u32 = 1;
+const CURRENT_SCHEMA_VERSION: u32 = 5;
 const VALID_THEMES: &[&str] = &["blue", "pink", "red", "yellow"];
 const VALID_RETENTION_COUNTS: &[u32] = &[3, 5, 10];
-const REQUIRED_TABLES: &[&str] = &[
-    "notebooks",
-    "folders",
-    "notes",
-    "note_search",
-    "tags",
-    "note_tags",
+const SCHEMA_V1_REQUIRED_TABLES: &[&str] = &["notebooks", "folders", "notes"];
+const SCHEMA_V2_REQUIRED_TABLES: &[&str] = &["note_search"];
+const SCHEMA_V3_REQUIRED_TABLES: &[&str] = &["tags", "note_tags"];
+const SCHEMA_V4_REQUIRED_TABLES: &[&str] = &[
     "review_plans",
     "review_plan_steps",
     "note_review_bindings",
     "review_tasks",
 ];
+const SCHEMA_V5_REQUIRED_TABLES: &[&str] = &["app_meta"];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -76,6 +75,7 @@ pub struct DataEnvironmentInfo {
 #[serde(rename_all = "camelCase")]
 pub struct BackupManifest {
     pub format_version: u32,
+    pub schema_version: Option<u32>,
     pub app_version: String,
     pub created_at: String,
     pub database_file: String,
@@ -149,6 +149,7 @@ struct AppPaths {
 
 struct ValidatedBackup {
     manifest: BackupManifest,
+    schema_version: u32,
 }
 
 fn busy_message() -> String {
@@ -424,6 +425,7 @@ fn create_manifest<R: Runtime>(
 ) -> BackupManifest {
     BackupManifest {
         format_version: BACKUP_FORMAT_VERSION,
+        schema_version: Some(CURRENT_SCHEMA_VERSION),
         app_version: app.package_info().version.to_string(),
         created_at: current_timestamp_label(),
         database_file: DATABASE_FILE_NAME.to_string(),
@@ -440,25 +442,144 @@ fn metadata_created_label(path: &Path) -> String {
         .unwrap_or_else(|_| "未知时间".to_string())
 }
 
-fn validate_database_file(path: &Path) -> Result<(), String> {
+fn table_exists(connection: &Connection, table_name: &str) -> Result<bool, String> {
+    let exists: i64 = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = ?1)",
+            [table_name],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("校验数据库结构失败：{error}"))?;
+
+    Ok(exists != 0)
+}
+
+fn required_tables_for_schema_version(schema_version: u32) -> Result<Vec<&'static str>, String> {
+    if schema_version == 0 || schema_version > CURRENT_SCHEMA_VERSION {
+        return Err("备份中的数据库版本不受支持。".to_string());
+    }
+
+    let mut tables = Vec::new();
+    tables.extend(SCHEMA_V1_REQUIRED_TABLES.iter().copied());
+
+    if schema_version >= 2 {
+        tables.extend(SCHEMA_V2_REQUIRED_TABLES.iter().copied());
+    }
+
+    if schema_version >= 3 {
+        tables.extend(SCHEMA_V3_REQUIRED_TABLES.iter().copied());
+    }
+
+    if schema_version >= 4 {
+        tables.extend(SCHEMA_V4_REQUIRED_TABLES.iter().copied());
+    }
+
+    if schema_version >= 5 {
+        tables.extend(SCHEMA_V5_REQUIRED_TABLES.iter().copied());
+    }
+
+    Ok(tables)
+}
+
+fn infer_schema_version(connection: &Connection) -> Result<u32, String> {
+    let base_exists = [
+        table_exists(connection, "notebooks")?,
+        table_exists(connection, "folders")?,
+        table_exists(connection, "notes")?,
+    ];
+
+    if base_exists.iter().any(|exists| !exists) {
+        return Err("备份中的数据库缺少基础笔记表，无法恢复。".to_string());
+    }
+
+    let has_note_search = table_exists(connection, "note_search")?;
+    let has_tags = table_exists(connection, "tags")?;
+    let has_note_tags = table_exists(connection, "note_tags")?;
+    let has_review_plans = table_exists(connection, "review_plans")?;
+    let has_review_plan_steps = table_exists(connection, "review_plan_steps")?;
+    let has_note_review_bindings = table_exists(connection, "note_review_bindings")?;
+    let has_review_tasks = table_exists(connection, "review_tasks")?;
+    let has_app_meta = table_exists(connection, "app_meta")?;
+
+    let has_tag_group = has_tags || has_note_tags;
+    let has_complete_tag_group = has_tags && has_note_tags;
+    let has_review_group = has_review_plans
+        || has_review_plan_steps
+        || has_note_review_bindings
+        || has_review_tasks;
+    let has_complete_review_group = has_review_plans
+        && has_review_plan_steps
+        && has_note_review_bindings
+        && has_review_tasks;
+
+    if has_tag_group && !has_complete_tag_group {
+        return Err("备份中的标签结构不完整，无法恢复。".to_string());
+    }
+
+    if has_complete_tag_group && !has_note_search {
+        return Err("备份中的搜索索引结构不完整，无法恢复。".to_string());
+    }
+
+    if has_review_group && !has_complete_review_group {
+        return Err("备份中的复习任务结构不完整，无法恢复。".to_string());
+    }
+
+    if has_complete_review_group && !has_complete_tag_group {
+        return Err("备份中的数据库结构版本不一致，无法恢复。".to_string());
+    }
+
+    if has_app_meta && !has_complete_review_group {
+        return Err("备份中的元数据结构不完整，无法恢复。".to_string());
+    }
+
+    let mut version = 1;
+
+    if has_note_search {
+        version = 2;
+    }
+
+    if has_complete_tag_group {
+        version = 3;
+    }
+
+    if has_complete_review_group {
+        version = 4;
+    }
+
+    if has_app_meta {
+        version = 5;
+    }
+
+    Ok(version)
+}
+
+fn validate_database_file_for_schema(
+    path: &Path,
+    declared_schema_version: Option<u32>,
+) -> Result<u32, String> {
     let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|error| format!("备份中的数据库无法打开：{error}"))?;
 
-    for table_name in REQUIRED_TABLES {
-        let exists: i64 = connection
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = ?1)",
-                [table_name],
-                |row| row.get(0),
-            )
-            .map_err(|error| format!("校验数据库结构失败：{error}"))?;
-
-        if exists == 0 {
-            return Err(format!("备份中的数据库缺少必要表：{table_name}"));
+    let inferred_schema_version = infer_schema_version(&connection)?;
+    let effective_schema_version = if let Some(schema_version) = declared_schema_version {
+        if schema_version > CURRENT_SCHEMA_VERSION {
+            return Err("当前应用暂不支持恢复来自更高数据库版本的备份。".to_string());
         }
-    }
 
-    Ok(())
+        let required_tables = required_tables_for_schema_version(schema_version)?;
+
+        for table_name in required_tables {
+            if !table_exists(&connection, table_name)? {
+                return Err(format!("备份中的数据库缺少必要表：{table_name}"));
+            }
+        }
+
+        inferred_schema_version.max(schema_version)
+    } else {
+        inferred_schema_version
+    };
+
+    Ok(effective_schema_version)
 }
 
 fn read_manifest_from_archive(
@@ -544,7 +665,8 @@ fn validate_backup_archive(path: &Path) -> Result<ValidatedBackup, String> {
         &format!("database/{}", manifest.database_file),
         &database_path,
     )?;
-    validate_database_file(&database_path)?;
+    let schema_version =
+        validate_database_file_for_schema(&database_path, manifest.schema_version)?;
 
     let settings_path = temp_dir.path().join(&manifest.settings_file);
     extract_archive_file_to_path(
@@ -557,7 +679,10 @@ fn validate_backup_archive(path: &Path) -> Result<ValidatedBackup, String> {
 
     ensure_archive_has_resources(&mut archive, &manifest.resource_directory)?;
 
-    Ok(ValidatedBackup { manifest })
+    Ok(ValidatedBackup {
+        manifest,
+        schema_version,
+    })
 }
 
 fn inspect_backup_file(path: &Path) -> BackupListItem {
@@ -989,7 +1114,7 @@ pub fn restore_backup(
         return Err("目标备份不存在。".to_string());
     }
 
-    validate_backup_archive(&backup_path)?;
+    let validated_backup = validate_backup_archive(&backup_path)?;
 
     let temp_dir =
         tempdir_in(&paths.root).map_err(|error| format!("创建恢复临时目录失败：{error}"))?;
@@ -999,7 +1124,10 @@ pub fn restore_backup(
     let (_manifest, restored_database, restored_settings, restored_resources) =
         extract_backup_archive(&backup_path, &extract_dir)?;
 
-    validate_database_file(&restored_database)?;
+    validate_database_file_for_schema(
+        &restored_database,
+        Some(validated_backup.schema_version),
+    )?;
     read_settings_from_path(&restored_settings)
         .map_err(|error| format!("备份中的应用设置无效：{error}"))?;
     ensure_directory(&restored_resources, "恢复资源目录")?;
@@ -1009,4 +1137,88 @@ pub fn restore_backup(
     Ok(RestoreBackupResult {
         restored_file_name: file_name,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_database_file_for_schema;
+    use rusqlite::Connection;
+    use tempfile::tempdir;
+
+    fn create_temp_database(schema_sql: &str) -> std::path::PathBuf {
+        let temp_dir = tempdir().expect("create temp dir");
+        let path = temp_dir.path().join("test.db");
+        let connection = Connection::open(&path).expect("open temp db");
+        connection
+            .execute_batch(schema_sql)
+            .expect("create schema for test");
+        drop(connection);
+        std::mem::forget(temp_dir);
+        path
+    }
+
+    #[test]
+    fn accepts_legacy_v4_backup_without_schema_version() {
+        let path = create_temp_database(
+            "
+            CREATE TABLE notebooks (id INTEGER PRIMARY KEY);
+            CREATE TABLE folders (id INTEGER PRIMARY KEY);
+            CREATE TABLE notes (id INTEGER PRIMARY KEY);
+            CREATE VIRTUAL TABLE note_search USING fts5(title, body_plaintext);
+            CREATE TABLE tags (id INTEGER PRIMARY KEY);
+            CREATE TABLE note_tags (note_id INTEGER, tag_id INTEGER);
+            CREATE TABLE review_plans (id INTEGER PRIMARY KEY);
+            CREATE TABLE review_plan_steps (id INTEGER PRIMARY KEY);
+            CREATE TABLE note_review_bindings (note_id INTEGER PRIMARY KEY);
+            CREATE TABLE review_tasks (id INTEGER PRIMARY KEY);
+            ",
+        );
+
+        let inferred_version =
+            validate_database_file_for_schema(&path, None).expect("validate v4 backup");
+
+        assert_eq!(inferred_version, 4);
+    }
+
+    #[test]
+    fn rejects_half_upgraded_database_shape() {
+        let path = create_temp_database(
+            "
+            CREATE TABLE notebooks (id INTEGER PRIMARY KEY);
+            CREATE TABLE folders (id INTEGER PRIMARY KEY);
+            CREATE TABLE notes (id INTEGER PRIMARY KEY);
+            CREATE VIRTUAL TABLE note_search USING fts5(title, body_plaintext);
+            CREATE TABLE tags (id INTEGER PRIMARY KEY);
+            ",
+        );
+
+        let error =
+            validate_database_file_for_schema(&path, None).expect_err("reject broken backup");
+
+        assert!(error.contains("结构") || error.contains("无法恢复"));
+    }
+
+    #[test]
+    fn accepts_current_v5_schema_when_declared() {
+        let path = create_temp_database(
+            "
+            CREATE TABLE notebooks (id INTEGER PRIMARY KEY);
+            CREATE TABLE folders (id INTEGER PRIMARY KEY);
+            CREATE TABLE notes (id INTEGER PRIMARY KEY);
+            CREATE VIRTUAL TABLE note_search USING fts5(title, body_plaintext);
+            CREATE TABLE tags (id INTEGER PRIMARY KEY);
+            CREATE TABLE note_tags (note_id INTEGER, tag_id INTEGER);
+            CREATE TABLE review_plans (id INTEGER PRIMARY KEY);
+            CREATE TABLE review_plan_steps (id INTEGER PRIMARY KEY);
+            CREATE TABLE note_review_bindings (note_id INTEGER PRIMARY KEY);
+            CREATE TABLE review_tasks (id INTEGER PRIMARY KEY);
+            CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            ",
+        );
+
+        let version =
+            validate_database_file_for_schema(&path, Some(5)).expect("validate v5 backup");
+
+        assert_eq!(version, 5);
+    }
 }

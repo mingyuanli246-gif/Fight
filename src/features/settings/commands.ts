@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { rebuildNoteSearchIndex } from "../notebooks/repository";
 import type {
   AppSettings,
   AppSettingsUpdate,
@@ -35,4 +36,8 @@ export async function maybeRunAutoBackup() {
 
 export async function restoreBackup(fileName: string) {
   return invoke<RestoreBackupResult>("restore_backup", { fileName });
+}
+
+export async function rebuildSearchIndex() {
+  return rebuildNoteSearchIndex();
 }

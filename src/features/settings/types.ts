@@ -24,6 +24,7 @@ export interface DataEnvironmentInfo {
 
 export interface BackupManifest {
   formatVersion: number;
+  schemaVersion?: number;
   appVersion: string;
   createdAt: string;
   databaseFile: string;
@@ -66,4 +67,8 @@ export interface SettingsNotice {
   message: string;
 }
 
-export type BackupOperationState = "idle" | "creating" | "restoring";
+export type BackupOperationState =
+  | "idle"
+  | "creating"
+  | "restoring"
+  | "rebuildingSearch";
