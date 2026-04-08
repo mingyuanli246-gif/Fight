@@ -27,6 +27,16 @@ const TAG_COLOR_PALETTE: [&str; 8] = [
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct NotebookRecord {
+    pub id: i64,
+    pub name: String,
+    pub cover_image_path: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NoteRecord {
     pub id: i64,
     pub notebook_id: i64,
@@ -358,6 +368,36 @@ fn fetch_note_by_id(connection: &Connection, note_id: i64) -> Result<NoteRecord,
             },
         )
         .map_err(|error| to_command_error("读取新建文件", error))
+}
+
+fn fetch_notebook_by_id(
+    connection: &Connection,
+    notebook_id: i64,
+) -> Result<NotebookRecord, String> {
+    connection
+        .query_row(
+            "
+              SELECT
+                id,
+                name,
+                cover_image_path,
+                created_at,
+                updated_at
+              FROM notebooks
+              WHERE id = ?1
+            ",
+            [notebook_id],
+            |row| {
+                Ok(NotebookRecord {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    cover_image_path: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                })
+            },
+        )
+        .map_err(|error| to_command_error("读取笔记本", error))
 }
 
 fn ensure_note_exists(connection: &Connection, note_id: i64) -> Result<(), String> {
@@ -921,6 +961,71 @@ fn delete_folder_tx_internal(connection: &mut Connection, folder_id: i64) -> Res
         .commit()
         .map_err(|error| to_command_error("提交删除文件夹事务", error))?;
     Ok(())
+}
+
+fn update_notebook_cover_image_tx_internal(
+    connection: &mut Connection,
+    notebook_id: i64,
+    cover_image_path: &str,
+) -> Result<NotebookRecord, String> {
+    let normalized_path = cover_image_path.trim();
+
+    if normalized_path.is_empty() {
+        return Err("封面路径不能为空。".to_string());
+    }
+
+    let transaction = connection
+        .transaction()
+        .map_err(|error| to_command_error("开启保存笔记本封面事务", error))?;
+    let updated = transaction
+        .execute(
+            "
+              UPDATE notebooks
+              SET cover_image_path = ?1, updated_at = CURRENT_TIMESTAMP
+              WHERE id = ?2
+            ",
+            params![normalized_path, notebook_id],
+        )
+        .map_err(|error| to_command_error("保存笔记本封面", error))?;
+
+    if updated == 0 {
+        return Err("目标笔记本不存在。".to_string());
+    }
+
+    transaction
+        .commit()
+        .map_err(|error| to_command_error("提交保存笔记本封面事务", error))?;
+
+    fetch_notebook_by_id(connection, notebook_id)
+}
+
+fn clear_notebook_cover_image_tx_internal(
+    connection: &mut Connection,
+    notebook_id: i64,
+) -> Result<NotebookRecord, String> {
+    let transaction = connection
+        .transaction()
+        .map_err(|error| to_command_error("开启清除笔记本封面事务", error))?;
+    let updated = transaction
+        .execute(
+            "
+              UPDATE notebooks
+              SET cover_image_path = NULL, updated_at = CURRENT_TIMESTAMP
+              WHERE id = ?1
+            ",
+            [notebook_id],
+        )
+        .map_err(|error| to_command_error("清除笔记本封面", error))?;
+
+    if updated == 0 {
+        return Err("目标笔记本不存在。".to_string());
+    }
+
+    transaction
+        .commit()
+        .map_err(|error| to_command_error("提交清除笔记本封面事务", error))?;
+
+    fetch_notebook_by_id(connection, notebook_id)
 }
 
 fn rename_note_tx_internal(
@@ -1516,6 +1621,25 @@ pub fn delete_folder_tx(app: AppHandle, folder_id: i64) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn update_notebook_cover_image_tx(
+    app: AppHandle,
+    notebook_id: i64,
+    cover_image_path: String,
+) -> Result<NotebookRecord, String> {
+    let mut connection = open_database_connection(&app)?;
+    update_notebook_cover_image_tx_internal(&mut connection, notebook_id, &cover_image_path)
+}
+
+#[tauri::command]
+pub fn clear_notebook_cover_image_tx(
+    app: AppHandle,
+    notebook_id: i64,
+) -> Result<NotebookRecord, String> {
+    let mut connection = open_database_connection(&app)?;
+    clear_notebook_cover_image_tx_internal(&mut connection, notebook_id)
+}
+
+#[tauri::command]
 pub fn rename_note_tx(app: AppHandle, note_id: i64, title: String) -> Result<NoteRecord, String> {
     let mut connection = open_database_connection(&app)?;
     rename_note_tx_internal(&mut connection, note_id, &title)
@@ -1588,10 +1712,11 @@ pub fn set_review_task_completed_tx(
 mod tests {
     use super::{
         add_tag_to_note_by_name_tx_internal, bind_review_plan_to_note_tx_internal,
-        create_note_tx_internal, create_review_plan_tx_internal, delete_review_plan_tx_internal,
-        ensure_app_meta_table, ensure_note_search_ready_internal, ensure_note_search_table,
-        extract_indexable_plain_text, rebuild_note_search_index_internal,
-        rename_review_plan_tx_internal, set_review_task_completed_tx_internal,
+        clear_notebook_cover_image_tx_internal, create_note_tx_internal,
+        create_review_plan_tx_internal, delete_review_plan_tx_internal, ensure_app_meta_table,
+        ensure_note_search_ready_internal, ensure_note_search_table, extract_indexable_plain_text,
+        rebuild_note_search_index_internal, rename_review_plan_tx_internal,
+        set_review_task_completed_tx_internal, update_notebook_cover_image_tx_internal,
     };
     use rusqlite::Connection;
 
@@ -1994,6 +2119,102 @@ mod tests {
         assert_eq!(binding_count, 0);
         assert_eq!(task_count, 0);
         assert_eq!(repeated_delete, "目标复习方案不存在。");
+    }
+
+    #[test]
+    fn update_notebook_cover_image_path_updates_cover_and_returns_notebook() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+
+        let notebook = update_notebook_cover_image_tx_internal(
+            &mut connection,
+            1,
+            "resources/covers/cover-a.png",
+        )
+        .expect("update notebook cover");
+
+        let stored_cover_path: Option<String> = connection
+            .query_row(
+                "SELECT cover_image_path FROM notebooks WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read notebook cover");
+
+        assert_eq!(notebook.id, 1);
+        assert_eq!(
+            notebook.cover_image_path.as_deref(),
+            Some("resources/covers/cover-a.png")
+        );
+        assert_eq!(
+            stored_cover_path.as_deref(),
+            Some("resources/covers/cover-a.png")
+        );
+    }
+
+    #[test]
+    fn update_notebook_cover_image_path_rejects_empty_cover_path() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+
+        let error = update_notebook_cover_image_tx_internal(&mut connection, 1, "   ")
+            .expect_err("empty cover path should fail");
+
+        assert_eq!(error, "封面路径不能为空。");
+    }
+
+    #[test]
+    fn update_notebook_cover_image_path_reports_missing_notebook() {
+        let mut connection = test_connection();
+
+        let error = update_notebook_cover_image_tx_internal(
+            &mut connection,
+            999,
+            "resources/covers/cover-a.png",
+        )
+        .expect_err("missing notebook should fail");
+
+        assert_eq!(error, "目标笔记本不存在。");
+    }
+
+    #[test]
+    fn clear_notebook_cover_image_path_clears_cover_and_returns_notebook() {
+        let mut connection = test_connection();
+        connection
+            .execute(
+                "INSERT INTO notebooks (name, cover_image_path) VALUES ('测试本', 'resources/covers/cover-a.png')",
+                [],
+            )
+            .expect("insert notebook with cover");
+
+        let notebook =
+            clear_notebook_cover_image_tx_internal(&mut connection, 1).expect("clear cover");
+
+        let stored_cover_path: Option<String> = connection
+            .query_row(
+                "SELECT cover_image_path FROM notebooks WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read notebook cover");
+
+        assert_eq!(notebook.id, 1);
+        assert_eq!(notebook.cover_image_path, None);
+        assert_eq!(stored_cover_path, None);
+    }
+
+    #[test]
+    fn clear_notebook_cover_image_path_reports_missing_notebook() {
+        let mut connection = test_connection();
+
+        let error = clear_notebook_cover_image_tx_internal(&mut connection, 999)
+            .expect_err("missing notebook should fail");
+
+        assert_eq!(error, "目标笔记本不存在。");
     }
 
     #[test]

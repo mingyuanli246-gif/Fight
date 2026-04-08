@@ -3,11 +3,11 @@ mod resource_ops;
 mod settings_backup;
 
 use database_ops::{
-    add_tag_to_note_by_name_tx, bind_review_plan_to_note_tx, create_note_tx, create_review_plan_tx,
-    delete_folder_tx, delete_note_tx, delete_notebook_tx, delete_review_plan_tx,
-    ensure_note_search_ready, rebuild_note_search_index, remove_review_plan_binding_tx,
-    remove_tag_from_note_tx, rename_note_tx, rename_review_plan_tx, set_review_task_completed_tx,
-    update_note_content_tx,
+    add_tag_to_note_by_name_tx, bind_review_plan_to_note_tx, clear_notebook_cover_image_tx,
+    create_note_tx, create_review_plan_tx, delete_folder_tx, delete_note_tx, delete_notebook_tx,
+    delete_review_plan_tx, ensure_note_search_ready, rebuild_note_search_index,
+    remove_review_plan_binding_tx, remove_tag_from_note_tx, rename_note_tx, rename_review_plan_tx,
+    set_review_task_completed_tx, update_note_content_tx, update_notebook_cover_image_tx,
 };
 use resource_ops::{
     delete_managed_resource, ensure_resource_directories, resolve_managed_resource,
@@ -68,6 +68,8 @@ pub fn run() {
             delete_review_plan_tx,
             delete_notebook_tx,
             delete_folder_tx,
+            update_notebook_cover_image_tx,
+            clear_notebook_cover_image_tx,
             rename_note_tx,
             update_note_content_tx,
             delete_note_tx,

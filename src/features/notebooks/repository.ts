@@ -102,6 +102,7 @@ function logRepositoryError(action: string, error: unknown) {
 
 function isRepositoryValidationMessage(message: string) {
   return [
+    "封面路径不能为空。",
     "目标笔记本不存在。",
     "目标文件夹不存在。",
     "目标文件不存在。",
@@ -168,6 +169,20 @@ async function deleteNotebookCommand(notebookId: number) {
 
 async function deleteFolderCommand(folderId: number) {
   return invoke<void>("delete_folder_tx", { folderId });
+}
+
+async function updateNotebookCoverImageCommand(
+  notebookId: number,
+  coverImagePath: string,
+) {
+  return invoke<Notebook>("update_notebook_cover_image_tx", {
+    notebookId,
+    coverImagePath,
+  });
+}
+
+async function clearNotebookCoverImageCommand(notebookId: number) {
+  return invoke<Notebook>("clear_notebook_cover_image_tx", { notebookId });
 }
 
 async function renameNoteCommand(noteId: number, title: string) {
@@ -537,7 +552,7 @@ export async function updateNotebookCoverImage(
   coverImagePath: string,
 ) {
   return withRepositoryError("保存笔记本封面", async () => {
-    const database = await getNotebookDatabase();
+    await getNotebookDatabase();
     const normalizedPath = coverImagePath.trim();
 
     try {
@@ -545,20 +560,7 @@ export async function updateNotebookCoverImage(
         throw new RepositoryValidationError("封面路径不能为空。");
       }
 
-      const result = await database.execute(
-        `
-          UPDATE notebooks
-          SET cover_image_path = $1, updated_at = CURRENT_TIMESTAMP
-          WHERE id = $2
-        `,
-        [normalizedPath, id],
-      );
-
-      if (result.rowsAffected === 0) {
-        throw new RepositoryValidationError("目标笔记本不存在。");
-      }
-
-      const notebook = await fetchNotebookById(database, id);
+      const notebook = await updateNotebookCoverImageCommand(id, normalizedPath);
       console.info("[notebooks.repository] updateNotebookCoverImage成功", {
         notebookId: id,
         coverImagePath: normalizedPath,
@@ -577,21 +579,8 @@ export async function updateNotebookCoverImage(
 
 export async function clearNotebookCoverImage(id: number) {
   return withRepositoryError("清除笔记本封面", async () => {
-    const database = await getNotebookDatabase();
-    const result = await database.execute(
-      `
-        UPDATE notebooks
-        SET cover_image_path = NULL, updated_at = CURRENT_TIMESTAMP
-        WHERE id = $1
-      `,
-      [id],
-    );
-
-    if (result.rowsAffected === 0) {
-      throw new RepositoryValidationError("目标笔记本不存在。");
-    }
-
-    return fetchNotebookById(database, id);
+    await getNotebookDatabase();
+    return clearNotebookCoverImageCommand(id);
   });
 }
 

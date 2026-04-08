@@ -104,12 +104,10 @@ fn log_resource_error(action: &str, error: impl ToString) {
 }
 
 fn resolve_app_root<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
-    app.path()
-        .app_config_dir()
-        .map_err(|error| {
-            log_resource_error("读取应用数据目录", &error);
-            "读取应用数据目录失败。".to_string()
-        })
+    app.path().app_config_dir().map_err(|error| {
+        log_resource_error("读取应用数据目录", &error);
+        "读取应用数据目录失败。".to_string()
+    })
 }
 
 fn ensure_directory(path: &Path, label: &str) -> Result<(), String> {
@@ -346,9 +344,12 @@ mod tests {
         let source_path = temp_dir.path().join("source-image.PNG");
         fs::write(&source_path, b"test-image").expect("write source image");
 
-        let resource_path =
-            import_image_file(temp_dir.path(), &source_path, ImportedImageTarget::NoteImage)
-                .expect("import image file");
+        let resource_path = import_image_file(
+            temp_dir.path(),
+            &source_path,
+            ImportedImageTarget::NoteImage,
+        )
+        .expect("import image file");
 
         assert!(resource_path.starts_with("resources/images/"));
         assert!(resource_path.ends_with(".png"));
@@ -361,8 +362,12 @@ mod tests {
         let source_path = temp_dir.path().join("source-image.txt");
         fs::write(&source_path, b"not-image").expect("write source text");
 
-        let error = import_image_file(temp_dir.path(), &source_path, ImportedImageTarget::NoteImage)
-            .expect_err("reject unsupported image");
+        let error = import_image_file(
+            temp_dir.path(),
+            &source_path,
+            ImportedImageTarget::NoteImage,
+        )
+        .expect_err("reject unsupported image");
 
         assert_eq!(error, "当前文件不是支持的图片格式。");
     }

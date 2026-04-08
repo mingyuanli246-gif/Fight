@@ -5,7 +5,7 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, Runtime, State};
 use tempfile::{tempdir_in, NamedTempFile};
 use walkdir::WalkDir;
@@ -19,6 +19,7 @@ const BACKUPS_DIR_NAME: &str = "backups";
 const BACKUP_FILE_PREFIX: &str = "fight-notes-backup";
 const BACKUP_FORMAT_VERSION: u32 = 1;
 const CURRENT_SCHEMA_VERSION: u32 = 5;
+const STORED_RESOURCE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif"];
 const VALID_THEMES: &[&str] = &["blue", "pink", "red", "yellow"];
 const VALID_RETENTION_COUNTS: &[u32] = &[3, 5, 10];
 const SCHEMA_V1_REQUIRED_TABLES: &[&str] = &["notebooks", "folders", "notes"];
@@ -334,6 +335,28 @@ fn current_timestamp_label() -> String {
     Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
+fn log_backup_perf_start(stage: &str) -> Instant {
+    eprintln!("[backup.perf] {stage} start");
+    Instant::now()
+}
+
+fn log_backup_perf_complete(stage: &str, started_at: Instant) {
+    eprintln!(
+        "[backup.perf] {stage} complete {}ms",
+        started_at.elapsed().as_millis()
+    );
+}
+
+fn with_backup_perf<T, F>(stage: &str, operation: F) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, String>,
+{
+    let started_at = log_backup_perf_start(stage);
+    let result = operation();
+    log_backup_perf_complete(stage, started_at);
+    result
+}
+
 fn build_backup_file_name(backups_dir: &Path) -> PathBuf {
     let base = format!(
         "{BACKUP_FILE_PREFIX}-{}",
@@ -376,6 +399,29 @@ fn zip_file_options() -> FileOptions {
         .unix_permissions(0o644)
 }
 
+fn resource_file_compression_method(path: &Path) -> CompressionMethod {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+
+    if extension.as_deref().is_some_and(|value| {
+        STORED_RESOURCE_EXTENSIONS
+            .iter()
+            .any(|candidate| *candidate == value)
+    }) {
+        CompressionMethod::Stored
+    } else {
+        CompressionMethod::Deflated
+    }
+}
+
+fn resource_file_options(path: &Path) -> FileOptions {
+    FileOptions::default()
+        .compression_method(resource_file_compression_method(path))
+        .unix_permissions(0o644)
+}
+
 fn zip_dir_options() -> FileOptions {
     FileOptions::default()
         .compression_method(CompressionMethod::Stored)
@@ -386,10 +432,11 @@ fn add_file_to_zip(
     zip: &mut ZipWriter<File>,
     source_path: &Path,
     zip_path: &str,
+    options: FileOptions,
 ) -> Result<(), String> {
     let mut file = File::open(source_path).map_err(|error| format!("读取备份文件失败：{error}"))?;
 
-    zip.start_file(zip_path, zip_file_options())
+    zip.start_file(zip_path, options)
         .map_err(|error| format!("写入备份压缩包失败：{error}"))?;
     io::copy(&mut file, zip).map_err(|error| format!("写入备份压缩包失败：{error}"))?;
     Ok(())
@@ -422,7 +469,7 @@ fn add_resources_to_zip(
             zip.add_directory(format!("{target_path}/"), zip_dir_options())
                 .map_err(|error| format!("写入资源目录失败：{error}"))?;
         } else if entry.file_type().is_file() {
-            add_file_to_zip(zip, path, &target_path)?;
+            add_file_to_zip(zip, path, &target_path, resource_file_options(path))?;
         }
     }
 
@@ -447,6 +494,37 @@ fn metadata_created_label(path: &Path) -> String {
         .and_then(|metadata| metadata.modified())
         .map(format_local_timestamp)
         .unwrap_or_else(|_| "未知时间".to_string())
+}
+
+fn backup_note_to_option(note: &str) -> Option<String> {
+    if note.trim().is_empty() {
+        None
+    } else {
+        Some(note.to_string())
+    }
+}
+
+fn build_created_backup_list_item(
+    backup_path: &Path,
+    manifest: &BackupManifest,
+) -> Result<BackupListItem, String> {
+    let file_name = backup_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("未知备份")
+        .to_string();
+    let size_bytes = fs::metadata(backup_path)
+        .map_err(|error| format!("读取备份文件元数据失败：{error}"))?
+        .len();
+
+    Ok(BackupListItem {
+        file_name,
+        created_at: manifest.created_at.clone(),
+        size_bytes,
+        is_valid: true,
+        invalid_reason: None,
+        note: backup_note_to_option(&manifest.note),
+    })
 }
 
 fn table_exists(connection: &Connection, table_name: &str) -> Result<bool, String> {
@@ -651,36 +729,38 @@ fn ensure_archive_has_resources(
 }
 
 fn validate_backup_archive(path: &Path) -> Result<ValidatedBackup, String> {
-    let file = File::open(path).map_err(|error| format!("打开备份失败：{error}"))?;
-    let mut archive =
-        ZipArchive::new(file).map_err(|error| format!("读取备份压缩包失败：{error}"))?;
-    let manifest = read_manifest_from_archive(&mut archive)?;
+    with_backup_perf("validate_backup_archive", || {
+        let file = File::open(path).map_err(|error| format!("打开备份失败：{error}"))?;
+        let mut archive =
+            ZipArchive::new(file).map_err(|error| format!("读取备份压缩包失败：{error}"))?;
+        let manifest = read_manifest_from_archive(&mut archive)?;
 
-    let temp_dir =
-        tempdir_in(std::env::temp_dir()).map_err(|error| format!("创建临时目录失败：{error}"))?;
-    let database_path = temp_dir.path().join(&manifest.database_file);
-    extract_archive_file_to_path(
-        &mut archive,
-        &format!("database/{}", manifest.database_file),
-        &database_path,
-    )?;
-    let schema_version =
-        validate_database_file_for_schema(&database_path, manifest.schema_version)?;
+        let temp_dir = tempdir_in(std::env::temp_dir())
+            .map_err(|error| format!("创建临时目录失败：{error}"))?;
+        let database_path = temp_dir.path().join(&manifest.database_file);
+        extract_archive_file_to_path(
+            &mut archive,
+            &format!("database/{}", manifest.database_file),
+            &database_path,
+        )?;
+        let schema_version =
+            validate_database_file_for_schema(&database_path, manifest.schema_version)?;
 
-    let settings_path = temp_dir.path().join(&manifest.settings_file);
-    extract_archive_file_to_path(
-        &mut archive,
-        &format!("settings/{}", manifest.settings_file),
-        &settings_path,
-    )?;
-    read_settings_from_path(&settings_path)
-        .map_err(|error| format!("备份中的应用设置无效：{error}"))?;
+        let settings_path = temp_dir.path().join(&manifest.settings_file);
+        extract_archive_file_to_path(
+            &mut archive,
+            &format!("settings/{}", manifest.settings_file),
+            &settings_path,
+        )?;
+        read_settings_from_path(&settings_path)
+            .map_err(|error| format!("备份中的应用设置无效：{error}"))?;
 
-    ensure_archive_has_resources(&mut archive, &manifest.resource_directory)?;
+        ensure_archive_has_resources(&mut archive, &manifest.resource_directory)?;
 
-    Ok(ValidatedBackup {
-        manifest,
-        schema_version,
+        Ok(ValidatedBackup {
+            manifest,
+            schema_version,
+        })
     })
 }
 
@@ -702,11 +782,7 @@ fn inspect_backup_file(path: &Path) -> BackupListItem {
             size_bytes,
             is_valid: true,
             invalid_reason: None,
-            note: if validated.manifest.note.trim().is_empty() {
-                None
-            } else {
-                Some(validated.manifest.note)
-            },
+            note: backup_note_to_option(&validated.manifest.note),
         },
         Err(error) => BackupListItem {
             file_name,
@@ -802,12 +878,15 @@ fn create_backup_internal<R: Runtime>(
     let temp_dir =
         tempdir_in(&paths.root).map_err(|error| format!("创建备份临时目录失败：{error}"))?;
     let snapshot_path = temp_dir.path().join(DATABASE_FILE_NAME);
-    create_database_snapshot(&paths.database, &snapshot_path)?;
+    with_backup_perf("create_backup.database_snapshot", || {
+        create_database_snapshot(&paths.database, &snapshot_path)
+    })?;
 
     let manifest = create_manifest(app, note);
     let backup_path = build_backup_file_name(&paths.backups);
     let backup_file =
         File::create(&backup_path).map_err(|error| format!("创建备份文件失败：{error}"))?;
+    let zip_write_started_at = Instant::now();
     let mut zip = ZipWriter::new(backup_file);
 
     zip.add_directory("database/", zip_dir_options())
@@ -826,19 +905,26 @@ fn create_backup_internal<R: Runtime>(
         &mut zip,
         &snapshot_path,
         &format!("database/{}", manifest.database_file),
+        zip_file_options(),
     )?;
     add_file_to_zip(
         &mut zip,
         &paths.settings,
         &format!("settings/{}", manifest.settings_file),
+        zip_file_options(),
     )?;
-    add_resources_to_zip(&mut zip, &paths.resources, &manifest.resource_directory)?;
+    with_backup_perf("create_backup.resources_zip", || {
+        add_resources_to_zip(&mut zip, &paths.resources, &manifest.resource_directory)
+    })?;
 
     zip.finish()
         .map_err(|error| format!("完成备份压缩包失败：{error}"))?;
+    log_backup_perf_complete("create_backup.zip_write", zip_write_started_at);
 
+    let result_started_at = Instant::now();
     let warning = prune_old_backups(&paths.backups, settings.backup_retention_count as usize);
-    let backup = inspect_backup_file(&backup_path);
+    let backup = build_created_backup_list_item(&backup_path, &manifest)?;
+    log_backup_perf_complete("create_backup.result", result_started_at);
 
     Ok(CreateBackupResult { backup, warning })
 }
@@ -1148,14 +1234,16 @@ pub fn restore_backup(
 #[cfg(test)]
 mod tests {
     use super::{
-        add_resources_to_zip, extract_backup_archive, validate_database_file_for_schema,
-        zip_dir_options, zip_file_options, AppSettings, BackupManifest, CURRENT_SCHEMA_VERSION,
+        add_resources_to_zip, build_created_backup_list_item, extract_backup_archive,
+        resource_file_compression_method, validate_database_file_for_schema, zip_dir_options,
+        zip_file_options, AppSettings, BackupManifest, CURRENT_SCHEMA_VERSION,
     };
     use rusqlite::Connection;
     use std::fs::{self, File};
     use std::io::Write;
+    use std::path::Path;
     use tempfile::tempdir;
-    use zip::ZipWriter;
+    use zip::{CompressionMethod, ZipWriter};
 
     fn create_temp_database(schema_sql: &str) -> std::path::PathBuf {
         let temp_dir = tempdir().expect("create temp dir");
@@ -1291,8 +1379,7 @@ mod tests {
                 .as_bytes(),
         )
         .expect("write settings");
-        add_resources_to_zip(&mut zip, &resources_dir, "resources")
-            .expect("add resources");
+        add_resources_to_zip(&mut zip, &resources_dir, "resources").expect("add resources");
         zip.finish().expect("finish archive");
 
         let extract_dir = temp_dir.path().join("extracted");
@@ -1305,5 +1392,48 @@ mod tests {
         assert!(restored_resources.join("images/note-image.png").is_file());
         assert!(restored_resources.join("covers").is_dir());
         assert!(restored_resources.join("covers/cover-image.jpg").is_file());
+    }
+
+    #[test]
+    fn resource_file_compression_method_uses_stored_for_images_and_deflated_for_others() {
+        assert_eq!(
+            resource_file_compression_method(Path::new("resources/images/example.png")),
+            CompressionMethod::Stored
+        );
+        assert_eq!(
+            resource_file_compression_method(Path::new("resources/covers/example.WEBP")),
+            CompressionMethod::Stored
+        );
+        assert_eq!(
+            resource_file_compression_method(Path::new("resources/notes/example.txt")),
+            CompressionMethod::Deflated
+        );
+    }
+
+    #[test]
+    fn build_created_backup_list_item_maps_manifest_note_and_size() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let backup_path = temp_dir.path().join("sample-backup.zip");
+        fs::write(&backup_path, b"zip-data").expect("write backup");
+        let manifest = BackupManifest {
+            format_version: 1,
+            schema_version: Some(CURRENT_SCHEMA_VERSION),
+            app_version: "0.1.0".to_string(),
+            created_at: "2026-04-08 12:34:56".to_string(),
+            database_file: "fight-notes.db".to_string(),
+            resource_directory: "resources".to_string(),
+            settings_file: "app-settings.json".to_string(),
+            note: "自动备份".to_string(),
+        };
+
+        let item =
+            build_created_backup_list_item(&backup_path, &manifest).expect("build backup item");
+
+        assert_eq!(item.file_name, "sample-backup.zip");
+        assert_eq!(item.created_at, "2026-04-08 12:34:56");
+        assert_eq!(item.size_bytes, 8);
+        assert!(item.is_valid);
+        assert_eq!(item.invalid_reason, None);
+        assert_eq!(item.note, Some("自动备份".to_string()));
     }
 }

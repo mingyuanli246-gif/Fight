@@ -1,4 +1,11 @@
-import { useContext, useEffect, useMemo, useState, type CSSProperties } from "react";
+import {
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import { closeNotebookDatabase } from "../notebooks/db";
 import { ThemeContext } from "../theme/ThemeProvider";
 import { themeOptions } from "../theme/themeOptions";
@@ -23,6 +30,7 @@ import styles from "./SettingsWorkspace.module.css";
 const RETENTION_OPTIONS = [3, 5, 10] as const;
 const RESTORE_BLOCKED_MESSAGE =
   "恢复备份前保存失败，已阻止恢复操作。请先等待保存完成，或复制内容后再操作。";
+type BackupRefreshReason = "initial-load" | "post-create";
 
 interface SettingsWorkspaceProps {
   startupNotice: SettingsNotice | null;
@@ -64,6 +72,39 @@ function buildNotice(
   return { tone, message };
 }
 
+function sortBackups(items: BackupListItem[]) {
+  return [...items].sort((left, right) =>
+    right.createdAt.localeCompare(left.createdAt) ||
+    right.fileName.localeCompare(left.fileName),
+  );
+}
+
+function insertBackupItem(
+  currentBackups: BackupListItem[],
+  nextBackup: BackupListItem,
+) {
+  return sortBackups([
+    nextBackup,
+    ...currentBackups.filter((item) => item.fileName !== nextBackup.fileName),
+  ]);
+}
+
+function logBackupRefreshStart(reason: BackupRefreshReason) {
+  console.info(`[backup.perf] refresh start reason=${reason}`);
+  return performance.now();
+}
+
+function logBackupRefreshComplete(
+  reason: BackupRefreshReason,
+  startedAt: number,
+) {
+  console.info(
+    `[backup.perf] refresh complete reason=${reason} ${Math.round(
+      performance.now() - startedAt,
+    )}ms`,
+  );
+}
+
 export function SettingsWorkspace({
   startupNotice,
   beforeRestoreBackup,
@@ -88,6 +129,7 @@ export function SettingsWorkspace({
   const [confirmRestoreFileName, setConfirmRestoreFileName] = useState<
     string | null
   >(null);
+  const latestBackupRefreshRequestRef = useRef(0);
 
   const isBusy = operationState !== "idle";
 
@@ -117,7 +159,7 @@ export function SettingsWorkspace({
           await Promise.all([
             loadAppSettings(),
             getDataEnvironmentInfo(),
-            listBackups(),
+            fetchBackups("initial-load"),
           ]);
 
         if (cancelled) {
@@ -126,7 +168,7 @@ export function SettingsWorkspace({
 
         setSettings(loadedSettings);
         setEnvironmentInfo(loadedEnvironmentInfo);
-        setBackups(loadedBackups);
+        applyBackupRefreshResult(loadedBackups);
       } catch (error) {
         if (cancelled) {
           return;
@@ -158,9 +200,34 @@ export function SettingsWorkspace({
     );
   }, [theme]);
 
-  async function refreshBackups() {
-    const items = await listBackups();
-    setBackups(items);
+  async function fetchBackups(reason: BackupRefreshReason) {
+    const requestId = latestBackupRefreshRequestRef.current + 1;
+    latestBackupRefreshRequestRef.current = requestId;
+    const startedAt = logBackupRefreshStart(reason);
+
+    try {
+      return {
+        requestId,
+        items: sortBackups(await listBackups()),
+      };
+    } finally {
+      logBackupRefreshComplete(reason, startedAt);
+    }
+  }
+
+  function shouldApplyBackupRefresh(requestId: number) {
+    return latestBackupRefreshRequestRef.current === requestId;
+  }
+
+  function applyBackupRefreshResult(result: {
+    requestId: number;
+    items: BackupListItem[];
+  }) {
+    if (!shouldApplyBackupRefresh(result.requestId)) {
+      return;
+    }
+
+    setBackups(result.items);
   }
 
   async function handleAutoBackupToggle(enabled: boolean) {
@@ -224,7 +291,7 @@ export function SettingsWorkspace({
 
     try {
       const result = await createBackup();
-      await refreshBackups();
+      setBackups((currentBackups) => insertBackupItem(currentBackups, result.backup));
 
       setNotice(
         buildNotice(
@@ -234,6 +301,15 @@ export function SettingsWorkspace({
             : `备份已创建：${result.backup.fileName}`,
         ),
       );
+
+      void (async () => {
+        try {
+          const refreshedBackups = await fetchBackups("post-create");
+          applyBackupRefreshResult(refreshedBackups);
+        } catch (error) {
+          console.error("[settings] 后台刷新备份列表失败", error);
+        }
+      })();
     } catch (error) {
       setNotice(
         buildNotice(
