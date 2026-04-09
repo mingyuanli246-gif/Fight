@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   addTagToNoteByName,
+  listTagsWithCounts,
   listTagsByNote,
   removeTagFromNote,
 } from "./repository";
-import type { Tag } from "./types";
+import type { Tag, TagWithCount } from "./types";
 import styles from "./NoteTagManager.module.css";
 
 interface NoteTagManagerProps {
@@ -27,11 +28,18 @@ export function NoteTagManager({
   onError,
 }: NoteTagManagerProps) {
   const [tags, setTags] = useState<Tag[]>([]);
-  const [inputValue, setInputValue] = useState("");
+  const [tagCatalog, setTagCatalog] = useState<TagWithCount[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isBusy, setIsBusy] = useState(false);
+  const [isPickerOpen, setIsPickerOpen] = useState(false);
   const activeNoteIdRef = useRef(noteId);
   const requestVersionRef = useRef(0);
+  const pickerRef = useRef<HTMLDivElement | null>(null);
+
+  const availableTags = useMemo(() => {
+    const boundTagIds = new Set(tags.map((tag) => tag.id));
+    return tagCatalog.filter((tag) => !boundTagIds.has(tag.id));
+  }, [tagCatalog, tags]);
 
   useEffect(() => {
     activeNoteIdRef.current = noteId;
@@ -39,23 +47,29 @@ export function NoteTagManager({
     const requestVersion = requestVersionRef.current;
     setIsLoading(true);
     setTags([]);
-    setInputValue("");
+    setTagCatalog([]);
+    setIsPickerOpen(false);
 
     void (async () => {
       try {
-        const nextTags = await listTagsByNote(noteId);
+        const [nextTags, nextTagCatalog] = await Promise.all([
+          listTagsByNote(noteId),
+          listTagsWithCounts(),
+        ]);
 
         if (requestVersion !== requestVersionRef.current) {
           return;
         }
 
         setTags(nextTags);
+        setTagCatalog(nextTagCatalog);
       } catch (error) {
         if (requestVersion !== requestVersionRef.current) {
           return;
         }
 
         setTags([]);
+        setTagCatalog([]);
         onError(getErrorMessage(error));
       } finally {
         if (requestVersion === requestVersionRef.current) {
@@ -65,7 +79,37 @@ export function NoteTagManager({
     })();
   }, [noteId, onError]);
 
-  async function handleAddTag() {
+  useEffect(() => {
+    if (!isPickerOpen) {
+      return;
+    }
+
+    function handleWindowPointerDown(event: PointerEvent) {
+      const target = event.target as Node | null;
+
+      if (pickerRef.current?.contains(target)) {
+        return;
+      }
+
+      setIsPickerOpen(false);
+    }
+
+    function handleWindowKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setIsPickerOpen(false);
+      }
+    }
+
+    window.addEventListener("pointerdown", handleWindowPointerDown);
+    window.addEventListener("keydown", handleWindowKeyDown);
+
+    return () => {
+      window.removeEventListener("pointerdown", handleWindowPointerDown);
+      window.removeEventListener("keydown", handleWindowKeyDown);
+    };
+  }, [isPickerOpen]);
+
+  async function handleAddTag(tag: TagWithCount) {
     if (disabled || isBusy) {
       return;
     }
@@ -74,14 +118,14 @@ export function NoteTagManager({
     setIsBusy(true);
 
     try {
-      const nextTags = await addTagToNoteByName(expectedNoteId, inputValue);
+      const nextTags = await addTagToNoteByName(expectedNoteId, tag.name);
 
       if (activeNoteIdRef.current !== expectedNoteId) {
         return;
       }
 
       setTags(nextTags);
-      setInputValue("");
+      setIsPickerOpen(false);
     } catch (error) {
       if (activeNoteIdRef.current === expectedNoteId) {
         onError(getErrorMessage(error));
@@ -116,12 +160,19 @@ export function NoteTagManager({
     }
   }
 
+  function handleTogglePicker() {
+    if (disabled || isBusy || isLoading || availableTags.length === 0) {
+      return;
+    }
+
+    setIsPickerOpen((current) => !current);
+  }
+
   return (
     <section className={styles.manager}>
       <div className={styles.header}>
         <div>
           <p className={styles.label}>当前标签</p>
-          <p className={styles.hint}>为当前文件添加分类或复习标签，支持回车快速提交。</p>
         </div>
       </div>
 
@@ -158,32 +209,38 @@ export function NoteTagManager({
         </div>
       )}
 
-      <div className={styles.form}>
-        <input
-          type="text"
-          className={styles.input}
-          value={inputValue}
-          onChange={(event) => setInputValue(event.currentTarget.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              event.preventDefault();
-              void handleAddTag();
-            }
-          }}
-          placeholder="输入标签名称后按 Enter"
-          maxLength={40}
-          disabled={disabled || isBusy}
-        />
+      <div ref={pickerRef} className={styles.pickerArea}>
         <button
           type="button"
-          className={styles.addButton}
-          onClick={() => {
-            void handleAddTag();
-          }}
-          disabled={disabled || isBusy}
+          className={styles.addTagTrigger}
+          onClick={handleTogglePicker}
+          disabled={disabled || isBusy || isLoading || availableTags.length === 0}
+          aria-haspopup="menu"
+          aria-expanded={isPickerOpen}
         >
           添加标签
         </button>
+
+        {isPickerOpen ? (
+          <div className={styles.tagPicker} role="menu" aria-label="可选标签">
+            {availableTags.map((tag) => (
+              <button
+                key={tag.id}
+                type="button"
+                className={styles.tagPickerItem}
+                onClick={() => {
+                  void handleAddTag(tag);
+                }}
+              >
+                <span
+                  className={styles.tagPickerDot}
+                  style={{ backgroundColor: tag.color }}
+                />
+                <span className={styles.tagPickerName}>{tag.name}</span>
+              </button>
+            ))}
+          </div>
+        ) : null}
       </div>
     </section>
   );

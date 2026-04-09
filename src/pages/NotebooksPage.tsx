@@ -12,6 +12,7 @@ import styles from "./PageLayout.module.css";
 
 interface NotebooksPageProps {
   openRequest: NoteOpenRequest | null;
+  onConsumeOpenRequest: (requestId: number) => void;
   workspaceRef: RefObject<NotebookWorkspaceRef | null>;
   onChromeModeChange: (mode: NotebookShellMode) => void;
   onOpenNote: (target: NoteOpenTarget) => void;
@@ -19,6 +20,7 @@ interface NotebooksPageProps {
 
 export function NotebooksPage({
   openRequest,
+  onConsumeOpenRequest,
   workspaceRef,
   onChromeModeChange,
   onOpenNote,
@@ -30,6 +32,7 @@ export function NotebooksPage({
       <NotebookWorkspace
         ref={workspaceRef}
         openRequest={openRequest}
+        onConsumeOpenRequest={onConsumeOpenRequest}
         onChromeModeChange={onChromeModeChange}
         onOpenNote={onOpenNote}
       />

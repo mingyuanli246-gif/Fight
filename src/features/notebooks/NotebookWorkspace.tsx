@@ -197,6 +197,7 @@ function isEditableElement(target: EventTarget | null) {
 
 interface NotebookWorkspaceProps {
   openRequest: NoteOpenRequest | null;
+  onConsumeOpenRequest: (requestId: number) => void;
   onOpenNote: (target: NoteOpenTarget) => void;
   onChromeModeChange?: (mode: NotebookShellMode) => void;
 }
@@ -218,7 +219,7 @@ export const NotebookWorkspace = forwardRef<
   NotebookWorkspaceRef,
   NotebookWorkspaceProps
 >(function NotebookWorkspace(
-  { openRequest, onOpenNote, onChromeModeChange },
+  { openRequest, onConsumeOpenRequest, onOpenNote, onChromeModeChange },
   ref,
 ) {
   const [notebooks, setNotebooks] = useState<Notebook[]>([]);
@@ -420,6 +421,7 @@ export const NotebookWorkspace = forwardRef<
     }
 
     lastHandledOpenRequestRef.current = openRequest.requestId;
+    onConsumeOpenRequest(openRequest.requestId);
 
     void (async () => {
       const saved = await flushCurrentNoteIfNeeded();
@@ -459,7 +461,7 @@ export const NotebookWorkspace = forwardRef<
         setIsBusy(false);
       }
     })();
-  }, [isInitializing, openRequest, selectedEntity]);
+  }, [isInitializing, onConsumeOpenRequest, openRequest, selectedEntity]);
 
   async function requestSelectionChange(
     nextSelection: SelectedEntity,

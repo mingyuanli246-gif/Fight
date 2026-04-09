@@ -23,6 +23,7 @@ interface AppShellProps {
   currentSection: AppSection;
   onSectionChange: (section: AppSection) => void;
   noteOpenRequest: NoteOpenRequest | null;
+  onConsumeNoteOpenRequest: (requestId: number) => void;
   onOpenNote: (target: NoteOpenTarget) => void;
   settingsStartupNotice: SettingsNotice | null;
 }
@@ -30,6 +31,7 @@ interface AppShellProps {
 function renderPage(
   section: AppSection,
   noteOpenRequest: NoteOpenRequest | null,
+  onConsumeNoteOpenRequest: (requestId: number) => void,
   onOpenNote: (target: NoteOpenTarget) => void,
   settingsStartupNotice: SettingsNotice | null,
   notebookWorkspaceRef: RefObject<NotebookWorkspaceRef | null>,
@@ -41,6 +43,7 @@ function renderPage(
       return (
         <NotebooksPage
           openRequest={noteOpenRequest}
+          onConsumeOpenRequest={onConsumeNoteOpenRequest}
           workspaceRef={notebookWorkspaceRef}
           onChromeModeChange={onNotebookChromeModeChange}
           onOpenNote={onOpenNote}
@@ -61,6 +64,7 @@ function renderPage(
       return (
         <NotebooksPage
           openRequest={noteOpenRequest}
+          onConsumeOpenRequest={onConsumeNoteOpenRequest}
           workspaceRef={notebookWorkspaceRef}
           onChromeModeChange={onNotebookChromeModeChange}
           onOpenNote={onOpenNote}
@@ -73,6 +77,7 @@ export default function AppShell({
   currentSection,
   onSectionChange,
   noteOpenRequest,
+  onConsumeNoteOpenRequest,
   onOpenNote,
   settingsStartupNotice,
 }: AppShellProps) {
@@ -230,6 +235,7 @@ export default function AppShell({
           {renderPage(
             currentSection,
             noteOpenRequest,
+            onConsumeNoteOpenRequest,
             onOpenNote,
             settingsStartupNotice,
             notebookWorkspaceRef,

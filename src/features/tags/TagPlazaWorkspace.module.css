@@ -20,11 +20,19 @@
 
 .panelHeader {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
+  min-height: 78px;
+  padding: 0 22px;
+  border-bottom: 1px solid var(--color-border-soft);
+  box-sizing: border-box;
+}
+
+.panelHeaderBar {
+  display: flex;
+  align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 22px 22px 18px;
-  border-bottom: 1px solid var(--color-border-soft);
+  width: 100%;
 }
 
 .panelTitle {
@@ -35,54 +43,17 @@
   color: var(--color-text-primary);
 }
 
-.panelDescription {
-  margin: 8px 0 0;
-  font-size: 13px;
-  line-height: 1.6;
-  color: var(--color-text-secondary);
-}
-
-.panelBody {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  min-height: 0;
-  padding: 20px 22px 22px;
-  overflow: auto;
-}
-
-.form {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.input {
-  width: 100%;
-  min-height: 42px;
-  padding: 0 14px;
-  color: var(--color-text-primary);
-  background: rgba(255, 255, 255, 0.96);
-  border: 1px solid var(--color-border-soft);
-  border-radius: 12px;
-  outline: none;
-}
-
-.input:focus {
-  border-color: var(--color-accent);
-  box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.18);
-}
-
+.headerActionButton,
 .actionButton,
 .secondaryButton,
-.dangerButton,
-.suggestionChip {
+.dangerButton {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 38px;
+  min-height: 40px;
   padding: 0 14px;
   border-radius: 12px;
+  border: 0;
   font-size: 13px;
   font-weight: 700;
   cursor: pointer;
@@ -90,7 +61,18 @@
     transform 140ms ease,
     background-color 140ms ease,
     border-color 140ms ease,
-    color 140ms ease;
+    color 140ms ease,
+    opacity 140ms ease;
+}
+
+.headerActionButton {
+  width: 40px;
+  min-width: 40px;
+  padding: 0;
+  font-size: 18px;
+  color: var(--color-text-primary);
+  background: rgba(255, 255, 255, 0.84);
+  border: 1px solid var(--color-border-soft);
 }
 
 .actionButton {
@@ -109,27 +91,30 @@
   background: #dc2626;
 }
 
-.suggestionChip {
-  color: var(--color-text-primary);
-  background: rgba(255, 255, 255, 0.84);
-  border: 1px solid var(--color-border-soft);
-}
-
+.headerActionButton:hover:enabled,
 .actionButton:hover:enabled,
 .secondaryButton:hover:enabled,
 .dangerButton:hover:enabled,
-.suggestionChip:hover:enabled,
 .tagItem:hover:enabled,
 .noteItem:hover:enabled {
   transform: translateY(-1px);
 }
 
+.headerActionButton:disabled,
 .actionButton:disabled,
 .secondaryButton:disabled,
-.dangerButton:disabled,
-.suggestionChip:disabled {
+.dangerButton:disabled {
   opacity: 0.55;
   cursor: not-allowed;
+}
+
+.panelBody {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 0;
+  padding: 20px 22px 22px;
+  overflow: auto;
 }
 
 .tagList,
@@ -142,13 +127,15 @@
   list-style: none;
 }
 
+.tagListItem {
+  position: relative;
+}
+
 .tagItem,
 .noteItem {
   width: 100%;
   text-align: left;
-  border: 1px solid transparent;
   border-radius: 16px;
-  cursor: pointer;
   transition:
     transform 140ms ease,
     border-color 140ms ease,
@@ -159,20 +146,40 @@
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 14px 15px;
+  padding: 16px;
   background: transparent;
   border: 1px solid transparent;
+  cursor: pointer;
 }
 
-.tagItem:hover:enabled,
+.tagItem:not(.tagItemActive) {
+  gap: 0;
+  background: rgba(255, 255, 255, 0.94);
+  border-color: transparent;
+}
+
+.tagItem:not(.tagItemActive) .tagDot {
+  display: none;
+}
+
+.tagItem:not(.tagItemActive):hover:enabled,
 .noteItem:hover:enabled {
-  border-color: var(--color-border-soft);
-  background: rgba(255, 255, 255, 0.82);
+  border-color: rgba(96, 165, 250, 0.36);
+  background: rgba(219, 234, 254, 0.62);
 }
 
 .tagItemActive {
   border-color: var(--color-border-strong);
   background: var(--color-accent-soft);
+}
+
+.tagItemActive:hover:enabled {
+  border-color: var(--color-border-strong);
+  background: var(--color-accent-soft);
+}
+
+.tagItemEditing {
+  cursor: default;
 }
 
 .tagDot {
@@ -187,13 +194,13 @@
   flex-direction: column;
   gap: 4px;
   min-width: 0;
+  flex: 1;
 }
 
 .tagItemTitle,
 .noteTitle,
 .emptyTitle,
 .statusTitle,
-.cardTitle,
 .errorTitle {
   margin: 0;
   font-size: 14px;
@@ -207,15 +214,51 @@
 .noteMeta,
 .emptyText,
 .statusText,
-.confirmText,
-.errorText {
+.errorText,
+.fieldError {
   margin: 0;
   font-size: 13px;
   line-height: 1.7;
   color: var(--color-text-secondary);
 }
 
-.actionCard,
+.inlineNameInput,
+.dialogInput {
+  width: 100%;
+  color: var(--color-text-primary);
+  outline: none;
+}
+
+.inlineNameInput {
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  font-size: 14px;
+  line-height: 1.5;
+  font-weight: 700;
+}
+
+.inlineNameInput::placeholder,
+.dialogInput::placeholder {
+  color: var(--color-text-tertiary);
+}
+
+.inlineNameInput:focus {
+  outline: none;
+}
+
+.noteItem {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+
 .emptyBlock,
 .statusCard,
 .errorBanner {
@@ -223,23 +266,19 @@
   border-radius: 18px;
 }
 
-.actionCard {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  background: rgba(255, 255, 255, 0.88);
-  border: 1px solid var(--color-border-soft);
-}
-
 .emptyBlock,
 .statusCard {
   display: flex;
   flex-direction: column;
-  gap: 10px;
   justify-content: center;
+  gap: 10px;
   min-height: 220px;
   background: var(--color-surface-primary);
   border: 1px dashed var(--color-border-soft);
+}
+
+.emptyBlockCompact {
+  min-height: 180px;
 }
 
 .errorBanner {
@@ -252,27 +291,98 @@
   border: 1px solid rgba(248, 113, 113, 0.28);
 }
 
-.suggestionList {
+.contextMenu {
+  position: fixed;
+  z-index: 70;
+  min-width: 184px;
+  padding: 8px;
+  background: rgba(255, 255, 255, 0.99);
+  border: 1px solid rgba(226, 232, 240, 0.94);
+  border-radius: 18px;
+  box-shadow: 0 22px 42px rgba(15, 23, 42, 0.14);
+}
+
+.contextMenuItem {
   display: flex;
-  flex-wrap: wrap;
+  width: 100%;
+  padding: 13px 14px;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 12px;
+  font-size: 16px;
+  line-height: 1.45;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  cursor: pointer;
+}
+
+.contextMenuItem:hover {
+  background: rgba(241, 245, 249, 0.92);
+}
+
+.contextMenuItemDanger {
+  color: #b91c1c;
+}
+
+.dialogOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 28px;
+  background: rgba(15, 23, 42, 0.22);
+  backdrop-filter: blur(6px);
+}
+
+.dialogCard {
+  width: min(420px, calc(100vw - 32px));
+  padding: 22px;
+  background: rgba(255, 255, 255, 0.98);
+  border: 1px solid var(--color-border-soft);
+  border-radius: 20px;
+  box-shadow: 0 22px 60px rgba(15, 23, 42, 0.18);
+}
+
+.dialogTitle {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.35;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.dialogText {
+  margin: 12px 0 0;
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--color-text-secondary);
+}
+
+.dialogInput {
+  min-height: 44px;
+  margin-top: 16px;
+  padding: 0 14px;
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid var(--color-border-soft);
+  border-radius: 12px;
+}
+
+.dialogInput:focus {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.18);
+}
+
+.fieldError {
+  margin-top: 10px;
+  color: #b91c1c;
+}
+
+.dialogActions {
+  display: flex;
+  justify-content: flex-end;
   gap: 10px;
-}
-
-.confirmBox {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.confirmActions {
-  display: flex;
-  gap: 10px;
-}
-
-.noteItem {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 16px;
-  background: rgba(255, 255, 255, 0.72);
+  margin-top: 18px;
 }

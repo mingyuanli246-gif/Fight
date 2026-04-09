@@ -91,12 +91,19 @@ function App() {
     });
   }
 
+  function handleConsumeNoteOpenRequest(requestId: number) {
+    setNoteOpenRequest((current) =>
+      current?.requestId === requestId ? null : current,
+    );
+  }
+
   return (
     <ThemeProvider>
       <AppShell
         currentSection={currentSection}
         onSectionChange={setCurrentSection}
         noteOpenRequest={noteOpenRequest}
+        onConsumeNoteOpenRequest={handleConsumeNoteOpenRequest}
         onOpenNote={handleOpenNote}
         settingsStartupNotice={settingsStartupNotice}
       />

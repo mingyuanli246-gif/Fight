@@ -17,8 +17,8 @@ export function NavigationRail({
     <aside className={styles.rail}>
       <div className={styles.brand}>
         <p className={styles.eyebrow}>本地优先</p>
-        <h1 className={styles.title}>本地笔记</h1>
-        <p className={styles.subtitle}>长期自用 · 本地知识工作台</p>
+        <h1 className={styles.title}>Fight 笔记</h1>
+        <p className={styles.subtitle}>本地知识工作台</p>
       </div>
 
       <nav className={styles.navigation} aria-label="主导航">

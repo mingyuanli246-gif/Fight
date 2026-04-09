@@ -25,9 +25,8 @@
   color: var(--color-text-tertiary);
 }
 
-.hint,
 .stateText {
-  margin: 6px 0 0;
+  margin: 0;
   font-size: 13px;
   line-height: 1.6;
   color: var(--color-text-secondary);
@@ -74,40 +73,77 @@
   opacity: 0.5;
 }
 
-.form {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 10px;
+.pickerArea {
+  position: relative;
+  display: flex;
+  justify-content: center;
 }
 
-.input {
-  width: 100%;
+.addTagTrigger {
   min-height: 40px;
-  padding: 0 14px;
-  color: var(--color-text-primary);
-  background: rgba(255, 255, 255, 0.96);
-  border: 1px solid var(--color-border-soft);
-  border-radius: 12px;
-  outline: none;
-}
-
-.input:focus {
-  border-color: var(--color-accent);
-  box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.16);
-}
-
-.addButton {
-  min-height: 40px;
-  padding: 0 14px;
+  min-width: 112px;
+  padding: 0 18px;
   color: var(--color-selected-foreground);
   background: var(--color-accent-strong);
+  border: 0;
   border-radius: 12px;
   font-size: 13px;
   font-weight: 700;
   cursor: pointer;
 }
 
-.addButton:disabled {
+.addTagTrigger:disabled {
   cursor: not-allowed;
   opacity: 0.56;
+}
+
+.tagPicker {
+  position: absolute;
+  top: calc(100% + 12px);
+  left: 50%;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: min(240px, calc(100vw - 48px));
+  max-height: 280px;
+  padding: 8px;
+  overflow: auto;
+  background: rgba(255, 255, 255, 0.99);
+  border: 1px solid var(--color-border-soft);
+  border-radius: 18px;
+  box-shadow: 0 20px 40px rgba(15, 23, 42, 0.14);
+  transform: translateX(-50%);
+}
+
+.tagPickerItem {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 12px 14px;
+  text-align: left;
+  color: var(--color-text-primary);
+  background: transparent;
+  border: 0;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: background-color 140ms ease;
+}
+
+.tagPickerItem:hover {
+  background: rgba(241, 245, 249, 0.92);
+}
+
+.tagPickerDot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
+.tagPickerName {
+  font-size: 14px;
+  line-height: 1.45;
+  font-weight: 600;
 }
