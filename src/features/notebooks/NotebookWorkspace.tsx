@@ -651,7 +651,7 @@ export const NotebookWorkspace = forwardRef<
             currentNotebook.id === id ? updatedNotebook : currentNotebook,
           ),
         );
-      } catch (error) {
+      } catch {
         await cleanupManagedResourceBestEffort(nextCoverPath, "清理未保存的新封面");
         throw new Error("笔记本封面保存失败，请稍后重试。");
       }

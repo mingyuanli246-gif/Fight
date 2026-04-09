@@ -129,6 +129,15 @@
 - 第十四A清单已扩展为备份与恢复回归清单，继续复用原路径：
   - [docs/stage-14a-backup-regression-checklist.md](/Users/lihongxia/Downloads/Fight/docs/stage-14a-backup-regression-checklist.md)
 
+## 当前工程守门
+
+- 新增 `npm run lint`，补上最小 ESLint 入口，优先拦截前端接线与基础 TS/React Hook 问题
+- 新增 `npm run check:tauri-commands`，静态比对前端 `invoke(...)` 与 `src-tauri/src/lib.rs` 中的 `generate_handler![]` 注册列表，防止命令接线漂移
+- `createFolder` 已迁到 Rust `create_folder_tx`，避免前端 “先查 MAX(sort_order) 再插入” 在快速重复创建、批量导入或多窗口场景下留下排序竞争条件
+- `security.csp` 当前仍保持 `null`；本轮只补来源审计与白名单草案，不直接硬收紧配置
+- CSP 审计记录见：
+  - [docs/tauri-csp-audit.md](/Users/lihongxia/Downloads/Fight/docs/tauri-csp-audit.md)
+
 ## 第十六阶段新增
 
 - notebooks UI 改成两种显式模式：
@@ -161,12 +170,13 @@
 | --- | --- | --- | --- |
 | A | `createNote` `renameNote` `updateNoteContent` `deleteNote` | Rust command | 涉及正文落盘、搜索索引同步或高频切换路径 |
 | A | `deleteNotebook` `deleteFolder` | Rust command | 删除链路依赖事务一致性 |
+| A | `createFolder` | Rust command | 后续阶段迁移；使用单连接事务与 `IMMEDIATE` 行为收口顶层 folder 的 `sort_order` 分配，避免快速重复创建或批处理下的排序竞争 |
 | A | `updateNotebookCoverImage` `clearNotebookCoverImage` | Rust command | 第十四B阶段迁移；封面路径同时跨 `notebooks`、`resources/covers/` 与前端资源状态，是剩余最高风险写路径 |
 | A | `addTagToNoteByName` `removeTagFromNote` | Rust command | 涉及 note/tag 关系写入 |
 | A | `createReviewPlan` `renameReviewPlan` `deleteReviewPlan` | Rust command | 复习方案及其步骤/关联任务需要单连接事务 |
 | A | `bindReviewPlanToNote` `removeReviewPlanBinding` | Rust command | 涉及绑定与任务生成/清理 |
 | A | `setReviewTaskCompleted` | Rust command | 复习任务完成状态是高频关键写路径 |
-| B | `createFolder` `deleteTag` | 前端直写保留 | `createFolder` 只有同表 `sort_order` 分配竞态，`deleteTag` 虽联动 `note_tags` 但由 SQLite FK 级联单语句原子完成 |
+| B | `deleteTag` | 前端直写保留 | 虽联动 `note_tags`，但由 SQLite FK 级联单语句原子完成 |
 | C | `createNotebook` `renameNotebook` `renameFolder` `createTag` `renameTag` | 前端直写保留 | 单表、低耦合、失败后不会留下跨资源脏状态；`createTag` 的两步颜色分配只会带来颜色重复，不影响关系正确性 |
 
 第十四B阶段完整审计表与保留理由见：
@@ -196,6 +206,8 @@ npm run tauri dev
 
 ```bash
 npm run typecheck
+npm run lint
+npm run check:tauri-commands
 npm run build
 cargo check --manifest-path src-tauri/Cargo.toml
 cargo test --manifest-path src-tauri/Cargo.toml

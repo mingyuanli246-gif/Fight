@@ -1,5 +1,5 @@
 use chrono::{NaiveDate, Utc};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -31,6 +31,18 @@ pub struct NotebookRecord {
     pub id: i64,
     pub name: String,
     pub cover_image_path: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderRecord {
+    pub id: i64,
+    pub notebook_id: i64,
+    pub parent_folder_id: Option<i64>,
+    pub name: String,
+    pub sort_order: i64,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -398,6 +410,89 @@ fn fetch_notebook_by_id(
             },
         )
         .map_err(|error| to_command_error("读取笔记本", error))
+}
+
+fn fetch_folder_by_id(connection: &Connection, folder_id: i64) -> Result<FolderRecord, String> {
+    connection
+        .query_row(
+            "
+              SELECT
+                id,
+                notebook_id,
+                parent_folder_id,
+                name,
+                sort_order,
+                created_at,
+                updated_at
+              FROM folders
+              WHERE id = ?1
+            ",
+            [folder_id],
+            |row| {
+                Ok(FolderRecord {
+                    id: row.get(0)?,
+                    notebook_id: row.get(1)?,
+                    parent_folder_id: row.get(2)?,
+                    name: row.get(3)?,
+                    sort_order: row.get(4)?,
+                    created_at: row.get(5)?,
+                    updated_at: row.get(6)?,
+                })
+            },
+        )
+        .map_err(|error| to_command_error("读取文件夹", error))
+}
+
+fn create_folder_tx_internal(
+    connection: &mut Connection,
+    notebook_id: i64,
+    name: &str,
+) -> Result<FolderRecord, String> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| to_command_error("开启创建文件夹事务", error))?;
+
+    let notebook_exists = transaction
+        .query_row(
+            "SELECT 1 FROM notebooks WHERE id = ?1 LIMIT 1",
+            [notebook_id],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|error| to_command_error("校验笔记本是否存在", error))?;
+
+    if notebook_exists.is_none() {
+        return Err("目标笔记本不存在。".to_string());
+    }
+
+    let sort_order = transaction
+        .query_row(
+            "
+              SELECT COALESCE(MAX(sort_order), -1) + 1
+              FROM folders
+              WHERE notebook_id = ?1 AND parent_folder_id IS NULL
+            ",
+            [notebook_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| to_command_error("计算文件夹排序", error))?;
+
+    transaction
+        .execute(
+            "
+              INSERT INTO folders (notebook_id, parent_folder_id, name, sort_order)
+              VALUES (?1, NULL, ?2, ?3)
+            ",
+            params![notebook_id, name, sort_order],
+        )
+        .map_err(|error| to_command_error("创建文件夹", error))?;
+
+    let folder_id = transaction.last_insert_rowid();
+    transaction
+        .commit()
+        .map_err(|error| to_command_error("提交创建文件夹事务", error))?;
+
+    fetch_folder_by_id(connection, folder_id)
 }
 
 fn ensure_note_exists(connection: &Connection, note_id: i64) -> Result<(), String> {
@@ -1583,6 +1678,16 @@ pub fn create_note_tx(
 }
 
 #[tauri::command]
+pub fn create_folder_tx(
+    app: AppHandle,
+    notebook_id: i64,
+    name: String,
+) -> Result<FolderRecord, String> {
+    let mut connection = open_database_connection(&app)?;
+    create_folder_tx_internal(&mut connection, notebook_id, &name)
+}
+
+#[tauri::command]
 pub fn create_review_plan_tx(
     app: AppHandle,
     name: String,
@@ -1712,7 +1817,7 @@ pub fn set_review_task_completed_tx(
 mod tests {
     use super::{
         add_tag_to_note_by_name_tx_internal, bind_review_plan_to_note_tx_internal,
-        clear_notebook_cover_image_tx_internal, create_note_tx_internal,
+        clear_notebook_cover_image_tx_internal, create_folder_tx_internal, create_note_tx_internal,
         create_review_plan_tx_internal, delete_review_plan_tx_internal, ensure_app_meta_table,
         ensure_note_search_ready_internal, ensure_note_search_table, extract_indexable_plain_text,
         rebuild_note_search_index_internal, rename_review_plan_tx_internal,
@@ -1993,6 +2098,36 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM notes", [], |row| row.get(0))
             .expect("count notes");
         assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn create_folder_path_can_commit_three_times_with_stable_sort_order() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+
+        for (name, expected_sort_order) in [
+            ("文件夹一", 0_i64),
+            ("文件夹二", 1_i64),
+            ("文件夹三", 2_i64),
+        ] {
+            let folder =
+                create_folder_tx_internal(&mut connection, 1, name).expect("create folder");
+            assert_eq!(folder.name, name);
+            assert_eq!(folder.sort_order, expected_sort_order);
+            assert_eq!(folder.parent_folder_id, None);
+        }
+    }
+
+    #[test]
+    fn create_folder_path_reports_missing_notebook() {
+        let mut connection = test_connection();
+
+        let error = create_folder_tx_internal(&mut connection, 999, "新文件夹")
+            .expect_err("missing notebook should fail");
+
+        assert_eq!(error, "目标笔记本不存在。");
     }
 
     #[test]

@@ -8,6 +8,9 @@
 
 - 剩余前端直写写路径都集中在 [src/features/notebooks/repository.ts](/Users/lihongxia/Downloads/Fight/src/features/notebooks/repository.ts)
 - `review` / `settings` 模块没有新增漏网的前端直写数据库写路径
+- 当前主干后续收口说明：
+  - `createFolder` 已在后续阶段迁到 Rust `create_folder_tx`
+  - 下表保留的是 14B 当时的审计快照，后续变化以文末“后续收口顺序”与 README 当前状态为准
 
 ## 完整审计表
 
@@ -58,3 +61,14 @@
 - `createTag` 的颜色分配仍可能在并发下出现重复颜色；这是体验层债务，不是数据正确性故障。
 - notebook 封面资源文件的导入、旧资源 best-effort 清理、资源缓存同步仍在前端编排中，14B 只收口数据库事务边界，没有处理孤儿文件回收。
 - repository 与 Rust command 仍是混合态；后续如继续迁移，必须继续按“真实风险优先”逐条审计，不做一刀切重写。
+
+## 后续收口顺序
+
+基于当前主干事实，建议后续仍按风险而不是按“整齐度”推进：
+
+1. `createFolder`
+   - 已在后续阶段迁到 Rust `create_folder_tx`，优先解决 `sort_order` 竞争条件。
+2. `createNotebook` / `renameNotebook` / `renameFolder`
+   - 继续保留前端直写；单表、低耦合、失败后无跨资源脏状态。
+3. `createTag` / `renameTag` / `deleteTag`
+   - 继续保留前端直写；`createTag` 的主要问题是颜色分配可能重复，`deleteTag` 依赖 SQLite FK 级联仍是单语句原子完成。

@@ -163,6 +163,13 @@ async function createNoteCommand(
   });
 }
 
+async function createFolderCommand(notebookId: number, name: string) {
+  return invoke<Folder>("create_folder_tx", {
+    notebookId,
+    name,
+  });
+}
+
 async function deleteNotebookCommand(notebookId: number) {
   return invoke<void>("delete_notebook_tx", { notebookId });
 }
@@ -459,19 +466,6 @@ export async function getNoteById(id: number) {
   });
 }
 
-async function getNextFolderSortOrder(database: Database, notebookId: number) {
-  const rows = await database.select<{ nextSortOrder: number }[]>(
-    `
-      SELECT COALESCE(MAX(sort_order), -1) + 1 AS nextSortOrder
-      FROM folders
-      WHERE notebook_id = $1 AND parent_folder_id IS NULL
-    `,
-    [notebookId],
-  );
-
-  return rows[0]?.nextSortOrder ?? 0;
-}
-
 export async function initializeNotebookDatabase() {
   return withRepositoryError("数据库初始化", async () => {
     const database = await getNotebookDatabase();
@@ -616,22 +610,9 @@ export async function listFoldersByNotebook(notebookId: number) {
 
 export async function createFolder(notebookId: number, name: string) {
   return withRepositoryError("创建文件夹", async () => {
-    const database = await getNotebookDatabase();
+    await getNotebookDatabase();
     const normalizedName = requireName(name, "文件夹");
-    const sortOrder = await getNextFolderSortOrder(database, notebookId);
-    const result = await database.execute(
-      `
-        INSERT INTO folders (notebook_id, parent_folder_id, name, sort_order)
-        VALUES ($1, NULL, $2, $3)
-      `,
-      [notebookId, normalizedName, sortOrder],
-    );
-
-    if (typeof result.lastInsertId !== "number") {
-      throw new RepositoryValidationError("创建文件夹失败，请稍后重试。");
-    }
-
-    return fetchFolderById(database, result.lastInsertId);
+    return createFolderCommand(notebookId, normalizedName);
   });
 }
 
