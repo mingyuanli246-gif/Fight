@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import { searchNotes } from "../../features/notebooks/repository";
 import type {
-  NoteOpenRequest,
+  NoteOpenTarget,
   NoteSearchResult,
 } from "../../features/notebooks/types";
 import styles from "./GlobalSearch.module.css";
@@ -10,7 +11,12 @@ const SEARCH_DEBOUNCE_MS = 280;
 const SEARCH_LIMIT = 20;
 
 interface GlobalSearchProps {
-  onOpenResult: (target: Pick<NoteOpenRequest, "noteId" | "notebookId">) => void;
+  onOpenResult: (target: NoteOpenTarget) => void;
+  variant?: "topbar" | "home";
+  rootClassName?: string;
+  boxClassName?: string;
+  rootStyle?: CSSProperties;
+  boxStyle?: CSSProperties;
 }
 
 function normalizeQuery(value: string) {
@@ -31,7 +37,14 @@ function buildPath(result: NoteSearchResult) {
   return `${result.notebookName} / ${result.folderName ?? "未归类"}`;
 }
 
-export function GlobalSearch({ onOpenResult }: GlobalSearchProps) {
+export function GlobalSearch({
+  onOpenResult,
+  variant = "topbar",
+  rootClassName,
+  boxClassName,
+  rootStyle,
+  boxStyle,
+}: GlobalSearchProps) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<NoteSearchResult[]>([]);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -92,15 +105,33 @@ export function GlobalSearch({ onOpenResult }: GlobalSearchProps) {
     setResults([]);
     setErrorMessage(null);
     setIsSearching(false);
-    onOpenResult(result);
+    onOpenResult({
+      noteId: result.noteId,
+      notebookId: result.notebookId,
+      highlightQuery: normalizedQuery,
+      highlightExcerpt: result.excerpt,
+      source: "global-search",
+    });
   }
 
   return (
-    <div className={styles.searchRoot}>
-      <label className={styles.searchLabel} htmlFor="global-note-search">
-        全局搜索
-      </label>
-      <div className={styles.searchBox}>
+    <div
+      className={`${styles.searchRoot} ${
+        variant === "home" ? styles.searchRootHome : ""
+      } ${rootClassName ?? ""}`}
+      style={rootStyle}
+    >
+      {variant === "home" ? null : (
+        <label className={styles.searchLabel} htmlFor="global-note-search">
+          全局搜索
+        </label>
+      )}
+      <div
+        className={`${styles.searchBox} ${
+          variant === "home" ? styles.searchBoxHome : ""
+        } ${boxClassName ?? ""}`}
+        style={boxStyle}
+      >
         <input
           id="global-note-search"
           type="search"
@@ -109,13 +140,18 @@ export function GlobalSearch({ onOpenResult }: GlobalSearchProps) {
           value={query}
           onChange={(event) => setQuery(event.currentTarget.value)}
           placeholder="搜索文件标题或正文内容"
+          aria-label="全局搜索"
           autoComplete="off"
           spellCheck={false}
         />
       </div>
 
       {shouldShowPanel ? (
-        <div className={styles.searchPanel}>
+        <div
+          className={`${styles.searchPanel} ${
+            variant === "home" ? styles.searchPanelHome : ""
+          }`}
+        >
           {isSearching ? (
             <div className={styles.panelState}>正在搜索…</div>
           ) : errorMessage ? (

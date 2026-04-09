@@ -71,6 +71,26 @@ export interface NoteOpenRequest {
   requestId: number;
   noteId: number;
   notebookId: number;
+  highlightQuery?: string;
+  highlightExcerpt?: string;
+  source?: "global-search" | "external-open";
+}
+
+export type NoteOpenTarget = Omit<NoteOpenRequest, "requestId">;
+
+export type NotebookShellMode = "home" | "detail";
+
+export type NotebookHomeSort =
+  | "updated-desc"
+  | "created-desc"
+  | "name-asc"
+  | "name-desc";
+
+export interface NotebookHighlightRequest {
+  requestId: number;
+  query?: string;
+  excerpt?: string;
+  source?: NoteOpenRequest["source"];
 }
 
 export type NoteSaveStatus =

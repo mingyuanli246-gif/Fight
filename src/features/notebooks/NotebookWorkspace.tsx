@@ -2,6 +2,7 @@ import {
   forwardRef,
   useEffect,
   useImperativeHandle,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -27,13 +28,9 @@ import {
   clearManagedResourceResolution,
   primeManagedResourceResolution,
 } from "./editorResources";
-import {
-  NoteEditorPane,
-  type NoteEditorPaneRef,
-} from "./NoteEditorPane";
-import { NotebookDetailsPane } from "./NotebookDetailsPane";
-import { NotebookSidebar } from "./NotebookSidebar";
-import { NotebookTreePane } from "./NotebookTreePane";
+import type { NoteEditorPaneRef } from "./NoteEditorPane";
+import { NotebookDetailWorkspace } from "./NotebookDetailWorkspace";
+import { NotebookHomeWorkspace } from "./NotebookHomeWorkspace";
 import {
   deleteManagedResource,
   ensureResourceDirectories,
@@ -42,11 +39,15 @@ import {
 import type {
   Folder,
   Note,
-  Notebook,
   NoteOpenRequest,
+  NoteOpenTarget,
+  Notebook,
+  NotebookHighlightRequest,
+  NotebookHomeSort,
+  NotebookShellMode,
   SelectedEntity,
 } from "./types";
-import styles from "./NotebookWorkspace.module.css";
+import styles from "./NotebookWorkspaceShell.module.css";
 
 const SECTION_LEAVE_BLOCKED_MESSAGE =
   "当前笔记保存失败，已阻止切换。请先重试保存或复制内容后再操作。";
@@ -54,6 +55,15 @@ const WINDOW_LEAVE_BLOCKED_MESSAGE =
   "当前笔记仍有未保存内容，已阻止关闭或刷新。请先等待保存完成，或复制内容后再操作。";
 const RESTORE_BLOCKED_MESSAGE =
   "恢复备份前保存失败，已阻止恢复操作。请先等待保存完成，或复制内容后再操作。";
+const HOME_SORT_STORAGE_KEY = "notebooks.home.sort";
+const RIGHT_PANEL_COLLAPSED_STORAGE_KEY =
+  "notebooks.detail.right-panel-collapsed";
+
+interface DeleteTarget {
+  kind: "notebook" | "folder" | "note";
+  id: number;
+  title: string;
+}
 
 function getErrorMessage(error: unknown) {
   if (error instanceof Error) {
@@ -61,6 +71,33 @@ function getErrorMessage(error: unknown) {
   }
 
   return "操作失败，请稍后重试。";
+}
+
+function readStoredHomeSort(): NotebookHomeSort {
+  if (typeof window === "undefined") {
+    return "updated-desc";
+  }
+
+  const value = window.localStorage.getItem(HOME_SORT_STORAGE_KEY);
+
+  if (
+    value === "updated-desc" ||
+    value === "created-desc" ||
+    value === "name-asc" ||
+    value === "name-desc"
+  ) {
+    return value;
+  }
+
+  return "updated-desc";
+}
+
+function readStoredRightPanelCollapsed() {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  return window.localStorage.getItem(RIGHT_PANEL_COLLAPSED_STORAGE_KEY) === "true";
 }
 
 function entityExists(
@@ -97,9 +134,74 @@ function resolveSelection(
   return { kind: "notebook", id: notebookId } as const;
 }
 
+function createUniqueName(baseName: string, existingValues: string[]) {
+  const existing = new Set(existingValues);
+
+  if (!existing.has(baseName)) {
+    return baseName;
+  }
+
+  let index = 2;
+  let next = `${baseName} ${index}`;
+
+  while (existing.has(next)) {
+    index += 1;
+    next = `${baseName} ${index}`;
+  }
+
+  return next;
+}
+
+function collatorCompare(left: string, right: string) {
+  return new Intl.Collator(["zh-Hans-CN-u-co-pinyin", "zh-CN", "en"], {
+    numeric: true,
+    sensitivity: "base",
+  }).compare(left, right);
+}
+
+function sortNotebooks(notebooks: Notebook[], sort: NotebookHomeSort) {
+  return [...notebooks].sort((left, right) => {
+    if (sort === "created-desc") {
+      const createdDiff =
+        Date.parse(right.createdAt.replace(" ", "T")) -
+        Date.parse(left.createdAt.replace(" ", "T"));
+      return createdDiff || collatorCompare(left.name, right.name);
+    }
+
+    if (sort === "name-asc") {
+      return collatorCompare(left.name, right.name);
+    }
+
+    if (sort === "name-desc") {
+      return collatorCompare(right.name, left.name);
+    }
+
+    const updatedDiff =
+      Date.parse(right.updatedAt.replace(" ", "T")) -
+      Date.parse(left.updatedAt.replace(" ", "T"));
+    return updatedDiff || collatorCompare(left.name, right.name);
+  });
+}
+
+function isEditableElement(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+
+  return Boolean(
+    target.closest(
+      'input, textarea, select, button, [contenteditable="true"], .ProseMirror',
+    ),
+  );
+}
+
 interface NotebookWorkspaceProps {
   openRequest: NoteOpenRequest | null;
+  onOpenNote: (target: NoteOpenTarget) => void;
+  onChromeModeChange?: (mode: NotebookShellMode) => void;
 }
+
+export type NotebookChromeMode = NotebookShellMode;
 
 export type NotebookLeaveReason =
   | "section-change"
@@ -115,16 +217,32 @@ export interface NotebookWorkspaceRef {
 export const NotebookWorkspace = forwardRef<
   NotebookWorkspaceRef,
   NotebookWorkspaceProps
->(function NotebookWorkspace({ openRequest }, ref) {
+>(function NotebookWorkspace(
+  { openRequest, onOpenNote, onChromeModeChange },
+  ref,
+) {
   const [notebooks, setNotebooks] = useState<Notebook[]>([]);
   const [folders, setFolders] = useState<Folder[]>([]);
   const [notes, setNotes] = useState<Note[]>([]);
   const [selectedNotebookId, setSelectedNotebookId] = useState<number | null>(
     null,
   );
+  const [homeSelectedNotebookId, setHomeSelectedNotebookId] = useState<number | null>(
+    null,
+  );
   const [selectedEntity, setSelectedEntity] = useState<SelectedEntity | null>(
     null,
   );
+  const [shellMode, setShellMode] = useState<NotebookShellMode>("home");
+  const [homeSort, setHomeSort] = useState<NotebookHomeSort>(() =>
+    readStoredHomeSort(),
+  );
+  const [isRightPanelCollapsed, setIsRightPanelCollapsed] = useState(() =>
+    readStoredRightPanelCollapsed(),
+  );
+  const [highlightRequest, setHighlightRequest] =
+    useState<NotebookHighlightRequest | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const [initializationError, setInitializationError] = useState<string | null>(
     null,
   );
@@ -133,6 +251,44 @@ export const NotebookWorkspace = forwardRef<
   const [isBusy, setIsBusy] = useState(false);
   const noteEditorRef = useRef<NoteEditorPaneRef | null>(null);
   const lastHandledOpenRequestRef = useRef<number | null>(null);
+
+  const sortedNotebooks = useMemo(
+    () => sortNotebooks(notebooks, homeSort),
+    [homeSort, notebooks],
+  );
+
+  const currentNotebook =
+    selectedNotebookId === null
+      ? null
+      : notebooks.find((notebook) => notebook.id === selectedNotebookId) ?? null;
+
+  const selectedFolder =
+    selectedEntity?.kind === "folder"
+      ? folders.find((folder) => folder.id === selectedEntity.id) ?? null
+      : null;
+
+  const selectedNote =
+    selectedEntity?.kind === "note"
+      ? notes.find((note) => note.id === selectedEntity.id) ?? null
+      : null;
+
+  const activeFolderId =
+    selectedFolder?.id ?? (selectedNote?.folderId ?? null);
+
+  useEffect(() => {
+    onChromeModeChange?.(shellMode);
+  }, [onChromeModeChange, shellMode]);
+
+  useEffect(() => {
+    window.localStorage.setItem(HOME_SORT_STORAGE_KEY, homeSort);
+  }, [homeSort]);
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      RIGHT_PANEL_COLLAPSED_STORAGE_KEY,
+      String(isRightPanelCollapsed),
+    );
+  }, [isRightPanelCollapsed]);
 
   function hasUnsavedChanges() {
     return (
@@ -192,6 +348,7 @@ export const NotebookWorkspace = forwardRef<
 
     if (notebookList.length === 0) {
       setSelectedNotebookId(null);
+      setHomeSelectedNotebookId(null);
       setSelectedEntity(null);
       setFolders([]);
       setNotes([]);
@@ -213,6 +370,12 @@ export const NotebookWorkspace = forwardRef<
     ]);
 
     setSelectedNotebookId(nextNotebookId);
+    setHomeSelectedNotebookId((current) =>
+      current !== null &&
+      notebookList.some((notebook) => notebook.id === current)
+        ? current
+        : nextNotebookId,
+    );
     setFolders(folderList);
     setNotes(noteList);
     setSelectedEntity(
@@ -229,12 +392,14 @@ export const NotebookWorkspace = forwardRef<
       await ensureResourceDirectories();
       await initializeNotebookDatabase();
       await syncWorkspace();
+      setShellMode("home");
     } catch (error) {
       setInitializationError(getErrorMessage(error));
       setNotebooks([]);
       setFolders([]);
       setNotes([]);
       setSelectedNotebookId(null);
+      setHomeSelectedNotebookId(null);
       setSelectedEntity(null);
     } finally {
       setIsInitializing(false);
@@ -271,6 +436,18 @@ export const NotebookWorkspace = forwardRef<
           kind: "note",
           id: targetNote.id,
         });
+        setHomeSelectedNotebookId(targetNote.notebookId);
+        setShellMode("detail");
+        setHighlightRequest(
+          openRequest.highlightQuery || openRequest.highlightExcerpt
+            ? {
+                requestId: openRequest.requestId,
+                query: openRequest.highlightQuery,
+                excerpt: openRequest.highlightExcerpt,
+                source: openRequest.source,
+              }
+            : null,
+        );
       } catch (error) {
         const message = getErrorMessage(error);
         setErrorMessage(
@@ -283,32 +460,6 @@ export const NotebookWorkspace = forwardRef<
       }
     })();
   }, [isInitializing, openRequest, selectedEntity]);
-
-  const currentNotebook =
-    selectedNotebookId === null
-      ? null
-      : notebooks.find((notebook) => notebook.id === selectedNotebookId) ?? null;
-
-  const selectedNotebook =
-    selectedEntity?.kind === "notebook" ? currentNotebook : null;
-
-  const selectedFolder =
-    selectedEntity?.kind === "folder"
-      ? folders.find((folder) => folder.id === selectedEntity.id) ?? null
-      : null;
-
-  const selectedNote =
-    selectedEntity?.kind === "note"
-      ? notes.find((note) => note.id === selectedEntity.id) ?? null
-      : null;
-
-  const activeFolderId =
-    selectedFolder?.id ?? (selectedNote?.folderId ?? null);
-
-  const selectedFolderNoteCount =
-    selectedFolder === null
-      ? 0
-      : notes.filter((note) => note.folderId === selectedFolder.id).length;
 
   async function requestSelectionChange(
     nextSelection: SelectedEntity,
@@ -328,11 +479,12 @@ export const NotebookWorkspace = forwardRef<
     }
 
     if (nextSelection.kind === "notebook" && nextNotebookId !== null) {
-      await handleSelectNotebook(nextNotebookId);
+      await handleEnterNotebook(nextNotebookId);
       return;
     }
 
     setErrorMessage(null);
+    setHighlightRequest(null);
     setSelectedEntity(nextSelection);
   }
 
@@ -371,12 +523,28 @@ export const NotebookWorkspace = forwardRef<
     }
   }
 
-  async function handleSelectNotebook(notebookId: number) {
+  async function handleEnterNotebook(notebookId: number) {
+    const saved = await flushCurrentNoteIfNeeded();
+
+    if (!saved) {
+      return;
+    }
+
     setErrorMessage(null);
     setIsBusy(true);
 
     try {
+      setHomeSelectedNotebookId(notebookId);
+
+      if (selectedNotebookId === notebookId) {
+        setShellMode("detail");
+        setHighlightRequest(null);
+        return;
+      }
+
       await syncWorkspace(notebookId, { kind: "notebook", id: notebookId });
+      setShellMode("detail");
+      setHighlightRequest(null);
     } catch (error) {
       setErrorMessage(getErrorMessage(error));
     } finally {
@@ -384,31 +552,58 @@ export const NotebookWorkspace = forwardRef<
     }
   }
 
+  async function handleReturnHome() {
+    const saved = await flushCurrentNoteIfNeeded();
+
+    if (!saved) {
+      return;
+    }
+
+    setHomeSelectedNotebookId(selectedNotebookId);
+    setShellMode("home");
+    setHighlightRequest(null);
+  }
+
   async function handleCreateNotebook(name: string) {
     return runMutation(async () => {
       const notebook = await createNotebook(name);
       await syncWorkspace(notebook.id, { kind: "notebook", id: notebook.id });
+      setHomeSelectedNotebookId(notebook.id);
     });
   }
 
-  async function handleCreateFolder(name: string) {
+  async function handleCreateFolder() {
     if (selectedNotebookId === null) {
       throw new Error("请先选择笔记本，再创建文件夹。");
     }
 
     return runMutation(async () => {
-      const folder = await createFolder(selectedNotebookId, name);
+      const defaultName = createUniqueName(
+        "新文件夹",
+        folders.map((folder) => folder.name),
+      );
+      const folder = await createFolder(selectedNotebookId, defaultName);
       await syncWorkspace(selectedNotebookId, { kind: "folder", id: folder.id });
     });
   }
 
-  async function handleCreateNote(title: string) {
+  async function handleCreateNote() {
     if (selectedNotebookId === null) {
       throw new Error("请先选择笔记本，再创建文件。");
     }
 
+    if (activeFolderId === null) {
+      throw new Error("请先选择文件夹，再创建文件。");
+    }
+
     return runMutation(async () => {
-      const note = await createNote(selectedNotebookId, activeFolderId, title);
+      const defaultTitle = createUniqueName(
+        "新文件",
+        notes
+          .filter((note) => note.folderId === activeFolderId)
+          .map((note) => note.title),
+      );
+      const note = await createNote(selectedNotebookId, activeFolderId, defaultTitle);
       await syncWorkspace(selectedNotebookId, { kind: "note", id: note.id });
     });
   }
@@ -417,6 +612,7 @@ export const NotebookWorkspace = forwardRef<
     return runMutation(async () => {
       await renameNotebook(id, name);
       await syncWorkspace(id, { kind: "notebook", id });
+      setHomeSelectedNotebookId(id);
     });
   }
 
@@ -424,12 +620,13 @@ export const NotebookWorkspace = forwardRef<
     return runMutation(async () => {
       await deleteNotebook(id);
       await syncWorkspace();
+      setShellMode("home");
+      setHighlightRequest(null);
     });
   }
 
   async function handleSetNotebookCoverImage(id: number) {
-    const notebook =
-      notebooks.find((candidate) => candidate.id === id) ?? null;
+    const notebook = notebooks.find((candidate) => candidate.id === id) ?? null;
 
     if (!notebook) {
       throw new Error("目标笔记本不存在。");
@@ -449,21 +646,12 @@ export const NotebookWorkspace = forwardRef<
 
       try {
         const updatedNotebook = await updateNotebookCoverImage(id, nextCoverPath);
-        console.info("[notebooks.cover] 封面更新成功", {
-          notebookId: id,
-          coverImagePath: nextCoverPath,
-        });
         setNotebooks((currentNotebooks) =>
           currentNotebooks.map((currentNotebook) =>
             currentNotebook.id === id ? updatedNotebook : currentNotebook,
           ),
         );
       } catch (error) {
-        console.error("[notebooks.cover] 封面更新失败", {
-          notebookId: id,
-          coverImagePath: nextCoverPath,
-          error,
-        });
         await cleanupManagedResourceBestEffort(nextCoverPath, "清理未保存的新封面");
         throw new Error("笔记本封面保存失败，请稍后重试。");
       }
@@ -474,12 +662,12 @@ export const NotebookWorkspace = forwardRef<
       }
 
       await syncWorkspace(id, { kind: "notebook", id });
+      setHomeSelectedNotebookId(id);
     });
   }
 
   async function handleClearNotebookCoverImage(id: number) {
-    const notebook =
-      notebooks.find((candidate) => candidate.id === id) ?? null;
+    const notebook = notebooks.find((candidate) => candidate.id === id) ?? null;
 
     if (!notebook) {
       throw new Error("目标笔记本不存在。");
@@ -496,6 +684,7 @@ export const NotebookWorkspace = forwardRef<
       clearManagedResourceResolution(previousCoverPath ?? undefined);
       await cleanupManagedResourceBestEffort(previousCoverPath, "清理旧封面");
       await syncWorkspace(id, { kind: "notebook", id });
+      setHomeSelectedNotebookId(id);
     });
   }
 
@@ -551,6 +740,92 @@ export const NotebookWorkspace = forwardRef<
     });
   }
 
+  async function handleConfirmDelete() {
+    if (!deleteTarget) {
+      return;
+    }
+
+    try {
+      if (deleteTarget.kind === "notebook") {
+        await handleDeleteNotebook(deleteTarget.id);
+      }
+
+      if (deleteTarget.kind === "folder") {
+        await handleDeleteFolder(deleteTarget.id);
+      }
+
+      if (deleteTarget.kind === "note") {
+        await handleDeleteNote(deleteTarget.id);
+      }
+
+      setDeleteTarget(null);
+    } catch {
+      // 错误由上层统一展示
+    }
+  }
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      const isDeleteShortcut =
+        event.metaKey &&
+        !event.ctrlKey &&
+        !event.altKey &&
+        (event.key === "Backspace" || event.key === "Delete");
+
+      if (!isDeleteShortcut || isEditableElement(event.target) || isBusy) {
+        return;
+      }
+
+      if (shellMode === "home") {
+        const notebook =
+          homeSelectedNotebookId === null
+            ? null
+            : notebooks.find((item) => item.id === homeSelectedNotebookId) ?? null;
+
+        if (!notebook) {
+          return;
+        }
+
+        event.preventDefault();
+        setDeleteTarget({
+          kind: "notebook",
+          id: notebook.id,
+          title: "确定删除这个笔记本吗",
+        });
+        return;
+      }
+
+      if (selectedEntity?.kind === "folder") {
+        event.preventDefault();
+        setDeleteTarget({
+          kind: "folder",
+          id: selectedEntity.id,
+          title: "确定删除这个文件夹吗",
+        });
+      }
+
+      if (selectedEntity?.kind === "note") {
+        event.preventDefault();
+        setDeleteTarget({
+          kind: "note",
+          id: selectedEntity.id,
+          title: "确定删除这个文件吗",
+        });
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [
+    homeSelectedNotebookId,
+    isBusy,
+    notebooks,
+    selectedEntity,
+    shellMode,
+  ]);
+
   if (isInitializing) {
     return (
       <div className={styles.statusCard}>
@@ -567,8 +842,10 @@ export const NotebookWorkspace = forwardRef<
         <p className={styles.statusText}>{initializationError}</p>
         <button
           type="button"
-          className={styles.actionButton}
-          onClick={initializeWorkspace}
+          className={styles.primaryButton}
+          onClick={() => {
+            void initializeWorkspace();
+          }}
         >
           重试加载
         </button>
@@ -577,12 +854,16 @@ export const NotebookWorkspace = forwardRef<
   }
 
   return (
-    <>
+    <div
+      className={`${styles.workspaceShell} ${
+        shellMode === "detail" ? styles.workspaceShellDetailMode : ""
+      }`}
+    >
       {errorMessage ? (
-        <div className={styles.errorBanner}>
+        <div className={styles.noticeBanner}>
           <div>
-            <p className={styles.errorTitle}>操作失败</p>
-            <p className={styles.errorText}>{errorMessage}</p>
+            <p className={styles.noticeTitle}>操作失败</p>
+            <p className={styles.noticeText}>{errorMessage}</p>
           </div>
           <button
             type="button"
@@ -594,67 +875,105 @@ export const NotebookWorkspace = forwardRef<
         </div>
       ) : null}
 
-      <div className={styles.workspace}>
-        <NotebookSidebar
-          notebooks={notebooks}
-          selectedNotebookId={selectedNotebookId}
+      {shellMode === "home" ? (
+        <NotebookHomeWorkspace
+          notebooks={sortedNotebooks}
+          selectedNotebookId={homeSelectedNotebookId}
           disabled={isBusy}
-          onSelectNotebook={(notebookId) => {
-            void requestSelectionChange(
-              { kind: "notebook", id: notebookId },
-              notebookId,
-            );
+          sort={homeSort}
+          onSortChange={setHomeSort}
+          onSelectNotebook={setHomeSelectedNotebookId}
+          onOpenNotebook={(notebookId) => {
+            void handleEnterNotebook(notebookId);
+          }}
+          onOpenSearchResult={(target) => {
+            setErrorMessage(null);
+            setHighlightRequest(null);
+            onOpenNote(target);
           }}
           onCreateNotebook={handleCreateNotebook}
+          onRenameNotebook={handleRenameNotebook}
+          onRequestDeleteNotebook={(notebook) =>
+            setDeleteTarget({
+              kind: "notebook",
+              id: notebook.id,
+              title: "确定删除这个笔记本吗",
+            })
+          }
+          onSetNotebookCoverImage={handleSetNotebookCoverImage}
+          onClearNotebookCoverImage={handleClearNotebookCoverImage}
         />
-        <NotebookTreePane
+      ) : (
+        <NotebookDetailWorkspace
           notebook={currentNotebook}
           folders={folders}
           notes={notes}
           selectedEntity={selectedEntity}
+          selectedNote={selectedNote}
           activeFolderId={activeFolderId}
           disabled={isBusy}
+          rightPanelCollapsed={isRightPanelCollapsed}
+          highlightRequest={highlightRequest}
+          noteEditorRef={noteEditorRef}
+          onReturnHome={() => {
+            void handleReturnHome();
+          }}
           onSelectEntity={(entity) => {
             void requestSelectionChange(entity);
           }}
           onCreateFolder={handleCreateFolder}
           onCreateNote={handleCreateNote}
+          onRenameFolder={handleRenameFolder}
+          onRenameNote={handleRenameNote}
+          onToggleRightPanel={() =>
+            setIsRightPanelCollapsed((current) => !current)
+          }
+          onNoteUpdated={(updatedNote) => {
+            setNotes((currentNotes) =>
+              currentNotes.map((note) =>
+                note.id === updatedNote.id ? updatedNote : note,
+              ),
+            );
+            setNotebooks((currentNotebooks) =>
+              currentNotebooks.map((notebook) =>
+                notebook.id === updatedNote.notebookId
+                  ? { ...notebook, updatedAt: updatedNote.updatedAt }
+                  : notebook,
+              ),
+            );
+          }}
+          onError={setErrorMessage}
         />
-        {currentNotebook !== null && selectedNote !== null ? (
-          <NoteEditorPane
-            ref={noteEditorRef}
-            notebook={currentNotebook}
-            note={selectedNote}
-            folders={folders}
-            disabled={isBusy}
-            onRenameNote={handleRenameNote}
-            onDeleteNote={handleDeleteNote}
-            onNoteUpdated={(updatedNote) => {
-              setNotes((currentNotes) =>
-                currentNotes.map((note) =>
-                  note.id === updatedNote.id ? updatedNote : note,
-                ),
-              );
-            }}
-            onError={setErrorMessage}
-          />
-        ) : (
-          <NotebookDetailsPane
-            notebook={currentNotebook}
-            folders={folders}
-            selectedNotebook={selectedNotebook}
-            selectedFolder={selectedFolder}
-            noteCount={selectedFolder !== null ? selectedFolderNoteCount : notes.length}
-            disabled={isBusy}
-            onRenameNotebook={handleRenameNotebook}
-            onDeleteNotebook={handleDeleteNotebook}
-            onSetNotebookCoverImage={handleSetNotebookCoverImage}
-            onClearNotebookCoverImage={handleClearNotebookCoverImage}
-            onRenameFolder={handleRenameFolder}
-            onDeleteFolder={handleDeleteFolder}
-          />
-        )}
-      </div>
-    </>
+      )}
+
+      {deleteTarget ? (
+        <div className={styles.dialogOverlay}>
+          <div className={styles.deleteDialog}>
+            <h3 className={styles.dialogTitle}>删除确认</h3>
+            <p className={styles.dialogText}>{deleteTarget.title}</p>
+            <div className={styles.dialogActions}>
+              <button
+                type="button"
+                className={styles.secondaryButton}
+                onClick={() => setDeleteTarget(null)}
+                disabled={isBusy}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className={styles.dangerButton}
+                onClick={() => {
+                  void handleConfirmDelete();
+                }}
+                disabled={isBusy}
+              >
+                确认删除
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </div>
   );
 });

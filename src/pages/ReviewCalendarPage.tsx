@@ -1,9 +1,9 @@
-import type { NoteOpenRequest } from "../features/notebooks/types";
+import type { NoteOpenTarget } from "../features/notebooks/types";
 import { ReviewCalendarWorkspace } from "../features/review/ReviewCalendarWorkspace";
 import styles from "./PageLayout.module.css";
 
 interface ReviewCalendarPageProps {
-  onOpenNote: (target: Pick<NoteOpenRequest, "noteId" | "notebookId">) => void;
+  onOpenNote: (target: NoteOpenTarget) => void;
 }
 
 export function ReviewCalendarPage({ onOpenNote }: ReviewCalendarPageProps) {

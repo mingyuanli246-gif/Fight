@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { NoteOpenRequest } from "../notebooks/types";
+import type { NoteOpenTarget } from "../notebooks/types";
 import {
   createReviewPlan,
   deleteReviewPlan,
@@ -17,7 +17,7 @@ import styles from "./ReviewCalendarWorkspace.module.css";
 const WEEKDAY_LABELS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
 
 interface ReviewCalendarWorkspaceProps {
-  onOpenNote: (target: Pick<NoteOpenRequest, "noteId" | "notebookId">) => void;
+  onOpenNote: (target: NoteOpenTarget) => void;
 }
 
 function getErrorMessage(error: unknown) {

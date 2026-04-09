@@ -33,11 +33,17 @@ export interface BackupManifest {
   note: string;
 }
 
+export type BackupValidationStatus =
+  | "unknown"
+  | "validating"
+  | "valid"
+  | "invalid";
+
 export interface BackupListItem {
   fileName: string;
   createdAt: string;
   sizeBytes: number;
-  isValid: boolean;
+  validationStatus: BackupValidationStatus;
   invalidReason: string | null;
   note: string | null;
 }

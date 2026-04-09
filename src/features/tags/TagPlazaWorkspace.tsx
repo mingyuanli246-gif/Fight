@@ -7,7 +7,7 @@ import {
   renameTag,
 } from "../notebooks/repository";
 import type {
-  NoteOpenRequest,
+  NoteOpenTarget,
   TaggedNoteResult,
   TagWithCount,
 } from "../notebooks/types";
@@ -16,7 +16,7 @@ import styles from "./TagPlazaWorkspace.module.css";
 const SUGGESTED_TAGS = ["待巩固", "重点", "易错"];
 
 interface TagPlazaWorkspaceProps {
-  onOpenNote: (target: Pick<NoteOpenRequest, "noteId" | "notebookId">) => void;
+  onOpenNote: (target: NoteOpenTarget) => void;
 }
 
 function getErrorMessage(error: unknown) {

@@ -1,6 +1,17 @@
-import { useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Folder, Note, Notebook, SelectedEntity } from "./types";
-import styles from "./NotebookWorkspace.module.css";
+import {
+  ArrowLeftIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
+} from "./NotebookUiIcons";
+import styles from "./NotebookWorkspaceShell.module.css";
+
+interface RenameState {
+  kind: "folder" | "note";
+  id: number;
+  value: string;
+}
 
 interface NotebookTreePaneProps {
   notebook: Notebook | null;
@@ -9,9 +20,16 @@ interface NotebookTreePaneProps {
   selectedEntity: SelectedEntity | null;
   activeFolderId: number | null;
   disabled: boolean;
+  onReturnHome: () => void;
   onSelectEntity: (entity: SelectedEntity) => void;
-  onCreateFolder: (name: string) => Promise<void>;
-  onCreateNote: (title: string) => Promise<void>;
+  onCreateFolder: () => Promise<void>;
+  onCreateNote: () => Promise<void>;
+  onRenameFolder: (id: number, name: string) => Promise<void>;
+  onRenameNote: (id: number, title: string) => Promise<void>;
+}
+
+function buildExpandedSet(folderIds: number[]) {
+  return new Set(folderIds);
 }
 
 export function NotebookTreePane({
@@ -21,70 +39,183 @@ export function NotebookTreePane({
   selectedEntity,
   activeFolderId,
   disabled,
+  onReturnHome,
   onSelectEntity,
   onCreateFolder,
   onCreateNote,
+  onRenameFolder,
+  onRenameNote,
 }: NotebookTreePaneProps) {
-  const [creationKind, setCreationKind] = useState<"folder" | "note" | null>(
-    null,
+  const [expandedFolderIds, setExpandedFolderIds] = useState<Set<number>>(
+    () => buildExpandedSet([]),
   );
-  const [draftName, setDraftName] = useState("");
+  const [renameState, setRenameState] = useState<RenameState | null>(null);
+  const lastNotebookIdRef = useRef<number | null>(null);
 
-  const notesByFolder = new Map<number, Note[]>();
+  const notesByFolder = useMemo(() => {
+    const grouped = new Map<number, Note[]>();
 
-  notes.forEach((note) => {
-    if (note.folderId === null) {
+    for (const note of notes) {
+      if (note.folderId === null) {
+        continue;
+      }
+
+      const current = grouped.get(note.folderId) ?? [];
+      current.push(note);
+      grouped.set(note.folderId, current);
+    }
+
+    return grouped;
+  }, [notes]);
+
+  const orphanNotes = useMemo(
+    () => notes.filter((note) => note.folderId === null),
+    [notes],
+  );
+
+  useEffect(() => {
+    if (!notebook) {
+      setExpandedFolderIds(buildExpandedSet([]));
+      setRenameState(null);
+      lastNotebookIdRef.current = null;
       return;
     }
 
-    const current = notesByFolder.get(note.folderId) ?? [];
-    current.push(note);
-    notesByFolder.set(note.folderId, current);
-  });
+    const currentNotebookId = notebook.id;
+    const didNotebookChange = lastNotebookIdRef.current !== currentNotebookId;
+    lastNotebookIdRef.current = currentNotebookId;
 
-  const orphanNotes = notes.filter((note) => note.folderId === null);
+    setExpandedFolderIds((current) => {
+      if (didNotebookChange) {
+        return buildExpandedSet(folders.map((folder) => folder.id));
+      }
 
-  async function handleCreate() {
+      const next = new Set<number>();
+
+      for (const folder of folders) {
+        if (current.has(folder.id)) {
+          next.add(folder.id);
+        }
+      }
+
+      return next;
+    });
+  }, [folders, notebook]);
+
+  useEffect(() => {
+    if (selectedEntity?.kind !== "note") {
+      return;
+    }
+
+    const selectedNote = notes.find((note) => note.id === selectedEntity.id) ?? null;
+
+    if (selectedNote?.folderId === null || selectedNote?.folderId === undefined) {
+      return;
+    }
+
+    const parentFolderId = selectedNote.folderId;
+
+    setExpandedFolderIds((current) => {
+      if (current.has(parentFolderId)) {
+        return current;
+      }
+
+      const next = new Set(current);
+      next.add(parentFolderId);
+      return next;
+    });
+  }, [notes, selectedEntity]);
+
+  function toggleFolder(folderId: number) {
+    setExpandedFolderIds((current) => {
+      const next = new Set(current);
+
+      if (next.has(folderId)) {
+        next.delete(folderId);
+      } else {
+        next.add(folderId);
+      }
+
+      return next;
+    });
+  }
+
+  function startRename(kind: RenameState["kind"], id: number, value: string) {
+    setRenameState({
+      kind,
+      id,
+      value,
+    });
+  }
+
+  function updateRenameValue(value: string) {
+    setRenameState((current) =>
+      current
+        ? {
+            ...current,
+            value,
+          }
+        : current,
+    );
+  }
+
+  function cancelRename() {
+    setRenameState(null);
+  }
+
+  async function submitRename() {
+    if (!renameState) {
+      return;
+    }
+
     try {
-      if (creationKind === "folder") {
-        await onCreateFolder(draftName);
+      if (renameState.kind === "folder") {
+        await onRenameFolder(renameState.id, renameState.value);
+      } else {
+        await onRenameNote(renameState.id, renameState.value);
       }
 
-      if (creationKind === "note") {
-        await onCreateNote(draftName);
-      }
-
-      setDraftName("");
-      setCreationKind(null);
+      cancelRename();
     } catch {
-      // 错误信息由上层统一展示
+      // 错误由上层统一展示
     }
   }
 
   const canCreateNote = activeFolderId !== null;
 
   return (
-    <section className={styles.panel}>
-      <header className={styles.panelHeader}>
-        <div>
-          <h3 className={styles.panelTitle}>文件夹与文件</h3>
-          <p className={styles.panelDescription}>
-            {notebook ? `当前笔记本：${notebook.name}` : "先选择一个笔记本"}
-          </p>
+    <section className={styles.detailSidebar}>
+      <header className={styles.treeHeader}>
+        <div className={styles.treeHeaderTop}>
+          <button
+            type="button"
+            className={styles.treeBackButton}
+            onClick={onReturnHome}
+            aria-label="返回笔记本首页"
+          >
+            <ArrowLeftIcon className={styles.buttonIcon} />
+          </button>
+          <h3 className={styles.treeTitle}>
+            {notebook?.name ?? "笔记本工作区"}
+          </h3>
         </div>
-        <div className={styles.panelActions}>
+        <div className={styles.treeActions}>
           <button
             type="button"
             className={styles.secondaryButton}
-            onClick={() => setCreationKind("folder")}
+            onClick={() => {
+              void onCreateFolder();
+            }}
             disabled={disabled || notebook === null}
           >
             新建文件夹
           </button>
           <button
             type="button"
-            className={styles.actionButton}
-            onClick={() => setCreationKind("note")}
+            className={styles.primaryButton}
+            onClick={() => {
+              void onCreateNote();
+            }}
             disabled={disabled || !canCreateNote}
           >
             新建文件
@@ -92,150 +223,256 @@ export function NotebookTreePane({
         </div>
       </header>
 
-      {creationKind ? (
-        <div className={styles.createForm}>
-          <input
-            className={styles.input}
-            value={draftName}
-            onChange={(event) => setDraftName(event.currentTarget.value)}
-            placeholder={creationKind === "folder" ? "输入文件夹名称" : "输入文件名称"}
-            maxLength={120}
-            autoFocus
-          />
-          <div className={styles.formActions}>
-            <button
-              type="button"
-              className={styles.secondaryButton}
-              onClick={() => {
-                setDraftName("");
-                setCreationKind(null);
-              }}
-              disabled={disabled}
-            >
-              取消
-            </button>
-            <button
-              type="button"
-              className={styles.actionButton}
-              onClick={handleCreate}
-              disabled={disabled}
-            >
-              保存
-            </button>
-          </div>
-        </div>
-      ) : null}
-
-      <div className={styles.panelBody}>
+      <div className={styles.treeBody}>
         {!notebook ? (
-          <div className={styles.emptyState}>
-            <strong>尚未选中笔记本</strong>
-            <span>左侧选择一个笔记本后，这里会显示文件夹与文件树。</span>
+          <div className={styles.treeEmpty}>请选择一个笔记本后继续。</div>
+        ) : folders.length === 0 && orphanNotes.length === 0 ? (
+          <div className={styles.treeEmpty}>
+            当前笔记本还没有内容。先创建一个文件夹，再在里面建立文件。
           </div>
         ) : (
-          <>
-            {!canCreateNote ? (
-              <p className={styles.inlineHint}>请先选择一个文件夹，再新建文件。</p>
-            ) : null}
+          <ul className={styles.treeList}>
+            {folders.map((folder) => {
+              const folderNotes = notesByFolder.get(folder.id) ?? [];
+              const isExpanded = expandedFolderIds.has(folder.id);
+              const isActive =
+                selectedEntity?.kind === "folder" && selectedEntity.id === folder.id;
+              const isEditing =
+                renameState?.kind === "folder" && renameState.id === folder.id;
 
-            {folders.length === 0 && orphanNotes.length === 0 ? (
-              <div className={styles.emptyState}>
-                <strong>当前笔记本还是空的</strong>
-                <span>先创建一个文件夹，再在文件夹里建立文件。</span>
-              </div>
-            ) : (
-              <div className={styles.treeContainer}>
-                {folders.map((folder) => {
-                  const folderNotes = notesByFolder.get(folder.id) ?? [];
-                  const isFolderActive =
-                    selectedEntity?.kind === "folder" && selectedEntity.id === folder.id;
+              return (
+                <li key={folder.id}>
+                  {isEditing ? (
+                    <div
+                      className={`${styles.treeRow} ${styles.treeRowActive} ${styles.treeRowEditing}`}
+                    >
+                      <span className={styles.treeDisclosure}>
+                        {isExpanded ? (
+                          <ChevronDownIcon className={styles.treeRowIcon} />
+                        ) : (
+                          <ChevronRightIcon className={styles.treeRowIcon} />
+                        )}
+                      </span>
+                      <span className={styles.treeLabelWrap}>
+                        <div className={styles.inlineNameEditor}>
+                          <input
+                            type="text"
+                            className={`${styles.inlineNameInput} ${styles.inlineNameInputCompact}`}
+                            value={renameState.value}
+                            onChange={(event) => updateRenameValue(event.currentTarget.value)}
+                            autoFocus
+                            onBlur={cancelRename}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter") {
+                                event.preventDefault();
+                                void submitRename();
+                              }
 
-                  return (
-                    <section key={folder.id} className={styles.treeGroup}>
-                      <button
-                        type="button"
-                        className={`${styles.treeItem} ${
-                          isFolderActive ? styles.treeItemActive : ""
-                        }`}
-                        onClick={() =>
-                          onSelectEntity({ kind: "folder", id: folder.id })
-                        }
-                        disabled={disabled}
-                      >
-                        <span className={styles.treeItemTitle}>文件夹 · {folder.name}</span>
-                        <span className={styles.treeItemMeta}>
-                          {folderNotes.length} 个文件
-                        </span>
-                      </button>
-
-                      {folderNotes.length === 0 ? (
-                        <div className={styles.treeEmpty}>
-                          这个文件夹还没有文件，可以从顶部直接创建。
+                              if (event.key === "Escape") {
+                                cancelRename();
+                              }
+                            }}
+                          />
                         </div>
-                      ) : (
-                        <ul className={styles.noteList}>
-                          {folderNotes.map((note) => {
-                            const isNoteActive =
-                              selectedEntity?.kind === "note" &&
-                              selectedEntity.id === note.id;
+                        <span className={styles.treeMeta}>{folderNotes.length} 个文件</span>
+                      </span>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      className={`${styles.treeRow} ${
+                        isActive ? styles.treeRowActive : ""
+                      }`}
+                      onClick={() => {
+                        toggleFolder(folder.id);
+                        onSelectEntity({ kind: "folder", id: folder.id });
+                      }}
+                      disabled={disabled}
+                    >
+                      <span className={styles.treeDisclosure}>
+                        {isExpanded ? (
+                          <ChevronDownIcon className={styles.treeRowIcon} />
+                        ) : (
+                          <ChevronRightIcon className={styles.treeRowIcon} />
+                        )}
+                      </span>
+                      <span className={styles.treeLabelWrap}>
+                        <span
+                          className={styles.treeLabel}
+                          onDoubleClick={(event) => {
+                            event.stopPropagation();
+                            startRename("folder", folder.id, folder.name);
+                          }}
+                        >
+                          {folder.name}
+                        </span>
+                        <span className={styles.treeMeta}>{folderNotes.length} 个文件</span>
+                      </span>
+                    </button>
+                  )}
 
-                            return (
-                              <li key={note.id}>
+                  {isExpanded ? (
+                    folderNotes.length > 0 ? (
+                      <ul className={styles.treeNoteList}>
+                        {folderNotes.map((note) => {
+                          const isNoteActive =
+                            selectedEntity?.kind === "note" &&
+                            selectedEntity.id === note.id;
+                          const isNoteEditing =
+                            renameState?.kind === "note" && renameState.id === note.id;
+
+                          return (
+                            <li key={note.id}>
+                              {isNoteEditing ? (
+                                <div
+                                  className={`${styles.treeNoteRow} ${styles.treeNoteRowActive} ${styles.treeNoteRowEditing}`}
+                                >
+                                  <span className={styles.treeLabelWrap}>
+                                    <div className={styles.inlineNameEditor}>
+                                      <input
+                                        type="text"
+                                        className={`${styles.inlineNameInput} ${styles.inlineNameInputCompact}`}
+                                        value={renameState.value}
+                                        onChange={(event) =>
+                                          updateRenameValue(event.currentTarget.value)
+                                        }
+                                        autoFocus
+                                        onBlur={cancelRename}
+                                        onKeyDown={(event) => {
+                                          if (event.key === "Enter") {
+                                            event.preventDefault();
+                                            void submitRename();
+                                          }
+
+                                          if (event.key === "Escape") {
+                                            cancelRename();
+                                          }
+                                        }}
+                                      />
+                                    </div>
+                                    <span className={styles.treeMeta}>文件</span>
+                                  </span>
+                                </div>
+                              ) : (
                                 <button
                                   type="button"
-                                  className={`${styles.noteItem} ${
-                                    isNoteActive ? styles.noteItemActive : ""
+                                  className={`${styles.treeNoteRow} ${
+                                    isNoteActive ? styles.treeNoteRowActive : ""
                                   }`}
-                                  onClick={() =>
-                                    onSelectEntity({ kind: "note", id: note.id })
-                                  }
+                                  onClick={() => {
+                                    if (isNoteActive) {
+                                      return;
+                                    }
+
+                                    onSelectEntity({ kind: "note", id: note.id });
+                                  }}
                                   disabled={disabled}
                                 >
-                                  <span className={styles.noteItemTitle}>{note.title}</span>
-                                  <span className={styles.noteItemMeta}>文件</span>
+                                  <span className={styles.treeLabelWrap}>
+                                    <span
+                                      className={styles.treeLabel}
+                                      onDoubleClick={(event) => {
+                                        event.stopPropagation();
+                                        startRename("note", note.id, note.title);
+                                      }}
+                                    >
+                                      {note.title}
+                                    </span>
+                                    <span className={styles.treeMeta}>文件</span>
+                                  </span>
                                 </button>
-                              </li>
-                            );
-                          })}
-                        </ul>
-                      )}
-                    </section>
-                  );
-                })}
+                              )}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    ) : (
+                      <div className={styles.treeEmpty}>这个文件夹还没有文件。</div>
+                    )
+                  ) : null}
+                </li>
+              );
+            })}
 
-                {orphanNotes.length > 0 ? (
-                  <section className={styles.treeGroup}>
-                    <p className={styles.treeSectionLabel}>未归档笔记</p>
-                    <ul className={styles.noteList}>
-                      {orphanNotes.map((note) => {
-                        const isNoteActive =
-                          selectedEntity?.kind === "note" &&
-                          selectedEntity.id === note.id;
+            {orphanNotes.length > 0 ? (
+              <li>
+                <div className={styles.treeEmpty}>未归档</div>
+                <ul className={styles.treeNoteList}>
+                  {orphanNotes.map((note) => {
+                    const isNoteActive =
+                      selectedEntity?.kind === "note" &&
+                      selectedEntity.id === note.id;
+                    const isNoteEditing =
+                      renameState?.kind === "note" && renameState.id === note.id;
 
-                        return (
-                          <li key={note.id}>
-                            <button
-                              type="button"
-                              className={`${styles.noteItem} ${
-                                isNoteActive ? styles.noteItemActive : ""
-                              }`}
-                              onClick={() =>
-                                onSelectEntity({ kind: "note", id: note.id })
+                    return (
+                      <li key={note.id}>
+                        {isNoteEditing ? (
+                          <div
+                            className={`${styles.treeNoteRow} ${styles.treeNoteRowActive} ${styles.treeNoteRowEditing}`}
+                          >
+                            <span className={styles.treeLabelWrap}>
+                              <div className={styles.inlineNameEditor}>
+                                <input
+                                  type="text"
+                                  className={`${styles.inlineNameInput} ${styles.inlineNameInputCompact}`}
+                                  value={renameState.value}
+                                  onChange={(event) =>
+                                    updateRenameValue(event.currentTarget.value)
+                                  }
+                                  autoFocus
+                                  onBlur={cancelRename}
+                                  onKeyDown={(event) => {
+                                    if (event.key === "Enter") {
+                                      event.preventDefault();
+                                      void submitRename();
+                                    }
+
+                                    if (event.key === "Escape") {
+                                      cancelRename();
+                                    }
+                                  }}
+                                />
+                              </div>
+                              <span className={styles.treeMeta}>尚未归入文件夹</span>
+                            </span>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            className={`${styles.treeNoteRow} ${
+                              isNoteActive ? styles.treeNoteRowActive : ""
+                            }`}
+                            onClick={() => {
+                              if (isNoteActive) {
+                                return;
                               }
-                              disabled={disabled}
-                            >
-                              <span className={styles.noteItemTitle}>{note.title}</span>
-                              <span className={styles.noteItemMeta}>尚未归入文件夹</span>
-                            </button>
-                          </li>
-                        );
-                      })}
-                    </ul>
-                  </section>
-                ) : null}
-              </div>
-            )}
-          </>
+
+                              onSelectEntity({ kind: "note", id: note.id });
+                            }}
+                            disabled={disabled}
+                          >
+                            <span className={styles.treeLabelWrap}>
+                              <span
+                                className={styles.treeLabel}
+                                onDoubleClick={(event) => {
+                                  event.stopPropagation();
+                                  startRename("note", note.id, note.title);
+                                }}
+                              >
+                                {note.title}
+                              </span>
+                              <span className={styles.treeMeta}>尚未归入文件夹</span>
+                            </span>
+                          </button>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+              </li>
+            ) : null}
+          </ul>
         )}
       </div>
     </section>

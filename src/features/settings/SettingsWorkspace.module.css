@@ -387,6 +387,16 @@
   background: rgba(254, 226, 226, 0.92);
 }
 
+.statusUnknown {
+  color: #475569;
+  background: rgba(226, 232, 240, 0.92);
+}
+
+.statusValidating {
+  color: #854d0e;
+  background: rgba(254, 240, 138, 0.42);
+}
+
 .backupInfoRow {
   font-size: 13px;
   color: var(--color-text-secondary);

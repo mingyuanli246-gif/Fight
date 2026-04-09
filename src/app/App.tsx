@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ensureResourceDirectories } from "../features/notebooks/resourceCommands";
-import type { NoteOpenRequest } from "../features/notebooks/types";
+import type { NoteOpenRequest, NoteOpenTarget } from "../features/notebooks/types";
 import { maybeRunAutoBackup } from "../features/settings/commands";
 import type { SettingsNotice } from "../features/settings/types";
 import { ThemeProvider } from "../features/theme/ThemeProvider";
@@ -82,13 +82,12 @@ function App() {
     };
   }, []);
 
-  function handleOpenNote(target: Pick<NoteOpenRequest, "noteId" | "notebookId">) {
+  function handleOpenNote(target: NoteOpenTarget) {
     requestIdRef.current += 1;
     setCurrentSection("notebooks");
     setNoteOpenRequest({
       requestId: requestIdRef.current,
-      noteId: target.noteId,
-      notebookId: target.notebookId,
+      ...target,
     });
   }
 

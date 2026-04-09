@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import {
   MISSING_RESOURCE_MESSAGE,
   resolveLocalResourcePath,
@@ -14,6 +14,7 @@ interface ManagedResourceImageProps {
   loadingClassName?: string;
   fallbackTitle: string;
   fallbackMessage?: string;
+  fallbackStyle?: CSSProperties;
 }
 
 export function ManagedResourceImage({
@@ -24,6 +25,7 @@ export function ManagedResourceImage({
   loadingClassName,
   fallbackTitle,
   fallbackMessage,
+  fallbackStyle,
 }: ManagedResourceImageProps) {
   const [resolution, setResolution] = useState<LocalResourceResolutionResult | null>(
     null,
@@ -60,7 +62,7 @@ export function ManagedResourceImage({
 
   if (!resourcePath) {
     return (
-      <span className={fallbackClassName}>
+      <span className={fallbackClassName} style={fallbackStyle}>
         <strong className={styles.noteImageFallbackTitle}>{fallbackTitle}</strong>
         {normalizedFallbackMessage ? (
           <span className={styles.noteImageFallbackText}>
@@ -84,7 +86,7 @@ export function ManagedResourceImage({
 
   if (resolution.status !== "resolved" || didImageFail) {
     return (
-      <span className={fallbackClassName}>
+      <span className={fallbackClassName} style={fallbackStyle}>
         <strong className={styles.noteImageFallbackTitle}>{fallbackTitle}</strong>
         <span className={styles.noteImageFallbackText}>
           {fallbackDetail}

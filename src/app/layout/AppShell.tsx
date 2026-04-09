@@ -3,13 +3,14 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useRef, useState, type RefObject } from "react";
 import type {
   NoteOpenRequest,
+  NoteOpenTarget,
 } from "../../features/notebooks/types";
 import type {
+  NotebookChromeMode,
   NotebookLeaveReason,
   NotebookWorkspaceRef,
 } from "../../features/notebooks/NotebookWorkspace";
 import type { SettingsNotice } from "../../features/settings/types";
-import { GlobalSearch } from "./GlobalSearch";
 import { NavigationRail } from "../../features/navigation/NavigationRail";
 import { NotebooksPage } from "../../pages/NotebooksPage";
 import { ReviewCalendarPage } from "../../pages/ReviewCalendarPage";
@@ -22,17 +23,18 @@ interface AppShellProps {
   currentSection: AppSection;
   onSectionChange: (section: AppSection) => void;
   noteOpenRequest: NoteOpenRequest | null;
-  onOpenNote: (target: Pick<NoteOpenRequest, "noteId" | "notebookId">) => void;
+  onOpenNote: (target: NoteOpenTarget) => void;
   settingsStartupNotice: SettingsNotice | null;
 }
 
 function renderPage(
   section: AppSection,
   noteOpenRequest: NoteOpenRequest | null,
-  onOpenNote: (target: Pick<NoteOpenRequest, "noteId" | "notebookId">) => void,
+  onOpenNote: (target: NoteOpenTarget) => void,
   settingsStartupNotice: SettingsNotice | null,
   notebookWorkspaceRef: RefObject<NotebookWorkspaceRef | null>,
   beforeRestoreBackup: () => Promise<boolean>,
+  onNotebookChromeModeChange: (mode: NotebookChromeMode) => void,
 ) {
   switch (section) {
     case "notebooks":
@@ -40,6 +42,8 @@ function renderPage(
         <NotebooksPage
           openRequest={noteOpenRequest}
           workspaceRef={notebookWorkspaceRef}
+          onChromeModeChange={onNotebookChromeModeChange}
+          onOpenNote={onOpenNote}
         />
       );
     case "reviewCalendar":
@@ -58,6 +62,8 @@ function renderPage(
         <NotebooksPage
           openRequest={noteOpenRequest}
           workspaceRef={notebookWorkspaceRef}
+          onChromeModeChange={onNotebookChromeModeChange}
+          onOpenNote={onOpenNote}
         />
       );
   }
@@ -74,7 +80,13 @@ export default function AppShell({
   const currentSectionRef = useRef(currentSection);
   const allowNextWindowCloseRef = useRef(false);
   const [isSectionChanging, setIsSectionChanging] = useState(false);
+  const [notebookChromeMode, setNotebookChromeMode] =
+    useState<NotebookChromeMode>("home");
   currentSectionRef.current = currentSection;
+
+  const isNotebookDetailView =
+    currentSection === "notebooks" && notebookChromeMode === "detail";
+  const shouldShowRail = !isNotebookDetailView;
 
   async function guardNotebookBeforeDangerousLeave(
     reason: NotebookLeaveReason,
@@ -193,19 +205,28 @@ export default function AppShell({
   }
 
   return (
-    <div className={styles.shell}>
-      <NavigationRail
-        currentSection={currentSection}
-        disabled={isSectionChanging}
-        onSectionChange={(section) => {
-          void requestSectionChange(section);
-        }}
-      />
-      <main className={styles.content}>
-        <div className={styles.topBar}>
-          <GlobalSearch onOpenResult={onOpenNote} />
-        </div>
-        <div className={styles.contentInner}>
+    <div
+      className={`${styles.shell} ${shouldShowRail ? "" : styles.shellNoRail}`}
+    >
+      {shouldShowRail ? (
+        <NavigationRail
+          currentSection={currentSection}
+          disabled={isSectionChanging}
+          onSectionChange={(section) => {
+            void requestSectionChange(section);
+          }}
+        />
+      ) : null}
+      <main
+        className={`${styles.content} ${
+          isNotebookDetailView ? styles.contentImmersive : ""
+        }`}
+      >
+        <div
+          className={`${styles.contentInner} ${
+            isNotebookDetailView ? styles.contentInnerImmersive : ""
+          }`}
+        >
           {renderPage(
             currentSection,
             noteOpenRequest,
@@ -213,6 +234,7 @@ export default function AppShell({
             settingsStartupNotice,
             notebookWorkspaceRef,
             () => guardNotebookBeforeDangerousLeave("restore-backup"),
+            setNotebookChromeMode,
           )}
         </div>
       </main>

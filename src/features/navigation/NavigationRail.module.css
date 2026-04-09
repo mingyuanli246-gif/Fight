@@ -5,10 +5,8 @@
   height: 100%;
   padding: 28px 18px 22px;
   color: var(--color-rail-text);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.08), transparent 14%),
-    var(--color-rail-background);
-  border-right: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--color-rail-background);
+  border-right: 1px solid rgba(15, 23, 42, 0.14);
 }
 
 .brand {

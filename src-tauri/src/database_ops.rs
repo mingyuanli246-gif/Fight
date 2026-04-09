@@ -1076,7 +1076,7 @@ fn update_note_content_tx_internal(
         .execute(
             "
               UPDATE notes
-              SET content_plaintext = ?1, updated_at = CURRENT_TIMESTAMP
+              SET content_plaintext = ?1, updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
               WHERE id = ?2
             ",
             params![content, note_id],

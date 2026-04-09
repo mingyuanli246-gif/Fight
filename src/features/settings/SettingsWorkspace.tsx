@@ -17,20 +17,24 @@ import {
   rebuildSearchIndex,
   restoreBackup,
   saveAppSettings,
+  validateBackup,
 } from "./commands";
 import type {
   AppSettings,
   BackupListItem,
   BackupOperationState,
+  BackupValidationStatus,
   DataEnvironmentInfo,
   SettingsNotice,
 } from "./types";
 import styles from "./SettingsWorkspace.module.css";
 
 const RETENTION_OPTIONS = [3, 5, 10] as const;
+const BACKGROUND_VALIDATION_LIMIT = 5;
 const RESTORE_BLOCKED_MESSAGE =
   "恢复备份前保存失败，已阻止恢复操作。请先等待保存完成，或复制内容后再操作。";
 type BackupRefreshReason = "initial-load" | "post-create";
+type BackupValidationSource = "background" | "manual" | "restore";
 
 interface SettingsWorkspaceProps {
   startupNotice: SettingsNotice | null;
@@ -79,6 +83,41 @@ function sortBackups(items: BackupListItem[]) {
   );
 }
 
+function mergeBackupItem(
+  currentItem: BackupListItem | undefined,
+  nextItem: BackupListItem,
+) {
+  if (!currentItem || nextItem.validationStatus !== "unknown") {
+    return nextItem;
+  }
+
+  if (currentItem.validationStatus === "unknown") {
+    return nextItem;
+  }
+
+  return {
+    ...nextItem,
+    validationStatus: currentItem.validationStatus,
+    invalidReason: currentItem.invalidReason,
+    note: currentItem.note ?? nextItem.note,
+  } satisfies BackupListItem;
+}
+
+function mergeBackupLists(
+  currentBackups: BackupListItem[],
+  nextBackups: BackupListItem[],
+) {
+  const currentByFileName = new Map(
+    currentBackups.map((item) => [item.fileName, item]),
+  );
+
+  return sortBackups(
+    nextBackups.map((item) =>
+      mergeBackupItem(currentByFileName.get(item.fileName), item),
+    ),
+  );
+}
+
 function insertBackupItem(
   currentBackups: BackupListItem[],
   nextBackup: BackupListItem,
@@ -105,6 +144,20 @@ function logBackupRefreshComplete(
   );
 }
 
+function getStatusLabel(status: BackupValidationStatus) {
+  switch (status) {
+    case "valid":
+      return "可恢复";
+    case "invalid":
+      return "损坏不可恢复";
+    case "validating":
+      return "校验中";
+    case "unknown":
+    default:
+      return "待校验";
+  }
+}
+
 export function SettingsWorkspace({
   startupNotice,
   beforeRestoreBackup,
@@ -122,6 +175,7 @@ export function SettingsWorkspace({
     null,
   );
   const [backups, setBackups] = useState<BackupListItem[]>([]);
+  const [isLoadingBackups, setIsLoadingBackups] = useState(true);
   const [isInitializing, setIsInitializing] = useState(true);
   const [operationState, setOperationState] =
     useState<BackupOperationState>("idle");
@@ -129,17 +183,31 @@ export function SettingsWorkspace({
   const [confirmRestoreFileName, setConfirmRestoreFileName] = useState<
     string | null
   >(null);
+  const backupsRef = useRef<BackupListItem[]>([]);
   const latestBackupRefreshRequestRef = useRef(0);
+  const backupValidationSessionRef = useRef(0);
+  const isBusyRef = useRef(false);
+  const isMountedRef = useRef(true);
 
   const isBusy = operationState !== "idle";
 
   const backupSummary = useMemo(() => {
-    const validCount = backups.filter((item) => item.isValid).length;
-    const invalidCount = backups.length - validCount;
+    const validCount = backups.filter(
+      (item) => item.validationStatus === "valid",
+    ).length;
+    const unknownCount = backups.filter(
+      (item) =>
+        item.validationStatus === "unknown" ||
+        item.validationStatus === "validating",
+    ).length;
+    const invalidCount = backups.filter(
+      (item) => item.validationStatus === "invalid",
+    ).length;
 
     return {
       total: backups.length,
       validCount,
+      unknownCount,
       invalidCount,
     };
   }, [backups]);
@@ -149,18 +217,38 @@ export function SettingsWorkspace({
   }, [startupNotice]);
 
   useEffect(() => {
+    backupsRef.current = backups;
+  }, [backups]);
+
+  useEffect(() => {
+    isBusyRef.current = isBusy;
+
+    if (isBusy) {
+      backupValidationSessionRef.current += 1;
+      setBackups((currentBackups) => {
+        const nextBackups = currentBackups.map((item) =>
+          item.validationStatus === "validating"
+            ? { ...item, validationStatus: "unknown" as const }
+            : item,
+        );
+        backupsRef.current = nextBackups;
+        return nextBackups;
+      });
+    }
+  }, [isBusy]);
+
+  useEffect(() => {
     let cancelled = false;
 
     void (async () => {
       setIsInitializing(true);
+      setIsLoadingBackups(true);
 
       try {
-        const [loadedSettings, loadedEnvironmentInfo, loadedBackups] =
-          await Promise.all([
-            loadAppSettings(),
-            getDataEnvironmentInfo(),
-            fetchBackups("initial-load"),
-          ]);
+        const [loadedSettings, loadedEnvironmentInfo] = await Promise.all([
+          loadAppSettings(),
+          getDataEnvironmentInfo(),
+        ]);
 
         if (cancelled) {
           return;
@@ -168,7 +256,18 @@ export function SettingsWorkspace({
 
         setSettings(loadedSettings);
         setEnvironmentInfo(loadedEnvironmentInfo);
-        applyBackupRefreshResult(loadedBackups);
+        void refreshBackups("initial-load").catch((error) => {
+          if (cancelled) {
+            return;
+          }
+
+          setNotice(
+            buildNotice(
+              "error",
+              getErrorMessage(error, "读取备份列表失败，请稍后重试。"),
+            ),
+          );
+        });
       } catch (error) {
         if (cancelled) {
           return;
@@ -189,6 +288,9 @@ export function SettingsWorkspace({
 
     return () => {
       cancelled = true;
+      isMountedRef.current = false;
+      latestBackupRefreshRequestRef.current += 1;
+      backupValidationSessionRef.current += 1;
     };
   }, []);
 
@@ -219,6 +321,15 @@ export function SettingsWorkspace({
     return latestBackupRefreshRequestRef.current === requestId;
   }
 
+  function shouldApplyValidationResult(requestId: number, sessionId: number) {
+    return (
+      isMountedRef.current &&
+      !isBusyRef.current &&
+      shouldApplyBackupRefresh(requestId) &&
+      backupValidationSessionRef.current === sessionId
+    );
+  }
+
   function applyBackupRefreshResult(result: {
     requestId: number;
     items: BackupListItem[];
@@ -227,7 +338,172 @@ export function SettingsWorkspace({
       return;
     }
 
-    setBackups(result.items);
+    const mergedItems = mergeBackupLists(backupsRef.current, result.items);
+    backupsRef.current = mergedItems;
+    setBackups(mergedItems);
+    setIsLoadingBackups(false);
+    startBackgroundValidation(result.requestId, mergedItems);
+  }
+
+  async function refreshBackups(reason: BackupRefreshReason) {
+    backupValidationSessionRef.current += 1;
+    setBackups((currentBackups) => {
+      const nextBackups = currentBackups.map((item) =>
+        item.validationStatus === "validating"
+          ? { ...item, validationStatus: "unknown" as const }
+          : item,
+      );
+      backupsRef.current = nextBackups;
+      return nextBackups;
+    });
+    setIsLoadingBackups(true);
+
+    try {
+      const result = await fetchBackups(reason);
+      applyBackupRefreshResult(result);
+      return result;
+    } catch (error) {
+      setIsLoadingBackups(false);
+      throw error;
+    }
+  }
+
+  function updateBackupItem(
+    fileName: string,
+    updater: (item: BackupListItem) => BackupListItem,
+  ) {
+    setBackups((currentBackups) => {
+      const nextBackups = currentBackups.map((item) =>
+        item.fileName === fileName ? updater(item) : item,
+      );
+      backupsRef.current = nextBackups;
+      return nextBackups;
+    });
+  }
+
+  function applyValidatedBackupItem(validatedItem: BackupListItem) {
+    setBackups((currentBackups) => {
+      const nextBackups = sortBackups(
+        currentBackups.map((item) =>
+          item.fileName === validatedItem.fileName ? validatedItem : item,
+        ),
+      );
+      backupsRef.current = nextBackups;
+      return nextBackups;
+    });
+  }
+
+  function startBackgroundValidation(
+    requestId: number,
+    currentBackups: BackupListItem[],
+  ) {
+    if (isBusyRef.current) {
+      return;
+    }
+
+    const targets = currentBackups
+      .filter((item) => item.validationStatus === "unknown")
+      .slice(0, BACKGROUND_VALIDATION_LIMIT)
+      .map((item) => item.fileName);
+
+    if (targets.length === 0) {
+      return;
+    }
+
+    const sessionId = backupValidationSessionRef.current + 1;
+    backupValidationSessionRef.current = sessionId;
+
+    void (async () => {
+      for (const fileName of targets) {
+        if (!shouldApplyValidationResult(requestId, sessionId)) {
+          return;
+        }
+
+        updateBackupItem(fileName, (item) =>
+          item.validationStatus === "unknown"
+            ? {
+                ...item,
+                validationStatus: "validating" as const,
+                invalidReason: null,
+              }
+            : item,
+        );
+
+        try {
+          const validatedItem = await validateBackup(fileName);
+
+          if (!shouldApplyValidationResult(requestId, sessionId)) {
+            return;
+          }
+
+          applyValidatedBackupItem(validatedItem);
+        } catch (error) {
+          if (!shouldApplyValidationResult(requestId, sessionId)) {
+            return;
+          }
+
+          console.error("[settings] 后台校验备份失败", { fileName, error });
+          updateBackupItem(fileName, (item) =>
+            item.validationStatus === "validating"
+              ? { ...item, validationStatus: "unknown" as const }
+              : item,
+          );
+        }
+      }
+    })();
+  }
+
+  async function validateSingleBackup(
+    fileName: string,
+    source: BackupValidationSource,
+  ) {
+    const requestId = latestBackupRefreshRequestRef.current;
+    const sessionId = backupValidationSessionRef.current;
+    updateBackupItem(fileName, (item) => ({
+      ...item,
+      validationStatus: "validating" as const,
+      invalidReason: null,
+    }));
+
+    try {
+      const validatedItem = await validateBackup(fileName);
+
+      if (!shouldApplyValidationResult(requestId, sessionId)) {
+        return null;
+      }
+
+      applyValidatedBackupItem(validatedItem);
+
+      if (
+        source !== "background" &&
+        validatedItem.validationStatus === "invalid" &&
+        validatedItem.invalidReason
+      ) {
+        setNotice(buildNotice("error", validatedItem.invalidReason));
+      }
+
+      return validatedItem;
+    } catch (error) {
+      if (!shouldApplyValidationResult(requestId, sessionId)) {
+        return null;
+      }
+
+      updateBackupItem(fileName, (item) => ({
+        ...item,
+        validationStatus: "unknown" as const,
+      }));
+
+      if (source !== "background") {
+        setNotice(
+          buildNotice(
+            "error",
+            getErrorMessage(error, "校验备份失败，请稍后重试。"),
+          ),
+        );
+      }
+
+      return null;
+    }
   }
 
   async function handleAutoBackupToggle(enabled: boolean) {
@@ -291,7 +567,11 @@ export function SettingsWorkspace({
 
     try {
       const result = await createBackup();
-      setBackups((currentBackups) => insertBackupItem(currentBackups, result.backup));
+      setBackups((currentBackups) => {
+        const nextBackups = insertBackupItem(currentBackups, result.backup);
+        backupsRef.current = nextBackups;
+        return nextBackups;
+      });
 
       setNotice(
         buildNotice(
@@ -304,8 +584,7 @@ export function SettingsWorkspace({
 
       void (async () => {
         try {
-          const refreshedBackups = await fetchBackups("post-create");
-          applyBackupRefreshResult(refreshedBackups);
+          await refreshBackups("post-create");
         } catch (error) {
           console.error("[settings] 后台刷新备份列表失败", error);
         }
@@ -320,6 +599,33 @@ export function SettingsWorkspace({
     } finally {
       setOperationState("idle");
     }
+  }
+
+  async function handleValidateBackup(fileName: string) {
+    setConfirmRestoreFileName((currentFileName) =>
+      currentFileName === fileName ? null : currentFileName,
+    );
+    await validateSingleBackup(fileName, "manual");
+  }
+
+  async function handlePrepareRestore(backup: BackupListItem) {
+    if (backup.validationStatus === "valid") {
+      setConfirmRestoreFileName(backup.fileName);
+      return;
+    }
+
+    if (backup.validationStatus === "validating") {
+      return;
+    }
+
+    const validatedItem = await validateSingleBackup(backup.fileName, "restore");
+
+    if (validatedItem?.validationStatus === "valid") {
+      setConfirmRestoreFileName(validatedItem.fileName);
+      return;
+    }
+
+    setConfirmRestoreFileName(null);
   }
 
   async function handleRebuildSearchIndex() {
@@ -592,18 +898,21 @@ export function SettingsWorkspace({
           <div>
             <h3 className={styles.sectionTitle}>备份列表</h3>
             <p className={styles.sectionDescription}>
-              备份列表来自真实目录扫描。只有应用自己生成且结构完整的备份才允许恢复。
+              备份列表首开优先显示目录基础信息；严格校验会在单项操作或首屏前几项后台补校验时进行。
             </p>
           </div>
           <span className={styles.metaText}>
-            共 {backupSummary.total} 份，{backupSummary.validCount} 份可恢复
+            共 {backupSummary.total} 份，{backupSummary.validCount} 份可恢复，
+            {backupSummary.unknownCount} 份待校验
             {backupSummary.invalidCount > 0
               ? `，${backupSummary.invalidCount} 份损坏`
               : ""}
           </span>
         </div>
 
-        {backups.length === 0 ? (
+        {isLoadingBackups && backups.length === 0 ? (
+          <p className={styles.loadingText}>正在读取备份列表…</p>
+        ) : backups.length === 0 ? (
           <div className={styles.emptyState}>
             <strong>还没有本地备份</strong>
             <span>点击“立即创建备份”后，这里会显示可恢复的备份列表。</span>
@@ -612,23 +921,35 @@ export function SettingsWorkspace({
           <div className={styles.backupList}>
             {backups.map((backup) => {
               const isConfirming = confirmRestoreFileName === backup.fileName;
+              const isValid = backup.validationStatus === "valid";
+              const isInvalid = backup.validationStatus === "invalid";
+              const isValidating = backup.validationStatus === "validating";
+              const canRestore = isValid;
+              const canValidate =
+                !isBusy &&
+                (backup.validationStatus === "unknown" ||
+                  backup.validationStatus === "invalid");
+              const statusClassName =
+                backup.validationStatus === "valid"
+                  ? styles.statusValid
+                  : backup.validationStatus === "invalid"
+                    ? styles.statusInvalid
+                    : backup.validationStatus === "validating"
+                      ? styles.statusValidating
+                      : styles.statusUnknown;
 
               return (
                 <article
                   key={backup.fileName}
                   className={`${styles.backupItem} ${
-                    backup.isValid ? "" : styles.backupItemInvalid
+                    isInvalid ? styles.backupItemInvalid : ""
                   }`}
                 >
                   <div className={styles.backupMeta}>
                     <div className={styles.backupTitleRow}>
                       <strong className={styles.backupName}>{backup.fileName}</strong>
-                      <span
-                        className={`${styles.statusBadge} ${
-                          backup.isValid ? styles.statusValid : styles.statusInvalid
-                        }`}
-                      >
-                        {backup.isValid ? "可恢复" : "损坏不可恢复"}
+                      <span className={`${styles.statusBadge} ${statusClassName}`}>
+                        {getStatusLabel(backup.validationStatus)}
                       </span>
                     </div>
 
@@ -671,13 +992,41 @@ export function SettingsWorkspace({
                       </div>
                     ) : (
                       <div className={styles.actionRow}>
+                        {backup.validationStatus === "unknown" ? (
+                          <button
+                            type="button"
+                            className={styles.secondaryButton}
+                            disabled={!canValidate}
+                            onClick={() => void handleValidateBackup(backup.fileName)}
+                          >
+                            校验备份
+                          </button>
+                        ) : backup.validationStatus === "invalid" ? (
+                          <button
+                            type="button"
+                            className={styles.secondaryButton}
+                            disabled={!canValidate}
+                            onClick={() => void handleValidateBackup(backup.fileName)}
+                          >
+                            重新校验
+                          </button>
+                        ) : backup.validationStatus === "validating" ? (
+                          <button
+                            type="button"
+                            className={styles.secondaryButton}
+                            disabled
+                          >
+                            校验中…
+                          </button>
+                        ) : null}
+
                         <button
                           type="button"
                           className={styles.secondaryButton}
-                          disabled={isBusy || !backup.isValid}
-                          onClick={() => setConfirmRestoreFileName(backup.fileName)}
+                          disabled={isBusy || isInvalid || isValidating}
+                          onClick={() => void handlePrepareRestore(backup)}
                         >
-                          恢复备份
+                          {canRestore ? "恢复备份" : "校验后恢复"}
                         </button>
                       </div>
                     )}

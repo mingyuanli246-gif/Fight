@@ -4,6 +4,7 @@ import {
   type Editor,
 } from "@tiptap/react";
 import {
+  type CSSProperties,
   forwardRef,
   useEffect,
   useImperativeHandle,
@@ -11,9 +12,11 @@ import {
   useState,
 } from "react";
 import { MathEditorDialog } from "./MathEditorDialog";
-import { NoteTagManager } from "./NoteTagManager";
-import { NoteReviewPlanManager } from "../review/NoteReviewPlanManager";
 import { RichTextToolbar } from "./RichTextToolbar";
+import {
+  TextSizeDecreaseIcon,
+  TextSizeIncreaseIcon,
+} from "./NotebookUiIcons";
 import {
   insertNoteImage,
   insertBlockMath,
@@ -39,17 +42,34 @@ import {
   NOTE_EDITOR_ENABLED_INPUT_RULES,
 } from "./editorExtensions";
 import { MARKDOWN_SHORTCUT_HINT } from "./editorShortcuts";
+import {
+  clearSearchHighlight,
+  createSearchHighlightExtension,
+  findFirstHighlightRange,
+  setSearchHighlight,
+} from "./searchHighlight";
 import type { EditorMathBridge, MathEditRequest } from "./mathNodes";
 import {
   getMathNodeName,
   type MathDisplayMode,
   type MathNodeName,
 } from "./mathSerialization";
-import type { Folder, Note, NoteSaveStatus, Notebook } from "./types";
+import type {
+  Folder,
+  Note,
+  NoteSaveStatus,
+  Notebook,
+  NotebookHighlightRequest,
+} from "./types";
 import styles from "./NotebookWorkspace.module.css";
 
 const AUTOSAVE_DELAY_MS = 800;
 const SAVED_STATUS_DURATION_MS = 1500;
+const SEARCH_HIGHLIGHT_DURATION_MS = 5000;
+const EDITOR_FONT_SIZE_STORAGE_KEY = "notebooks.editor.font-size";
+const MIN_EDITOR_FONT_SIZE = 12;
+const MAX_EDITOR_FONT_SIZE = 20;
+const DEFAULT_EDITOR_FONT_SIZE = 14;
 
 export interface NoteEditorPaneRef {
   flushPendingSave: () => Promise<boolean>;
@@ -61,8 +81,7 @@ interface NoteEditorPaneProps {
   note: Note;
   folders: Folder[];
   disabled: boolean;
-  onRenameNote: (id: number, title: string) => Promise<void>;
-  onDeleteNote: (id: number) => Promise<void>;
+  highlightRequest?: NotebookHighlightRequest | null;
   onNoteUpdated: (note: Note) => void;
   onError: (message: string) => void;
 }
@@ -75,12 +94,26 @@ interface MathDialogState {
 }
 
 function formatDate(value: string) {
-  return new Date(value.replace(" ", "T")).toLocaleString("zh-CN", {
+  const normalized = value.trim();
+  const isoLikeValue = normalized.includes("T")
+    ? normalized
+    : normalized.replace(" ", "T");
+  const parsedDate = /(?:Z|[+-]\d{2}:\d{2})$/i.test(isoLikeValue)
+    ? new Date(isoLikeValue)
+    : new Date(`${isoLikeValue}Z`);
+
+  if (Number.isNaN(parsedDate.getTime())) {
+    return value;
+  }
+
+  return parsedDate.toLocaleString("zh-CN", {
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
   });
 }
 
@@ -100,6 +133,25 @@ function getSaveStatusLabel(status: NoteSaveStatus) {
   }
 }
 
+function clampEditorFontSize(value: number) {
+  return Math.min(MAX_EDITOR_FONT_SIZE, Math.max(MIN_EDITOR_FONT_SIZE, value));
+}
+
+function getInitialEditorFontSize() {
+  if (typeof window === "undefined") {
+    return DEFAULT_EDITOR_FONT_SIZE;
+  }
+
+  const storedValue = Number.parseInt(
+    window.localStorage.getItem(EDITOR_FONT_SIZE_STORAGE_KEY) ?? "",
+    10,
+  );
+
+  return Number.isFinite(storedValue)
+    ? clampEditorFontSize(storedValue)
+    : DEFAULT_EDITOR_FONT_SIZE;
+}
+
 export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>(
   function NoteEditorPane(
     {
@@ -107,20 +159,18 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
       note,
       folders,
       disabled,
-      onRenameNote,
-      onDeleteNote,
+      highlightRequest = null,
       onNoteUpdated,
       onError,
     },
     ref,
   ) {
-    const [renameValue, setRenameValue] = useState(note.title);
     const [draftContent, setDraftContent] = useState("");
     const [lastSavedContent, setLastSavedContent] = useState("");
     const [saveStatus, setSaveStatus] = useState<NoteSaveStatus>("unchanged");
     const [lastSavedAt, setLastSavedAt] = useState(note.updatedAt);
     const [isLoadingNote, setIsLoadingNote] = useState(true);
-    const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
+    const [editorFontSize, setEditorFontSize] = useState(getInitialEditorFontSize);
     const [mathDialogState, setMathDialogState] = useState<MathDialogState | null>(
       null,
     );
@@ -137,6 +187,8 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
     const onErrorRef = useRef(onError);
     const ongoingSaveRef = useRef<Promise<boolean> | null>(null);
     const ongoingSaveContentRef = useRef<string | null>(null);
+    const highlightTimerRef = useRef<number | null>(null);
+    const lastHandledHighlightRequestRef = useRef<number | null>(null);
     const mathBridgeRef = useRef<EditorMathBridge>({
       onEditMathRequest() {
         // 运行时由当前组件覆写。
@@ -159,9 +211,12 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
       });
     };
     const editorExtensionsRef = useRef(
-      createNotebookEditorExtensions({
-        mathBridge: mathBridgeRef.current,
-      }),
+      [
+        ...createNotebookEditorExtensions({
+          mathBridge: mathBridgeRef.current,
+        }),
+        createSearchHighlightExtension(styles.searchHighlight),
+      ],
     );
     const enabledInputRulesRef = useRef([...NOTE_EDITOR_ENABLED_INPUT_RULES]);
 
@@ -194,6 +249,13 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
       note.folderId === null
         ? `${notebook.name} / 未归档笔记`
         : `${notebook.name} / ${noteFolder?.name ?? "文件夹"}`;
+    const isDecreaseFontDisabled =
+      editorFontSize <= MIN_EDITOR_FONT_SIZE;
+    const isIncreaseFontDisabled =
+      editorFontSize >= MAX_EDITOR_FONT_SIZE;
+    const editorCanvasStyle = {
+      "--editor-font-size": `${editorFontSize}px`,
+    } as CSSProperties;
 
     function openMathInsertDialog(displayMode: MathDisplayMode) {
       setMathDialogState({
@@ -311,6 +373,13 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
       }
     }
 
+    function clearHighlightTimer() {
+      if (highlightTimerRef.current !== null) {
+        window.clearTimeout(highlightTimerRef.current);
+        highlightTimerRef.current = null;
+      }
+    }
+
     function scheduleSavedReset() {
       clearSavedStatusTimer();
       savedStatusTimerRef.current = window.setTimeout(() => {
@@ -409,6 +478,44 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
       return performSave(note.id, currentDraft);
     }
 
+    function applySearchHighlight(request: NotebookHighlightRequest) {
+      if (!editor) {
+        return;
+      }
+
+      clearHighlightTimer();
+      clearSearchHighlight(editor);
+
+      const range = findFirstHighlightRange(editor.state.doc, [
+        request.excerpt ?? "",
+        request.query ?? "",
+      ]);
+
+      if (!range) {
+        return;
+      }
+
+      setSearchHighlight(editor, range);
+
+      window.requestAnimationFrame(() => {
+        const matchElement = editor.view.dom.querySelector(
+          `.${styles.searchHighlight}`,
+        );
+
+        if (matchElement instanceof HTMLElement) {
+          matchElement.scrollIntoView({
+            block: "center",
+            behavior: "smooth",
+          });
+        }
+      });
+
+      highlightTimerRef.current = window.setTimeout(() => {
+        clearSearchHighlight(editor);
+        highlightTimerRef.current = null;
+      }, SEARCH_HIGHLIGHT_DURATION_MS);
+    }
+
     useImperativeHandle(
       ref,
       () => ({
@@ -428,6 +535,17 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
     }, [onError]);
 
     useEffect(() => {
+      setLastSavedAt(note.updatedAt);
+    }, [note.id, note.updatedAt]);
+
+    useEffect(() => {
+      window.localStorage.setItem(
+        EDITOR_FONT_SIZE_STORAGE_KEY,
+        String(editorFontSize),
+      );
+    }, [editorFontSize]);
+
+    useEffect(() => {
       if (!editor) {
         return;
       }
@@ -442,12 +560,12 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
 
       clearPendingSaveTimer();
       clearSavedStatusTimer();
+      clearHighlightTimer();
+      clearSearchHighlight(editor);
       ongoingSaveRef.current = null;
       ongoingSaveContentRef.current = null;
       setIsLoadingNote(true);
       setSaveStatus("unchanged");
-      setRenameValue(note.title);
-      setIsConfirmingDelete(false);
       setMathDialogState(null);
       setMathDraftLatex("");
       setMathDialogError(null);
@@ -498,6 +616,7 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
       return () => {
         clearPendingSaveTimer();
         clearSavedStatusTimer();
+        clearHighlightTimer();
       };
     }, [editor, note.id, note.title]);
 
@@ -529,54 +648,44 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
       };
     }, [draftContent, isLoadingNote, lastSavedContent, note.id, saveStatus]);
 
-    async function handleRename() {
-      try {
-        if (draftContentRef.current !== lastSavedContentRef.current) {
-          const saved = await flushPendingSave();
-
-          if (!saved) {
-            onErrorRef.current(
-              "当前笔记保存失败，请先重试保存或复制内容后再重命名。",
-            );
-            return;
-          }
-        }
-
-        await onRenameNote(note.id, renameValue);
-      } catch {
-        // 错误由上层统一展示
+    useEffect(() => {
+      if (
+        !editor ||
+        isLoadingNote ||
+        highlightRequest === null ||
+        highlightRequest.requestId === lastHandledHighlightRequestRef.current
+      ) {
+        return;
       }
-    }
 
-    async function handleDelete() {
-      try {
-        await onDeleteNote(note.id);
-      } catch {
-        // 错误由上层统一展示
-      }
-    }
+      lastHandledHighlightRequestRef.current = highlightRequest.requestId;
+      applySearchHighlight(highlightRequest);
+    }, [applySearchHighlight, editor, highlightRequest, isLoadingNote]);
 
     return (
-      <section className={styles.panel}>
-        <header className={styles.panelHeader}>
+      <section
+        className={`${styles.panel} ${styles.workspacePanel} ${styles.workspacePanelShell}`}
+      >
+        <header className={`${styles.panelHeader} ${styles.editorPanelHeader}`}>
           <div className={styles.editorHeader}>
-            <p className={styles.infoLabel}>文件正文</p>
             <h3 className={styles.editorTitle}>{note.title}</h3>
-            <p className={styles.editorPath}>{notePath}</p>
-            <div
-              className={`${styles.saveStatusBadge} ${
-                saveStatus === "error"
-                  ? styles.saveStatusError
-                  : saveStatus === "saving"
-                    ? styles.saveStatusSaving
-                    : saveStatus === "saved"
-                      ? styles.saveStatusSaved
-                      : saveStatus === "dirty"
-                        ? styles.saveStatusDirty
-                        : ""
-              }`}
-            >
-              {getSaveStatusLabel(saveStatus)}
+            <div className={styles.editorSubline}>
+              <p className={styles.editorPath}>{notePath}</p>
+              <div
+                className={`${styles.saveStatusBadge} ${
+                  saveStatus === "error"
+                    ? styles.saveStatusError
+                    : saveStatus === "saving"
+                      ? styles.saveStatusSaving
+                      : saveStatus === "saved"
+                        ? styles.saveStatusSaved
+                        : saveStatus === "dirty"
+                          ? styles.saveStatusDirty
+                          : ""
+                }`}
+              >
+                {getSaveStatusLabel(saveStatus)}
+              </div>
             </div>
             <p className={styles.editorMeta}>
               最近更新时间：{formatDate(lastSavedAt)}
@@ -585,17 +694,6 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
         </header>
 
         <div className={styles.editorBody}>
-          <NoteTagManager
-            noteId={note.id}
-            disabled={disabled || isLoadingNote}
-            onError={onError}
-          />
-          <NoteReviewPlanManager
-            noteId={note.id}
-            disabled={disabled || isLoadingNote}
-            onError={onError}
-          />
-
           <div className={styles.editorSurface}>
             <RichTextToolbar
               editor={editor}
@@ -605,75 +703,47 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
               onInsertImage={() => {
                 void handleInsertImage();
               }}
+              trailingContent={
+                <>
+                  <button
+                    type="button"
+                    className={styles.toolbarIconButton}
+                    onClick={() =>
+                      setEditorFontSize((current) =>
+                        clampEditorFontSize(current - 1),
+                      )
+                    }
+                    disabled={isDecreaseFontDisabled}
+                    aria-label="缩小正文字号"
+                    title="缩小正文字号"
+                  >
+                    <TextSizeDecreaseIcon className={styles.toolbarIcon} />
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.toolbarIconButton}
+                    onClick={() =>
+                      setEditorFontSize((current) =>
+                        clampEditorFontSize(current + 1),
+                      )
+                    }
+                    disabled={isIncreaseFontDisabled}
+                    aria-label="放大正文字号"
+                    title="放大正文字号"
+                  >
+                    <TextSizeIncreaseIcon className={styles.toolbarIcon} />
+                  </button>
+                </>
+              }
             />
             <p className={styles.editorShortcutHint}>{MARKDOWN_SHORTCUT_HINT}</p>
             <div className={styles.editorContent}>
-              <EditorContent editor={editor} className={styles.editorCanvas} />
+              <EditorContent
+                editor={editor}
+                className={styles.editorCanvas}
+                style={editorCanvasStyle}
+              />
             </div>
-          </div>
-
-          <div className={styles.editorFooter}>
-            <section className={styles.actionCard}>
-              <h4 className={styles.cardTitle}>重命名</h4>
-              <div className={styles.editorForm}>
-                <input
-                  className={styles.input}
-                  value={renameValue}
-                  onChange={(event) => setRenameValue(event.currentTarget.value)}
-                  placeholder="输入新的名称"
-                  maxLength={120}
-                />
-                <div className={styles.formActions}>
-                  <button
-                    type="button"
-                    className={styles.actionButton}
-                    onClick={handleRename}
-                    disabled={disabled}
-                  >
-                    保存名称
-                  </button>
-                </div>
-              </div>
-            </section>
-
-            <section className={styles.actionCard}>
-              <h4 className={styles.cardTitle}>删除确认</h4>
-              <p className={styles.cardText}>
-                删除后，这个文件会从数据库中移除，当前阶段不提供恢复。
-              </p>
-              {!isConfirmingDelete ? (
-                <button
-                  type="button"
-                  className={styles.dangerButton}
-                  onClick={() => setIsConfirmingDelete(true)}
-                  disabled={disabled}
-                >
-                  删除当前项
-                </button>
-              ) : (
-                <div className={styles.confirmBox}>
-                  <p className={styles.confirmText}>确认删除当前文件吗？</p>
-                  <div className={styles.formActions}>
-                    <button
-                      type="button"
-                      className={styles.secondaryButton}
-                      onClick={() => setIsConfirmingDelete(false)}
-                      disabled={disabled}
-                    >
-                      取消
-                    </button>
-                    <button
-                      type="button"
-                      className={styles.dangerButton}
-                      onClick={handleDelete}
-                      disabled={disabled}
-                    >
-                      确认删除
-                    </button>
-                  </div>
-                </div>
-              )}
-            </section>
           </div>
         </div>
 

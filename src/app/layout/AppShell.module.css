@@ -8,6 +8,10 @@
   background: var(--color-app-background);
 }
 
+.shellNoRail {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .content {
   display: flex;
   flex-direction: column;
@@ -16,9 +20,7 @@
   min-height: 0;
   padding: 30px 32px;
   overflow: auto;
-  background:
-    radial-gradient(circle at top left, rgba(255, 255, 255, 0.92), transparent 28%),
-    var(--color-app-background);
+  background: var(--color-app-background);
 }
 
 .topBar {
@@ -34,4 +36,19 @@
 
 .contentInner > * {
   min-width: 0;
+}
+
+.contentImmersive {
+  gap: 0;
+  padding: 0 20px 20px;
+  overflow: hidden;
+  background: var(--color-app-background);
+}
+
+.contentInnerImmersive {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  flex: 1;
+  background: transparent;
 }

@@ -6,6 +6,17 @@
   color: var(--color-text-primary);
 }
 
+.pageFill {
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+}
+
+.pageNotebookWorkspace {
+  gap: 0;
+  background: transparent;
+}
+
 .header {
   display: flex;
   flex-direction: column;

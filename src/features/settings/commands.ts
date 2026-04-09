@@ -26,6 +26,10 @@ export async function listBackups() {
   return invoke<BackupListItem[]>("list_backups");
 }
 
+export async function validateBackup(fileName: string) {
+  return invoke<BackupListItem>("validate_backup", { fileName });
+}
+
 export async function createBackup() {
   return invoke<CreateBackupResult>("create_backup");
 }

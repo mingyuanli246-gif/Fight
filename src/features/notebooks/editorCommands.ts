@@ -1,4 +1,6 @@
 import type { Editor } from "@tiptap/react";
+import type { EditorState } from "@tiptap/pm/state";
+import { NodeSelection } from "@tiptap/pm/state";
 import { normalizeManagedResourcePath } from "./editorResources";
 import {
   findMarkdownShortcut,
@@ -6,7 +8,12 @@ import {
   type MarkdownShortcutId,
   type ReservedEditorShortcutId,
 } from "./editorShortcuts";
-import { NOTE_IMAGE_NODE_NAME } from "./imageNodes";
+import {
+  DEFAULT_NOTE_IMAGE_DISPLAY_SIZE,
+  NOTE_IMAGE_NODE_NAME,
+  normalizeNoteImageDisplaySize,
+  type NoteImageDisplaySize,
+} from "./imageNodes";
 import { validateMathLatex } from "./mathRender";
 import {
   BLOCK_MATH_NODE_NAME,
@@ -135,6 +142,80 @@ export interface InsertNoteImageInput {
   alt?: string;
 }
 
+function getSelectedNoteImageFromState(state: EditorState) {
+  if (!(state.selection instanceof NodeSelection)) {
+    return null;
+  }
+
+  const selectedNode = state.selection.node;
+
+  if (selectedNode.type.name !== NOTE_IMAGE_NODE_NAME) {
+    return null;
+  }
+
+  return {
+    node: selectedNode,
+    pos: state.selection.from,
+  };
+}
+
+export function getSelectedNoteImageDisplaySize(
+  editor: Editor | null,
+): NoteImageDisplaySize | null {
+  if (!editor) {
+    return null;
+  }
+
+  const selectedImage = getSelectedNoteImageFromState(editor.state);
+
+  if (!selectedImage) {
+    return null;
+  }
+
+  return normalizeNoteImageDisplaySize(selectedImage.node.attrs.displaySize);
+}
+
+export function setSelectedNoteImageDisplaySize(
+  editor: Editor | null,
+  displaySize: NoteImageDisplaySize,
+) {
+  if (!editor) {
+    return false;
+  }
+
+  const normalizedDisplaySize = normalizeNoteImageDisplaySize(displaySize);
+
+  return editor
+    .chain()
+    .command(({ state, tr, dispatch }) => {
+      const selectedImage = getSelectedNoteImageFromState(state);
+
+      if (!selectedImage) {
+        return false;
+      }
+
+      const currentDisplaySize = normalizeNoteImageDisplaySize(
+        selectedImage.node.attrs.displaySize,
+      );
+
+      if (currentDisplaySize === normalizedDisplaySize) {
+        return true;
+      }
+
+      tr.setNodeMarkup(selectedImage.pos, undefined, {
+        ...selectedImage.node.attrs,
+        displaySize: normalizedDisplaySize,
+      });
+
+      if (dispatch) {
+        dispatch(tr);
+      }
+
+      return true;
+    })
+    .run();
+}
+
 export function insertNoteImage(
   editor: Editor | null,
   input: InsertNoteImageInput,
@@ -177,6 +258,7 @@ export function insertNoteImage(
         attrs: {
           resourcePath: normalizedResourcePath,
           alt: normalizedAlt,
+          displaySize: DEFAULT_NOTE_IMAGE_DISPLAY_SIZE,
         },
       },
       {

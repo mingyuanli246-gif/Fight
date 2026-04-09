@@ -1,9 +1,9 @@
 import { TagPlazaWorkspace } from "../features/tags/TagPlazaWorkspace";
-import type { NoteOpenRequest } from "../features/notebooks/types";
+import type { NoteOpenTarget } from "../features/notebooks/types";
 import styles from "./PageLayout.module.css";
 
 interface TagPlazaPageProps {
-  onOpenNote: (target: Pick<NoteOpenRequest, "noteId" | "notebookId">) => void;
+  onOpenNote: (target: NoteOpenTarget) => void;
 }
 
 export function TagPlazaPage({ onOpenNote }: TagPlazaPageProps) {

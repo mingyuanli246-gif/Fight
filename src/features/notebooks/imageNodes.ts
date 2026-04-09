@@ -10,6 +10,32 @@ import styles from "./NotebookWorkspace.module.css";
 export const NOTE_IMAGE_NODE_NAME = "noteImage";
 const NOTE_IMAGE_ATTRIBUTE = "data-note-image";
 const NOTE_IMAGE_RESOURCE_ATTRIBUTE = "data-resource-path";
+const NOTE_IMAGE_DISPLAY_SIZE_ATTRIBUTE = "data-display-size";
+
+export const NOTE_IMAGE_DISPLAY_SIZES = [
+  "default",
+  "small",
+  "medium",
+  "large",
+] as const;
+
+export type NoteImageDisplaySize =
+  (typeof NOTE_IMAGE_DISPLAY_SIZES)[number];
+
+export const DEFAULT_NOTE_IMAGE_DISPLAY_SIZE: NoteImageDisplaySize = "default";
+
+export function normalizeNoteImageDisplaySize(
+  value: unknown,
+): NoteImageDisplaySize {
+  if (
+    typeof value === "string" &&
+    NOTE_IMAGE_DISPLAY_SIZES.includes(value as NoteImageDisplaySize)
+  ) {
+    return value as NoteImageDisplaySize;
+  }
+
+  return DEFAULT_NOTE_IMAGE_DISPLAY_SIZE;
+}
 
 interface NoteImageNodeOptions {
   HTMLAttributes: Record<string, string>;
@@ -51,8 +77,10 @@ function createNoteImageNodeView(props: NodeViewRendererProps) {
     const currentVersion = renderVersion;
     const resourcePath = String(node.attrs.resourcePath ?? "");
     const alt = String(node.attrs.alt ?? "").trim();
+    const displaySize = normalizeNoteImageDisplaySize(node.attrs.displaySize);
 
     dom.dataset.noteImageResourcePath = resourcePath;
+    dom.dataset.noteImageDisplaySize = displaySize;
     frame.classList.remove(styles.noteImageFrameError);
     frame.classList.remove(styles.noteImageFallback);
     frame.innerHTML = "";
@@ -127,6 +155,27 @@ function createNoteImageNodeView(props: NodeViewRendererProps) {
         return false;
       }
 
+      const nextResourcePath = String(updatedNode.attrs.resourcePath ?? "");
+      const nextAlt = String(updatedNode.attrs.alt ?? "").trim();
+      const nextDisplaySize = normalizeNoteImageDisplaySize(
+        updatedNode.attrs.displaySize,
+      );
+      const currentResourcePath = String(currentNode.attrs.resourcePath ?? "");
+
+      currentNode = updatedNode;
+      dom.dataset.noteImageResourcePath = nextResourcePath;
+      dom.dataset.noteImageDisplaySize = nextDisplaySize;
+
+      if (nextResourcePath === currentResourcePath) {
+        const existingImage = frame.querySelector("img");
+
+        if (existingImage instanceof HTMLImageElement) {
+          existingImage.alt = nextAlt || "笔记图片";
+        }
+
+        return true;
+      }
+
       paint(updatedNode);
       return true;
     },
@@ -174,6 +223,20 @@ export const NoteImage = Node.create<NoteImageNodeOptions>({
           alt: String(attributes.alt ?? ""),
         }),
       },
+      displaySize: {
+        default: DEFAULT_NOTE_IMAGE_DISPLAY_SIZE,
+        parseHTML: (element) =>
+          normalizeNoteImageDisplaySize(
+            element instanceof HTMLElement
+              ? element.getAttribute(NOTE_IMAGE_DISPLAY_SIZE_ATTRIBUTE)
+              : null,
+          ),
+        renderHTML: (attributes) => ({
+          [NOTE_IMAGE_DISPLAY_SIZE_ATTRIBUTE]: normalizeNoteImageDisplaySize(
+            attributes.displaySize,
+          ),
+        }),
+      },
     };
   },
 
@@ -189,6 +252,9 @@ export const NoteImage = Node.create<NoteImageNodeOptions>({
           return {
             resourcePath: element.getAttribute(NOTE_IMAGE_RESOURCE_ATTRIBUTE) ?? "",
             alt: element.getAttribute("alt") ?? "",
+            displaySize: normalizeNoteImageDisplaySize(
+              element.getAttribute(NOTE_IMAGE_DISPLAY_SIZE_ATTRIBUTE),
+            ),
           };
         },
       },
@@ -202,6 +268,9 @@ export const NoteImage = Node.create<NoteImageNodeOptions>({
         [NOTE_IMAGE_ATTRIBUTE]: "true",
         [NOTE_IMAGE_RESOURCE_ATTRIBUTE]: String(node.attrs.resourcePath ?? ""),
         alt: String(node.attrs.alt ?? ""),
+        [NOTE_IMAGE_DISPLAY_SIZE_ATTRIBUTE]: normalizeNoteImageDisplaySize(
+          node.attrs.displaySize,
+        ),
       }),
     ];
   },
