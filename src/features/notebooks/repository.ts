@@ -103,6 +103,7 @@ function logRepositoryError(action: string, error: unknown) {
 function isRepositoryValidationMessage(message: string) {
   return [
     "封面路径不能为空。",
+    "资源路径无效。",
     "目标笔记本不存在。",
     "目标文件夹不存在。",
     "目标文件夹不属于当前笔记本。",

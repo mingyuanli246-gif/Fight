@@ -134,7 +134,7 @@ fn is_windows_drive_path(value: &str) -> bool {
     bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }
 
-fn normalize_managed_resource_path(resource_path: &str) -> Result<String, String> {
+pub(crate) fn normalize_managed_resource_path(resource_path: &str) -> Result<String, String> {
     let trimmed = resource_path.trim();
 
     if trimmed.is_empty()

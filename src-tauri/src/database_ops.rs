@@ -1,3 +1,4 @@
+use crate::resource_ops::normalize_managed_resource_path;
 use chrono::{NaiveDate, Utc};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
@@ -768,6 +769,16 @@ fn create_tag_record(connection: &Connection, normalized_name: &str) -> Result<T
     fetch_tag_by_id(connection, tag_id)
 }
 
+fn normalize_tag_name(name: &str) -> Result<String, String> {
+    let normalized = name.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    if normalized.is_empty() {
+        return Err("标签名称不能为空。".to_string());
+    }
+
+    Ok(normalized)
+}
+
 fn fetch_review_plan_by_id(
     connection: &Connection,
     plan_id: i64,
@@ -1131,11 +1142,13 @@ fn update_notebook_cover_image_tx_internal(
     notebook_id: i64,
     cover_image_path: &str,
 ) -> Result<NotebookRecord, String> {
-    let normalized_path = cover_image_path.trim();
+    let trimmed_path = cover_image_path.trim();
 
-    if normalized_path.is_empty() {
+    if trimmed_path.is_empty() {
         return Err("封面路径不能为空。".to_string());
     }
+
+    let normalized_path = normalize_managed_resource_path(trimmed_path)?;
 
     let transaction = connection
         .transaction()
@@ -1285,15 +1298,16 @@ fn add_tag_to_note_by_name_tx_internal(
     note_id: i64,
     name: &str,
 ) -> Result<Vec<TagRecord>, String> {
+    let normalized_name = normalize_tag_name(name)?;
     let transaction = connection
         .transaction()
         .map_err(|error| to_command_error("开启添加标签事务", error))?;
     ensure_note_exists(&transaction, note_id)?;
 
-    let tag = if let Some(tag) = fetch_tag_by_name(&transaction, name)? {
+    let tag = if let Some(tag) = fetch_tag_by_name(&transaction, &normalized_name)? {
         tag
     } else {
-        create_tag_record(&transaction, name)?
+        create_tag_record(&transaction, &normalized_name)?
     };
 
     transaction
@@ -2361,6 +2375,86 @@ mod tests {
     }
 
     #[test]
+    fn add_tag_to_note_path_rejects_empty_name() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', NULL)",
+                [],
+            )
+            .expect("insert note");
+
+        let error = add_tag_to_note_by_name_tx_internal(&mut connection, 1, "")
+            .expect_err("empty tag name should fail");
+
+        assert_eq!(error, "标签名称不能为空。");
+    }
+
+    #[test]
+    fn add_tag_to_note_path_rejects_whitespace_only_name() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', NULL)",
+                [],
+            )
+            .expect("insert note");
+
+        let error = add_tag_to_note_by_name_tx_internal(&mut connection, 1, "   \t\n  ")
+            .expect_err("whitespace-only tag name should fail");
+
+        assert_eq!(error, "标签名称不能为空。");
+    }
+
+    #[test]
+    fn add_tag_to_note_path_trims_and_normalizes_name_before_insert() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', NULL)",
+                [],
+            )
+            .expect("insert note");
+
+        let tags = add_tag_to_note_by_name_tx_internal(&mut connection, 1, "  重点\t标签  ")
+            .expect("add normalized tag");
+        let stored_name: String = connection
+            .query_row("SELECT name FROM tags WHERE id = 1", [], |row| row.get(0))
+            .expect("read stored tag name");
+
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].name, "重点 标签");
+        assert_eq!(stored_name, "重点 标签");
+    }
+
+    #[test]
     fn rename_review_plan_path_can_commit_three_times() {
         let mut connection = test_connection();
         create_review_plan_tx_internal(&mut connection, "方案一", &[0, 3]).expect("create plan");
@@ -2463,6 +2557,23 @@ mod tests {
             .expect_err("empty cover path should fail");
 
         assert_eq!(error, "封面路径不能为空。");
+    }
+
+    #[test]
+    fn update_notebook_cover_image_path_rejects_invalid_cover_path() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+
+        let error = update_notebook_cover_image_tx_internal(
+            &mut connection,
+            1,
+            "/Users/test/cover-a.png",
+        )
+        .expect_err("absolute cover path should fail");
+
+        assert_eq!(error, "资源路径无效。");
     }
 
     #[test]
