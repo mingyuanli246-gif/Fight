@@ -512,6 +512,31 @@ fn ensure_note_exists(connection: &Connection, note_id: i64) -> Result<(), Strin
     Ok(())
 }
 
+fn ensure_folder_belongs_to_notebook(
+    connection: &Connection,
+    folder_id: i64,
+    notebook_id: i64,
+) -> Result<(), String> {
+    let folder_notebook_id = connection
+        .query_row(
+            "SELECT notebook_id FROM folders WHERE id = ?1 LIMIT 1",
+            [folder_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| to_command_error("校验文件夹归属", error))?;
+
+    let Some(folder_notebook_id) = folder_notebook_id else {
+        return Err("目标文件夹不存在。".to_string());
+    };
+
+    if folder_notebook_id != notebook_id {
+        return Err("目标文件夹不属于当前笔记本。".to_string());
+    }
+
+    Ok(())
+}
+
 fn fetch_note_index_payload(
     connection: &Connection,
     note_id: i64,
@@ -577,6 +602,54 @@ fn delete_notebook_search_entries(connection: &Connection, notebook_id: i64) -> 
             [notebook_id],
         )
         .map_err(|error| to_command_error("删除笔记本搜索索引", error))?;
+    Ok(())
+}
+
+fn delete_folder_search_entries(connection: &Connection, folder_id: i64) -> Result<(), String> {
+    connection
+        .execute(
+            "
+              WITH RECURSIVE folder_tree(id) AS (
+                SELECT id
+                FROM folders
+                WHERE id = ?1
+                UNION ALL
+                SELECT child.id
+                FROM folders AS child
+                INNER JOIN folder_tree ON child.parent_folder_id = folder_tree.id
+              )
+              DELETE FROM note_search
+              WHERE rowid IN (
+                SELECT id
+                FROM notes
+                WHERE folder_id IN (SELECT id FROM folder_tree)
+              )
+            ",
+            [folder_id],
+        )
+        .map_err(|error| to_command_error("删除文件夹搜索索引", error))?;
+    Ok(())
+}
+
+fn delete_notes_by_folder_subtree(connection: &Connection, folder_id: i64) -> Result<(), String> {
+    connection
+        .execute(
+            "
+              WITH RECURSIVE folder_tree(id) AS (
+                SELECT id
+                FROM folders
+                WHERE id = ?1
+                UNION ALL
+                SELECT child.id
+                FROM folders AS child
+                INNER JOIN folder_tree ON child.parent_folder_id = folder_tree.id
+              )
+              DELETE FROM notes
+              WHERE folder_id IN (SELECT id FROM folder_tree)
+            ",
+            [folder_id],
+        )
+        .map_err(|error| to_command_error("删除文件夹内文件", error))?;
     Ok(())
 }
 
@@ -725,6 +798,7 @@ fn create_note_tx_internal(
     folder_id: i64,
     title: &str,
 ) -> Result<NoteRecord, String> {
+    ensure_folder_belongs_to_notebook(connection, folder_id, notebook_id)?;
     ensure_note_search_ready_internal(connection)?;
 
     let transaction = connection
@@ -1031,19 +1105,13 @@ fn delete_notebook_tx_internal(
 }
 
 fn delete_folder_tx_internal(connection: &mut Connection, folder_id: i64) -> Result<(), String> {
+    ensure_note_search_ready_internal(connection)?;
+
     let transaction = connection
         .transaction()
         .map_err(|error| to_command_error("开启删除文件夹事务", error))?;
-    transaction
-        .execute(
-            "
-              UPDATE notes
-              SET folder_id = NULL, updated_at = CURRENT_TIMESTAMP
-              WHERE folder_id = ?1
-            ",
-            [folder_id],
-        )
-        .map_err(|error| to_command_error("重置文件所属文件夹", error))?;
+    delete_folder_search_entries(&transaction, folder_id)?;
+    delete_notes_by_folder_subtree(&transaction, folder_id)?;
     let deleted = transaction
         .execute("DELETE FROM folders WHERE id = ?1", [folder_id])
         .map_err(|error| to_command_error("删除文件夹", error))?;
@@ -1818,10 +1886,11 @@ mod tests {
     use super::{
         add_tag_to_note_by_name_tx_internal, bind_review_plan_to_note_tx_internal,
         clear_notebook_cover_image_tx_internal, create_folder_tx_internal, create_note_tx_internal,
-        create_review_plan_tx_internal, delete_review_plan_tx_internal, ensure_app_meta_table,
-        ensure_note_search_ready_internal, ensure_note_search_table, extract_indexable_plain_text,
-        rebuild_note_search_index_internal, rename_review_plan_tx_internal,
-        set_review_task_completed_tx_internal, update_notebook_cover_image_tx_internal,
+        create_review_plan_tx_internal, delete_folder_tx_internal, delete_review_plan_tx_internal,
+        ensure_app_meta_table, ensure_note_search_ready_internal, ensure_note_search_table,
+        extract_indexable_plain_text, rebuild_note_search_index_internal,
+        rename_review_plan_tx_internal, set_review_task_completed_tx_internal,
+        update_notebook_cover_image_tx_internal,
     };
     use rusqlite::Connection;
 
@@ -2098,6 +2167,100 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM notes", [], |row| row.get(0))
             .expect("count notes");
         assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn create_note_path_reports_missing_folder() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+
+        let error = create_note_tx_internal(&mut connection, 1, 999, "新文件")
+            .expect_err("missing folder should fail");
+
+        assert_eq!(error, "目标文件夹不存在。");
+    }
+
+    #[test]
+    fn create_note_path_reports_folder_notebook_mismatch() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本 A')", [])
+            .expect("insert notebook a");
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本 B')", [])
+            .expect("insert notebook b");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (2, 'B 的文件夹', 0)",
+                [],
+            )
+            .expect("insert folder for notebook b");
+
+        let error = create_note_tx_internal(&mut connection, 1, 1, "新文件")
+            .expect_err("folder notebook mismatch should fail");
+
+        assert_eq!(error, "目标文件夹不属于当前笔记本。");
+    }
+
+    #[test]
+    fn delete_folder_path_deletes_notes_in_folder_subtree_and_search_entries() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, parent_folder_id, name, sort_order) VALUES (1, NULL, '根文件夹', 0)",
+                [],
+            )
+            .expect("insert root folder");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, parent_folder_id, name, sort_order) VALUES (1, 1, '子文件夹', 0)",
+                [],
+            )
+            .expect("insert child folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '根文件', '<p>根正文</p>')",
+                [],
+            )
+            .expect("insert root note");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 2, '子文件', '<p>子正文</p>')",
+                [],
+            )
+            .expect("insert child note");
+        rebuild_note_search_index_internal(&mut connection).expect("rebuild note_search");
+
+        delete_folder_tx_internal(&mut connection, 1).expect("delete folder subtree");
+
+        let note_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM notes", [], |row| row.get(0))
+            .expect("count notes");
+        let note_search_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM note_search", [], |row| row.get(0))
+            .expect("count note_search");
+        let folder_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM folders", [], |row| row.get(0))
+            .expect("count folders");
+
+        assert_eq!(note_count, 0);
+        assert_eq!(note_search_count, 0);
+        assert_eq!(folder_count, 0);
+    }
+
+    #[test]
+    fn delete_folder_path_reports_missing_folder() {
+        let mut connection = test_connection();
+
+        let error = delete_folder_tx_internal(&mut connection, 999)
+            .expect_err("missing folder should fail");
+
+        assert_eq!(error, "目标文件夹不存在。");
     }
 
     #[test]

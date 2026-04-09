@@ -105,6 +105,7 @@ function isRepositoryValidationMessage(message: string) {
     "封面路径不能为空。",
     "目标笔记本不存在。",
     "目标文件夹不存在。",
+    "目标文件夹不属于当前笔记本。",
     "目标文件不存在。",
     "目标标签不存在。",
     "创建标签失败，请稍后重试。",
