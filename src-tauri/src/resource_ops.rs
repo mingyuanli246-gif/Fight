@@ -103,7 +103,7 @@ fn log_resource_error(action: &str, error: impl ToString) {
     eprintln!("[resource_ops] {action}失败: {}", error.to_string());
 }
 
-fn resolve_app_root<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
+pub(crate) fn resolve_app_root<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     app.path().app_config_dir().map_err(|error| {
         log_resource_error("读取应用数据目录", &error);
         "读取应用数据目录失败。".to_string()
@@ -239,7 +239,10 @@ fn import_image_file(
     Ok(resource_path)
 }
 
-fn delete_managed_resource_internal(root: &Path, resource_path: &str) -> Result<(), String> {
+pub(crate) fn delete_managed_resource_internal(
+    root: &Path,
+    resource_path: &str,
+) -> Result<(), String> {
     let absolute_path = managed_resource_absolute_path(root, resource_path)?;
 
     if !absolute_path.exists() {

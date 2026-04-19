@@ -1,5 +1,5 @@
 export type AppSection =
   | "notebooks"
-  | "reviewCalendar"
+  | "reviewTasks"
   | "tagPlaza"
   | "settings";

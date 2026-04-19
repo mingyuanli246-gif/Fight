@@ -7,6 +7,10 @@ import {
   useState,
 } from "react";
 import {
+  ensureReviewFeatureReady,
+} from "../review/repository";
+import type { NoteReviewPlanManagerRef } from "../review/NoteReviewPlanManager";
+import {
   clearNotebookCoverImage,
   createFolder,
   createNote,
@@ -211,8 +215,12 @@ export type NotebookLeaveReason =
   | "restore-backup";
 
 export interface NotebookWorkspaceRef {
-  hasUnsavedChanges: () => boolean;
+  hasUnsavedChanges: (reason?: NotebookLeaveReason) => boolean;
   flushBeforeLeave: (reason?: NotebookLeaveReason) => Promise<boolean>;
+}
+
+function shouldPromptReviewScheduleSave(reason: NotebookLeaveReason) {
+  return reason === "section-change" || reason === "restore-backup";
 }
 
 export const NotebookWorkspace = forwardRef<
@@ -250,8 +258,12 @@ export const NotebookWorkspace = forwardRef<
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isInitializing, setIsInitializing] = useState(true);
   const [isBusy, setIsBusy] = useState(false);
+  const [isLeavePromptOpen, setIsLeavePromptOpen] = useState(false);
+  const [isLeavePromptSaving, setIsLeavePromptSaving] = useState(false);
   const noteEditorRef = useRef<NoteEditorPaneRef | null>(null);
+  const reviewManagerRef = useRef<NoteReviewPlanManagerRef | null>(null);
   const lastHandledOpenRequestRef = useRef<number | null>(null);
+  const leavePromptResolverRef = useRef<((value: boolean) => void) | null>(null);
 
   const sortedNotebooks = useMemo(
     () => sortNotebooks(notebooks, homeSort),
@@ -291,11 +303,24 @@ export const NotebookWorkspace = forwardRef<
     );
   }, [isRightPanelCollapsed]);
 
-  function hasUnsavedChanges() {
-    return (
-      selectedEntity?.kind === "note" &&
-      (noteEditorRef.current?.hasUnsavedChanges() ?? false)
-    );
+  function hasNoteContentUnsavedChanges() {
+    return selectedEntity?.kind === "note"
+      ? (noteEditorRef.current?.hasUnsavedChanges() ?? false)
+      : false;
+  }
+
+  function hasReviewScheduleUnsavedChanges() {
+    return selectedEntity?.kind === "note"
+      ? (reviewManagerRef.current?.hasUnsavedChanges() ?? false)
+      : false;
+  }
+
+  function hasUnsavedChanges(reason: NotebookLeaveReason = "section-change") {
+    if (hasNoteContentUnsavedChanges()) {
+      return true;
+    }
+
+    return shouldPromptReviewScheduleSave(reason) && hasReviewScheduleUnsavedChanges();
   }
 
   function getLeaveBlockedMessage(reason: NotebookLeaveReason) {
@@ -314,7 +339,7 @@ export const NotebookWorkspace = forwardRef<
   async function flushCurrentNoteIfNeeded(
     reason: NotebookLeaveReason = "section-change",
   ) {
-    if (!hasUnsavedChanges()) {
+    if (!hasNoteContentUnsavedChanges()) {
       return true;
     }
 
@@ -329,15 +354,47 @@ export const NotebookWorkspace = forwardRef<
     return true;
   }
 
+  function closeLeavePrompt(result: boolean) {
+    const resolver = leavePromptResolverRef.current;
+    leavePromptResolverRef.current = null;
+    setIsLeavePromptOpen(false);
+    setIsLeavePromptSaving(false);
+    resolver?.(result);
+  }
+
+  async function promptReviewScheduleSaveIfNeeded(reason: NotebookLeaveReason) {
+    if (!shouldPromptReviewScheduleSave(reason) || !hasReviewScheduleUnsavedChanges()) {
+      return true;
+    }
+
+    if (leavePromptResolverRef.current) {
+      return false;
+    }
+
+    return new Promise<boolean>((resolve) => {
+      leavePromptResolverRef.current = resolve;
+      setIsLeavePromptOpen(true);
+    });
+  }
+
+  async function prepareLeave(reason: NotebookLeaveReason = "section-change") {
+    const savedNote = await flushCurrentNoteIfNeeded(reason);
+
+    if (!savedNote) {
+      return false;
+    }
+
+    return promptReviewScheduleSaveIfNeeded(reason);
+  }
+
   useImperativeHandle(
     ref,
     () => ({
       hasUnsavedChanges,
       async flushBeforeLeave(reason = "section-change") {
-        return flushCurrentNoteIfNeeded(reason);
+        return prepareLeave(reason);
       },
     }),
-    [selectedEntity],
   );
 
   async function syncWorkspace(
@@ -392,6 +449,7 @@ export const NotebookWorkspace = forwardRef<
     try {
       await ensureResourceDirectories();
       await initializeNotebookDatabase();
+      await ensureReviewFeatureReady();
       await syncWorkspace();
       setShellMode("home");
     } catch (error) {
@@ -424,7 +482,7 @@ export const NotebookWorkspace = forwardRef<
     onConsumeOpenRequest(openRequest.requestId);
 
     void (async () => {
-      const saved = await flushCurrentNoteIfNeeded();
+      const saved = await prepareLeave();
 
       if (!saved) {
         return;
@@ -476,7 +534,7 @@ export const NotebookWorkspace = forwardRef<
       return;
     }
 
-    if (!(await flushCurrentNoteIfNeeded())) {
+    if (!(await prepareLeave())) {
       return;
     }
 
@@ -526,7 +584,7 @@ export const NotebookWorkspace = forwardRef<
   }
 
   async function handleEnterNotebook(notebookId: number) {
-    const saved = await flushCurrentNoteIfNeeded();
+    const saved = await prepareLeave();
 
     if (!saved) {
       return;
@@ -555,7 +613,7 @@ export const NotebookWorkspace = forwardRef<
   }
 
   async function handleReturnHome() {
-    const saved = await flushCurrentNoteIfNeeded();
+    const saved = await prepareLeave();
 
     if (!saved) {
       return;
@@ -564,6 +622,16 @@ export const NotebookWorkspace = forwardRef<
     setHomeSelectedNotebookId(selectedNotebookId);
     setShellMode("home");
     setHighlightRequest(null);
+  }
+
+  async function handleConfirmLeavePromptSave() {
+    if (isLeavePromptSaving) {
+      return;
+    }
+
+    setIsLeavePromptSaving(true);
+    const saved = (await reviewManagerRef.current?.savePendingChanges()) ?? true;
+    closeLeavePrompt(saved);
   }
 
   async function handleCreateNotebook(name: string) {
@@ -660,7 +728,6 @@ export const NotebookWorkspace = forwardRef<
 
       if (previousCoverPath && previousCoverPath !== nextCoverPath) {
         clearManagedResourceResolution(previousCoverPath);
-        await cleanupManagedResourceBestEffort(previousCoverPath, "清理旧封面");
       }
 
       await syncWorkspace(id, { kind: "notebook", id });
@@ -684,7 +751,6 @@ export const NotebookWorkspace = forwardRef<
         ),
       );
       clearManagedResourceResolution(previousCoverPath ?? undefined);
-      await cleanupManagedResourceBestEffort(previousCoverPath, "清理旧封面");
       await syncWorkspace(id, { kind: "notebook", id });
       setHomeSelectedNotebookId(id);
     });
@@ -917,6 +983,7 @@ export const NotebookWorkspace = forwardRef<
           rightPanelCollapsed={isRightPanelCollapsed}
           highlightRequest={highlightRequest}
           noteEditorRef={noteEditorRef}
+          reviewManagerRef={reviewManagerRef}
           onReturnHome={() => {
             void handleReturnHome();
           }}
@@ -947,6 +1014,37 @@ export const NotebookWorkspace = forwardRef<
           onError={setErrorMessage}
         />
       )}
+
+      {isLeavePromptOpen ? (
+        <div className={styles.dialogOverlay}>
+          <div className={styles.deleteDialog}>
+            <h3 className={styles.dialogTitle}>复习计划尚未保存</h3>
+            <p className={styles.dialogText}>
+              当前文件的复习日期还有未保存修改。你可以继续留在这里编辑，或者先保存后再离开。
+            </p>
+            <div className={styles.dialogActions}>
+              <button
+                type="button"
+                className={styles.secondaryButton}
+                onClick={() => closeLeavePrompt(false)}
+                disabled={isLeavePromptSaving}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className={styles.primaryButton}
+                onClick={() => {
+                  void handleConfirmLeavePromptSave();
+                }}
+                disabled={isLeavePromptSaving}
+              >
+                保存
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {deleteTarget ? (
         <div className={styles.dialogOverlay}>

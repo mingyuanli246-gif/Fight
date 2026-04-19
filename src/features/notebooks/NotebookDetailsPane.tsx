@@ -246,7 +246,7 @@ export function NotebookDetailsPane({
               ) : null}
               {selectedFolder ? (
                 <p className={styles.cardText}>
-                  删除后，该文件夹会被移除，其中的文件会转入“未归档笔记”。
+                  删除后，该文件夹及其子文件夹中的文件会一起移除。
                 </p>
               ) : null}
 

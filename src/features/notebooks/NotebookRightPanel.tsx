@@ -1,13 +1,18 @@
 import { NoteTagManager } from "./NoteTagManager";
-import { NoteReviewPlanManager } from "../review/NoteReviewPlanManager";
+import {
+  NoteReviewPlanManager,
+  type NoteReviewPlanManagerRef,
+} from "../review/NoteReviewPlanManager";
 import type { Note } from "./types";
 import { PanelCollapseIcon, PanelExpandIcon } from "./NotebookUiIcons";
 import styles from "./NotebookWorkspaceShell.module.css";
+import type { RefObject } from "react";
 
 interface NotebookRightPanelProps {
   note: Note | null;
   collapsed: boolean;
   disabled: boolean;
+  reviewManagerRef: RefObject<NoteReviewPlanManagerRef | null>;
   onToggleCollapsed: () => void;
   onError: (message: string) => void;
 }
@@ -16,6 +21,7 @@ export function NotebookRightPanel({
   note,
   collapsed,
   disabled,
+  reviewManagerRef,
   onToggleCollapsed,
   onError,
 }: NotebookRightPanelProps) {
@@ -59,6 +65,7 @@ export function NotebookRightPanel({
               onError={onError}
             />
             <NoteReviewPlanManager
+              ref={reviewManagerRef}
               noteId={note.id}
               disabled={disabled}
               onError={onError}

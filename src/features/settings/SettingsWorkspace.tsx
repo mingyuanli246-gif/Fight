@@ -10,6 +10,7 @@ import { closeNotebookDatabase } from "../notebooks/db";
 import { ThemeContext } from "../theme/ThemeProvider";
 import { themeOptions } from "../theme/themeOptions";
 import {
+  cleanupUnreferencedManagedResources,
   createBackup,
   getDataEnvironmentInfo,
   listBackups,
@@ -648,6 +649,45 @@ export function SettingsWorkspace({
     }
   }
 
+  async function handleCleanupOrphanResources() {
+    setOperationState("cleaningResources");
+    setConfirmRestoreFileName(null);
+    setNotice(buildNotice("info", "正在清理孤儿资源，请稍候…"));
+
+    try {
+      const result = await cleanupUnreferencedManagedResources();
+
+      if (result.failed.length > 0) {
+        console.warn("[settings] 孤儿资源清理存在失败项", result.failed);
+        setNotice(
+          buildNotice(
+            "warning",
+            `孤儿资源清理完成，已删除 ${result.deletedCount} 个文件，${result.failed.length} 个文件清理失败。`,
+          ),
+        );
+        return;
+      }
+
+      setNotice(
+        buildNotice(
+          "info",
+          result.deletedCount > 0
+            ? `孤儿资源清理完成，已删除 ${result.deletedCount} 个文件。`
+            : "孤儿资源清理完成，未发现可删除的资源文件。",
+        ),
+      );
+    } catch (error) {
+      setNotice(
+        buildNotice(
+          "error",
+          getErrorMessage(error, "清理孤儿资源失败，请稍后重试。"),
+        ),
+      );
+    } finally {
+      setOperationState("idle");
+    }
+  }
+
   async function handleRestoreBackup(fileName: string) {
     try {
       const canRestore = await beforeRestoreBackup();
@@ -888,6 +928,17 @@ export function SettingsWorkspace({
               {operationState === "rebuildingSearch"
                 ? "重建中…"
                 : "手动重建搜索索引"}
+            </button>
+
+            <button
+              type="button"
+              className={styles.secondaryButton}
+              disabled={isBusy || !settings}
+              onClick={() => void handleCleanupOrphanResources()}
+            >
+              {operationState === "cleaningResources"
+                ? "清理中…"
+                : "清理孤儿资源"}
             </button>
           </div>
         </section>

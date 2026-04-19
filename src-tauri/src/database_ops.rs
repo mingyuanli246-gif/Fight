@@ -1,10 +1,14 @@
-use crate::resource_ops::normalize_managed_resource_path;
-use chrono::{NaiveDate, Utc};
+use crate::resource_ops::{
+    delete_managed_resource_internal, normalize_managed_resource_path, resolve_app_root,
+};
+use chrono::{Local, NaiveDate, Utc};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
-use std::path::PathBuf;
+use std::collections::BTreeSet;
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 use tauri::{AppHandle, Manager, Runtime};
+use walkdir::WalkDir;
 
 const DATABASE_FILE_NAME: &str = "fight-notes.db";
 const NOTE_SEARCH_TABLE_SQL: &str = "
@@ -22,6 +26,10 @@ const NOTE_SEARCH_META_VERSION: &str = "1";
 const APP_META_KEY_NOTE_SEARCH_META_VERSION: &str = "note_search_meta_version";
 const APP_META_KEY_NOTE_SEARCH_INITIALIZED: &str = "note_search_initialized";
 const APP_META_KEY_NOTE_SEARCH_LAST_REBUILD_AT: &str = "note_search_last_rebuild_at";
+const APP_META_KEY_REVIEW_FEATURE_REBUILD_V1_DONE: &str = "review_feature_rebuild_v1_done";
+const APP_META_KEY_REVIEW_SCHEDULE_DIRTY_NOTE_IDS: &str = "review_schedule_dirty_note_ids";
+const DEFAULT_REVIEW_PLAN_NAME: &str = "系统默认计划";
+const DEFAULT_REVIEW_STEP_OFFSETS: [i64; 4] = [2, 5, 10, 18];
 const TAG_COLOR_PALETTE: [&str; 8] = [
     "#2563EB", "#DC2626", "#CA8A04", "#059669", "#7C3AED", "#DB2777", "#0891B2", "#EA580C",
 ];
@@ -117,6 +125,41 @@ pub struct ReviewTaskRecord {
     pub is_completed: bool,
     pub completed_at: Option<String>,
     pub created_at: String,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteReviewScheduleRecord {
+    pub note_id: i64,
+    pub dates: Vec<String>,
+    pub updated_at: Option<String>,
+    pub activated_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TodayReviewTaskItemRecord {
+    pub note_id: i64,
+    pub notebook_id: i64,
+    pub folder_id: Option<i64>,
+    pub title: String,
+    pub notebook_name: String,
+    pub folder_path: String,
+    pub due_date: String,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedResourceCleanupFailure {
+    pub resource_path: String,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedResourceCleanupResult {
+    pub deleted_count: usize,
+    pub failed: Vec<ManagedResourceCleanupFailure>,
 }
 
 fn classify_database_error(message: &str) -> &'static str {
@@ -411,6 +454,25 @@ fn fetch_notebook_by_id(
             },
         )
         .map_err(|error| to_command_error("读取笔记本", error))
+}
+
+fn fetch_notebook_cover_image_path(
+    connection: &Connection,
+    notebook_id: i64,
+) -> Result<Option<String>, String> {
+    connection
+        .query_row(
+            "
+              SELECT cover_image_path
+              FROM notebooks
+              WHERE id = ?1
+            ",
+            [notebook_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(|error| to_command_error("读取笔记本封面路径", error))?
+        .ok_or_else(|| "目标笔记本不存在。".to_string())
 }
 
 fn fetch_folder_by_id(connection: &Connection, folder_id: i64) -> Result<FolderRecord, String> {
@@ -801,6 +863,512 @@ fn fetch_review_plan_by_id(
             },
         )
         .map_err(|error| to_command_error("读取复习方案", error))
+}
+
+fn today_local_date_key() -> String {
+    Local::now().date_naive().format("%Y-%m-%d").to_string()
+}
+
+fn normalize_review_date(value: &str, today: NaiveDate) -> Result<String, String> {
+    let normalized = value.trim();
+    let date = NaiveDate::parse_from_str(normalized, "%Y-%m-%d")
+        .map_err(|_| "复习日期无效。".to_string())?;
+
+    if date.format("%Y-%m-%d").to_string() != normalized {
+        return Err("复习日期无效。".to_string());
+    }
+
+    if date < today {
+        return Err("复习日期不能早于今天。".to_string());
+    }
+
+    Ok(normalized.to_string())
+}
+
+fn normalize_review_dates(values: &[String], today: NaiveDate) -> Result<Vec<String>, String> {
+    let mut normalized_dates = Vec::with_capacity(values.len());
+    let mut unique_dates = BTreeSet::new();
+
+    for value in values {
+        let normalized = normalize_review_date(value, today)?;
+
+        if !unique_dates.insert(normalized.clone()) {
+            return Err("同一文件内的复习日期不能重复。".to_string());
+        }
+
+        normalized_dates.push(normalized);
+    }
+
+    normalized_dates.sort();
+    Ok(normalized_dates)
+}
+
+fn get_review_schedule_dirty_note_ids(connection: &Connection) -> Result<BTreeSet<i64>, String> {
+    let Some(raw_value) =
+        get_app_meta_value(connection, APP_META_KEY_REVIEW_SCHEDULE_DIRTY_NOTE_IDS)?
+    else {
+        return Ok(BTreeSet::new());
+    };
+
+    let note_ids = serde_json::from_str::<Vec<i64>>(&raw_value)
+        .map_err(|error| to_command_error("读取复习计划脏状态", error))?;
+
+    Ok(note_ids.into_iter().collect())
+}
+
+fn set_review_schedule_dirty_note_ids(
+    connection: &Connection,
+    note_ids: &BTreeSet<i64>,
+) -> Result<(), String> {
+    let raw_value = serde_json::to_string(&note_ids.iter().copied().collect::<Vec<_>>())
+        .map_err(|error| to_command_error("写入复习计划脏状态", error))?;
+
+    set_app_meta_value(
+        connection,
+        APP_META_KEY_REVIEW_SCHEDULE_DIRTY_NOTE_IDS,
+        &raw_value,
+    )
+}
+
+fn update_review_schedule_dirty_note_id(
+    connection: &Connection,
+    note_id: i64,
+    is_dirty: bool,
+) -> Result<(), String> {
+    let mut note_ids = get_review_schedule_dirty_note_ids(connection)?;
+
+    if is_dirty {
+        note_ids.insert(note_id);
+    } else {
+        note_ids.remove(&note_id);
+    }
+
+    set_review_schedule_dirty_note_ids(connection, &note_ids)
+}
+
+fn collect_review_note_ids(connection: &Connection) -> Result<BTreeSet<i64>, String> {
+    let mut note_ids = BTreeSet::new();
+
+    let mut binding_statement = connection
+        .prepare("SELECT note_id FROM note_review_bindings")
+        .map_err(|error| to_command_error("读取复习绑定", error))?;
+    let binding_rows = binding_statement
+        .query_map([], |row| row.get::<_, i64>(0))
+        .map_err(|error| to_command_error("读取复习绑定", error))?;
+    for row in binding_rows {
+        note_ids.insert(row.map_err(|error| to_command_error("读取复习绑定", error))?);
+    }
+
+    let mut task_statement = connection
+        .prepare("SELECT DISTINCT note_id FROM review_tasks")
+        .map_err(|error| to_command_error("读取复习任务", error))?;
+    let task_rows = task_statement
+        .query_map([], |row| row.get::<_, i64>(0))
+        .map_err(|error| to_command_error("读取复习任务", error))?;
+    for row in task_rows {
+        note_ids.insert(row.map_err(|error| to_command_error("读取复习任务", error))?);
+    }
+
+    Ok(note_ids)
+}
+
+fn note_exists(connection: &Connection, note_id: i64) -> Result<bool, String> {
+    let count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM notes WHERE id = ?1", [note_id], |row| {
+            row.get(0)
+        })
+        .map_err(|error| to_command_error("读取文件", error))?;
+
+    Ok(count > 0)
+}
+
+fn clear_all_review_tables(transaction: &Connection) -> Result<(), String> {
+    transaction
+        .execute("DELETE FROM review_tasks", [])
+        .map_err(|error| to_command_error("清空复习任务", error))?;
+    transaction
+        .execute("DELETE FROM note_review_bindings", [])
+        .map_err(|error| to_command_error("清空复习绑定", error))?;
+    transaction
+        .execute("DELETE FROM review_plan_steps", [])
+        .map_err(|error| to_command_error("清空复习步骤", error))?;
+    transaction
+        .execute("DELETE FROM review_plans", [])
+        .map_err(|error| to_command_error("清空复习方案", error))?;
+    Ok(())
+}
+
+fn create_default_review_plan(transaction: &Connection) -> Result<ReviewPlanWithStepsRecord, String> {
+    transaction
+        .execute(
+            "
+              INSERT INTO review_plans (name)
+              VALUES (?1)
+            ",
+            [DEFAULT_REVIEW_PLAN_NAME],
+        )
+        .map_err(|error| to_command_error("创建系统默认复习计划", error))?;
+
+    let plan_id = transaction.last_insert_rowid();
+    for (index, offset_days) in DEFAULT_REVIEW_STEP_OFFSETS.iter().enumerate() {
+        transaction
+            .execute(
+                "
+                  INSERT INTO review_plan_steps (plan_id, step_index, offset_days)
+                  VALUES (?1, ?2, ?3)
+                ",
+                params![plan_id, (index as i64) + 1, offset_days],
+            )
+            .map_err(|error| to_command_error("写入系统默认复习步骤", error))?;
+    }
+
+    fetch_review_plan_with_steps(transaction, plan_id)
+}
+
+fn fetch_default_review_plan(
+    connection: &Connection,
+) -> Result<Option<ReviewPlanWithStepsRecord>, String> {
+    let plan_id = connection
+        .query_row(
+            "SELECT id FROM review_plans WHERE name = ?1 LIMIT 1",
+            [DEFAULT_REVIEW_PLAN_NAME],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| to_command_error("读取系统默认复习计划", error))?;
+
+    let Some(plan_id) = plan_id else {
+        return Ok(None);
+    };
+
+    Ok(Some(fetch_review_plan_with_steps(connection, plan_id)?))
+}
+
+fn default_review_plan_is_valid(connection: &Connection) -> Result<bool, String> {
+    let Some(plan) = fetch_default_review_plan(connection)? else {
+        return Ok(false);
+    };
+
+    let plan_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM review_plans", [], |row| row.get(0))
+        .map_err(|error| to_command_error("读取复习方案数量", error))?;
+
+    if plan_count != 1 || plan.steps.len() != DEFAULT_REVIEW_STEP_OFFSETS.len() {
+        return Ok(false);
+    }
+
+    Ok(plan
+        .steps
+        .iter()
+        .zip(DEFAULT_REVIEW_STEP_OFFSETS.iter())
+        .all(|(step, expected_offset)| step.offset_days == *expected_offset))
+}
+
+fn clear_review_schedule_for_note(
+    transaction: &Connection,
+    note_id: i64,
+) -> Result<(), String> {
+    transaction
+        .execute("DELETE FROM review_tasks WHERE note_id = ?1", [note_id])
+        .map_err(|error| to_command_error("删除复习任务", error))?;
+    transaction
+        .execute("DELETE FROM note_review_bindings WHERE note_id = ?1", [note_id])
+        .map_err(|error| to_command_error("删除复习绑定", error))?;
+    update_review_schedule_dirty_note_id(transaction, note_id, false)?;
+    Ok(())
+}
+
+fn write_note_review_schedule(
+    transaction: &Connection,
+    note_id: i64,
+    plan_id: i64,
+    activated_at: &str,
+    dates: &[String],
+) -> Result<NoteReviewScheduleRecord, String> {
+    ensure_note_exists(transaction, note_id)?;
+    clear_review_schedule_for_note(transaction, note_id)?;
+
+    transaction
+        .execute(
+            "
+              INSERT INTO note_review_bindings (note_id, plan_id, start_date)
+              VALUES (?1, ?2, ?3)
+            ",
+            params![note_id, plan_id, activated_at],
+        )
+        .map_err(|error| to_command_error("写入复习绑定", error))?;
+
+    for (index, due_date) in dates.iter().enumerate() {
+        transaction
+            .execute(
+                "
+                  INSERT INTO review_tasks (
+                    note_id,
+                    plan_id,
+                    due_date,
+                    step_index,
+                    is_completed,
+                    completed_at
+                  )
+                  VALUES (?1, ?2, ?3, ?4, 0, NULL)
+                ",
+                params![note_id, plan_id, due_date, (index as i64) + 1],
+            )
+            .map_err(|error| to_command_error("写入复习任务", error))?;
+    }
+
+    fetch_note_review_schedule(transaction, note_id)
+        .map(|schedule| schedule.unwrap_or(NoteReviewScheduleRecord {
+            note_id,
+            dates: dates.to_vec(),
+            updated_at: None,
+            activated_at: Some(activated_at.to_string()),
+        }))
+}
+
+fn build_default_review_dates(base_date: &str) -> Result<Vec<String>, String> {
+    DEFAULT_REVIEW_STEP_OFFSETS
+        .iter()
+        .map(|offset_days| add_days(base_date, *offset_days))
+        .collect()
+}
+
+fn reset_note_review_schedule_to_default(
+    transaction: &Connection,
+    note_id: i64,
+    base_date: &str,
+) -> Result<Option<NoteReviewScheduleRecord>, String> {
+    if !note_exists(transaction, note_id)? {
+        update_review_schedule_dirty_note_id(transaction, note_id, false)?;
+        return Ok(None);
+    }
+
+    let default_plan = fetch_default_review_plan(transaction)?
+        .ok_or_else(|| "系统默认复习计划不存在。".to_string())?;
+    let dates = build_default_review_dates(base_date)?;
+    let schedule = write_note_review_schedule(
+        transaction,
+        note_id,
+        default_plan.id,
+        base_date,
+        &dates,
+    )?;
+
+    Ok(Some(schedule))
+}
+
+fn rebuild_review_state_to_default(
+    connection: &mut Connection,
+    note_ids: &BTreeSet<i64>,
+    base_date: &str,
+) -> Result<(), String> {
+    let transaction = connection
+        .transaction()
+        .map_err(|error| to_command_error("开启重建复习数据事务", error))?;
+
+    clear_all_review_tables(&transaction)?;
+    create_default_review_plan(&transaction)?;
+
+    for note_id in note_ids {
+        if note_exists(&transaction, *note_id)? {
+            reset_note_review_schedule_to_default(&transaction, *note_id, base_date)?;
+        }
+    }
+
+    set_app_meta_value(
+        &transaction,
+        APP_META_KEY_REVIEW_FEATURE_REBUILD_V1_DONE,
+        "1",
+    )?;
+    set_review_schedule_dirty_note_ids(&transaction, &BTreeSet::new())?;
+    transaction
+        .commit()
+        .map_err(|error| to_command_error("提交重建复习数据事务", error))
+}
+
+fn fetch_note_review_schedule(
+    connection: &Connection,
+    note_id: i64,
+) -> Result<Option<NoteReviewScheduleRecord>, String> {
+    let binding_row = connection
+        .query_row(
+            "
+              SELECT
+                plan_id,
+                start_date,
+                updated_at
+              FROM note_review_bindings
+              WHERE note_id = ?1
+              LIMIT 1
+            ",
+            [note_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| to_command_error("读取复习绑定", error))?;
+
+    let Some((plan_id, activated_at, updated_at)) = binding_row else {
+        return Ok(None);
+    };
+
+    let mut statement = connection
+        .prepare(
+            "
+              SELECT due_date
+              FROM review_tasks
+              WHERE note_id = ?1 AND plan_id = ?2
+              ORDER BY due_date ASC, step_index ASC, id ASC
+            ",
+        )
+        .map_err(|error| to_command_error("读取复习任务", error))?;
+    let rows = statement
+        .query_map(params![note_id, plan_id], |row| row.get::<_, String>(0))
+        .map_err(|error| to_command_error("读取复习任务", error))?;
+
+    let mut dates = Vec::new();
+    for row in rows {
+        dates.push(row.map_err(|error| to_command_error("读取复习任务", error))?);
+    }
+
+    if dates.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(NoteReviewScheduleRecord {
+        note_id,
+        dates,
+        updated_at: Some(updated_at),
+        activated_at: Some(activated_at),
+    }))
+}
+
+fn ensure_review_feature_ready_internal(connection: &mut Connection) -> Result<(), String> {
+    ensure_app_meta_table(connection)?;
+
+    let today = today_local_date_key();
+    let rebuild_done =
+        get_app_meta_value(connection, APP_META_KEY_REVIEW_FEATURE_REBUILD_V1_DONE)?.is_some();
+    let collected_note_ids = collect_review_note_ids(connection)?;
+
+    if !rebuild_done {
+        rebuild_review_state_to_default(connection, &collected_note_ids, &today)?;
+    } else if !default_review_plan_is_valid(connection)? {
+        rebuild_review_state_to_default(connection, &collected_note_ids, &today)?;
+    }
+
+    let dirty_note_ids = get_review_schedule_dirty_note_ids(connection)?;
+    if dirty_note_ids.is_empty() {
+        return Ok(());
+    }
+
+    let transaction = connection
+        .transaction()
+        .map_err(|error| to_command_error("开启恢复默认复习计划事务", error))?;
+    if fetch_default_review_plan(&transaction)?.is_none() {
+        clear_all_review_tables(&transaction)?;
+        create_default_review_plan(&transaction)?;
+    }
+
+    for note_id in dirty_note_ids {
+        reset_note_review_schedule_to_default(&transaction, note_id, &today)?;
+    }
+
+    set_review_schedule_dirty_note_ids(&transaction, &BTreeSet::new())?;
+    transaction
+        .commit()
+        .map_err(|error| to_command_error("提交恢复默认复习计划事务", error))
+}
+
+fn activate_note_review_schedule_tx_internal(
+    connection: &mut Connection,
+    note_id: i64,
+) -> Result<NoteReviewScheduleRecord, String> {
+    ensure_review_feature_ready_internal(connection)?;
+    let today = today_local_date_key();
+    let default_plan = fetch_default_review_plan(connection)?
+        .ok_or_else(|| "系统默认复习计划不存在。".to_string())?;
+    let dates = build_default_review_dates(&today)?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| to_command_error("开启执行复习计划事务", error))?;
+    let schedule = write_note_review_schedule(&transaction, note_id, default_plan.id, &today, &dates)?;
+    transaction
+        .commit()
+        .map_err(|error| to_command_error("提交执行复习计划事务", error))?;
+    Ok(schedule)
+}
+
+fn save_note_review_schedule_tx_internal(
+    connection: &mut Connection,
+    note_id: i64,
+    dates: &[String],
+) -> Result<NoteReviewScheduleRecord, String> {
+    ensure_review_feature_ready_internal(connection)?;
+    let today = Local::now().date_naive();
+    let normalized_dates = normalize_review_dates(dates, today)?;
+
+    if normalized_dates.is_empty() {
+        return Err("复习日期不能为空。".to_string());
+    }
+
+    let current_binding = fetch_binding_row_by_note_id(connection, note_id)?;
+    let activated_at = current_binding
+        .as_ref()
+        .map(|binding| binding.start_date.clone())
+        .unwrap_or_else(today_local_date_key);
+    let default_plan = fetch_default_review_plan(connection)?
+        .ok_or_else(|| "系统默认复习计划不存在。".to_string())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| to_command_error("开启保存复习计划事务", error))?;
+    let schedule = write_note_review_schedule(
+        &transaction,
+        note_id,
+        default_plan.id,
+        &activated_at,
+        &normalized_dates,
+    )?;
+    transaction
+        .commit()
+        .map_err(|error| to_command_error("提交保存复习计划事务", error))?;
+    Ok(schedule)
+}
+
+fn clear_note_review_schedule_tx_internal(
+    connection: &mut Connection,
+    note_id: i64,
+) -> Result<(), String> {
+    ensure_review_feature_ready_internal(connection)?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| to_command_error("开启清空复习计划事务", error))?;
+    ensure_note_exists(&transaction, note_id)?;
+    clear_review_schedule_for_note(&transaction, note_id)?;
+    transaction
+        .commit()
+        .map_err(|error| to_command_error("提交清空复习计划事务", error))
+}
+
+fn set_note_review_schedule_dirty_tx_internal(
+    connection: &mut Connection,
+    note_id: i64,
+    is_dirty: bool,
+) -> Result<(), String> {
+    ensure_app_meta_table(connection)?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| to_command_error("开启更新复习计划脏状态事务", error))?;
+    ensure_note_exists(&transaction, note_id)?;
+    update_review_schedule_dirty_note_id(&transaction, note_id, is_dirty)?;
+    transaction
+        .commit()
+        .map_err(|error| to_command_error("提交更新复习计划脏状态事务", error))
 }
 
 fn create_note_tx_internal(
@@ -1636,6 +2204,41 @@ fn extract_image_alt_from_tag(tag: &str) -> Option<String> {
     }
 }
 
+fn extract_image_resource_path_from_tag(tag: &str) -> Option<String> {
+    if !tag.contains("data-note-image") {
+        return None;
+    }
+
+    let resource_path = extract_tag_attribute(tag, "data-resource-path")?;
+    normalize_managed_resource_path(&resource_path).ok()
+}
+
+fn extract_note_image_resource_paths(content: &str) -> Vec<String> {
+    let mut resource_paths = BTreeSet::new();
+    let mut characters = content.chars().peekable();
+
+    while let Some(character) = characters.next() {
+        if character != '<' {
+            continue;
+        }
+
+        let mut tag = String::from("<");
+
+        while let Some(next_character) = characters.next() {
+            tag.push(next_character);
+            if next_character == '>' {
+                break;
+            }
+        }
+
+        if let Some(resource_path) = extract_image_resource_path_from_tag(&tag) {
+            resource_paths.insert(resource_path);
+        }
+    }
+
+    resource_paths.into_iter().collect()
+}
+
 fn extract_indexable_plain_text(content: &str) -> String {
     let mut text = String::with_capacity(content.len());
     let mut last_was_space = false;
@@ -1733,6 +2336,362 @@ fn extract_indexable_plain_text(content: &str) -> String {
     text.trim().to_string()
 }
 
+fn extend_resource_paths_from_note_content(paths: &mut BTreeSet<String>, content: &str) {
+    for resource_path in extract_note_image_resource_paths(content) {
+        paths.insert(resource_path);
+    }
+}
+
+fn insert_normalized_resource_path(paths: &mut BTreeSet<String>, resource_path: &str) {
+    if let Ok(normalized_path) = normalize_managed_resource_path(resource_path) {
+        paths.insert(normalized_path);
+    }
+}
+
+fn to_cleanup_failure(resource_path: impl Into<String>, message: impl Into<String>) -> ManagedResourceCleanupFailure {
+    ManagedResourceCleanupFailure {
+        resource_path: resource_path.into(),
+        message: message.into(),
+    }
+}
+
+fn collect_managed_resource_paths_for_note(
+    connection: &Connection,
+    note_id: i64,
+) -> Result<Vec<String>, String> {
+    let content = connection
+        .query_row(
+            "
+              SELECT COALESCE(content_plaintext, '')
+              FROM notes
+              WHERE id = ?1
+            ",
+            [note_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| to_command_error("读取文件资源引用", error))?
+        .ok_or_else(|| "目标文件不存在。".to_string())?;
+
+    let mut resource_paths = BTreeSet::new();
+    extend_resource_paths_from_note_content(&mut resource_paths, &content);
+    Ok(resource_paths.into_iter().collect())
+}
+
+fn collect_managed_resource_paths_for_folder_subtree(
+    connection: &Connection,
+    folder_id: i64,
+) -> Result<Vec<String>, String> {
+    let folder_exists = connection
+        .query_row(
+            "SELECT 1 FROM folders WHERE id = ?1 LIMIT 1",
+            [folder_id],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|error| to_command_error("校验文件夹是否存在", error))?;
+
+    if folder_exists.is_none() {
+        return Err("目标文件夹不存在。".to_string());
+    }
+
+    let mut statement = connection
+        .prepare(
+            "
+              WITH RECURSIVE folder_tree(id) AS (
+                SELECT id
+                FROM folders
+                WHERE id = ?1
+                UNION ALL
+                SELECT child.id
+                FROM folders AS child
+                INNER JOIN folder_tree ON child.parent_folder_id = folder_tree.id
+              )
+              SELECT COALESCE(content_plaintext, '')
+              FROM notes
+              WHERE folder_id IN (SELECT id FROM folder_tree)
+            ",
+        )
+        .map_err(|error| to_command_error("读取文件夹资源引用", error))?;
+    let rows = statement
+        .query_map([folder_id], |row| row.get::<_, String>(0))
+        .map_err(|error| to_command_error("读取文件夹资源引用", error))?;
+
+    let mut resource_paths = BTreeSet::new();
+    for row in rows {
+        extend_resource_paths_from_note_content(
+            &mut resource_paths,
+            &row.map_err(|error| to_command_error("读取文件夹资源引用", error))?,
+        );
+    }
+
+    Ok(resource_paths.into_iter().collect())
+}
+
+fn collect_managed_resource_paths_for_notebook(
+    connection: &Connection,
+    notebook_id: i64,
+) -> Result<Vec<String>, String> {
+    let cover_image_path = connection
+        .query_row(
+            "
+              SELECT cover_image_path
+              FROM notebooks
+              WHERE id = ?1
+            ",
+            [notebook_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(|error| to_command_error("读取笔记本资源引用", error))?
+        .ok_or_else(|| "目标笔记本不存在。".to_string())?;
+
+    let mut statement = connection
+        .prepare(
+            "
+              SELECT COALESCE(content_plaintext, '')
+              FROM notes
+              WHERE notebook_id = ?1
+            ",
+        )
+        .map_err(|error| to_command_error("读取笔记本资源引用", error))?;
+    let rows = statement
+        .query_map([notebook_id], |row| row.get::<_, String>(0))
+        .map_err(|error| to_command_error("读取笔记本资源引用", error))?;
+
+    let mut resource_paths = BTreeSet::new();
+    if let Some(path) = cover_image_path.as_deref() {
+        insert_normalized_resource_path(&mut resource_paths, path);
+    }
+
+    for row in rows {
+        extend_resource_paths_from_note_content(
+            &mut resource_paths,
+            &row.map_err(|error| to_command_error("读取笔记本资源引用", error))?,
+        );
+    }
+
+    Ok(resource_paths.into_iter().collect())
+}
+
+fn list_live_managed_resource_paths(connection: &Connection) -> Result<BTreeSet<String>, String> {
+    let mut resource_paths = BTreeSet::new();
+
+    let mut cover_statement = connection
+        .prepare(
+            "
+              SELECT cover_image_path
+              FROM notebooks
+              WHERE cover_image_path IS NOT NULL
+            ",
+        )
+        .map_err(|error| to_command_error("读取存活封面引用", error))?;
+    let cover_rows = cover_statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| to_command_error("读取存活封面引用", error))?;
+
+    for row in cover_rows {
+        insert_normalized_resource_path(
+            &mut resource_paths,
+            &row.map_err(|error| to_command_error("读取存活封面引用", error))?,
+        );
+    }
+
+    let mut note_statement = connection
+        .prepare(
+            "
+              SELECT COALESCE(content_plaintext, '')
+              FROM notes
+              WHERE content_plaintext IS NOT NULL
+            ",
+        )
+        .map_err(|error| to_command_error("读取存活正文资源引用", error))?;
+    let note_rows = note_statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| to_command_error("读取存活正文资源引用", error))?;
+
+    for row in note_rows {
+        extend_resource_paths_from_note_content(
+            &mut resource_paths,
+            &row.map_err(|error| to_command_error("读取存活正文资源引用", error))?,
+        );
+    }
+
+    Ok(resource_paths)
+}
+
+fn select_unreferenced_managed_resource_paths(
+    connection: &Connection,
+    candidate_paths: &[String],
+) -> Result<Vec<String>, String> {
+    let mut normalized_candidates = BTreeSet::new();
+    for candidate_path in candidate_paths {
+        insert_normalized_resource_path(&mut normalized_candidates, candidate_path);
+    }
+
+    if normalized_candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let live_resource_paths = list_live_managed_resource_paths(connection)?;
+    Ok(normalized_candidates
+        .into_iter()
+        .filter(|candidate_path| !live_resource_paths.contains(candidate_path))
+        .collect())
+}
+
+fn cleanup_candidate_unreferenced_managed_resources(
+    root: &Path,
+    connection: &Connection,
+    candidate_paths: &[String],
+) -> Result<ManagedResourceCleanupResult, String> {
+    let cleanup_targets = select_unreferenced_managed_resource_paths(connection, candidate_paths)?;
+    let mut result = ManagedResourceCleanupResult {
+        deleted_count: 0,
+        failed: Vec::new(),
+    };
+
+    for resource_path in cleanup_targets {
+        match delete_managed_resource_internal(root, &resource_path) {
+            Ok(()) => {
+                result.deleted_count += 1;
+            }
+            Err(error) => {
+                result
+                    .failed
+                    .push(to_cleanup_failure(resource_path, error));
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+fn managed_resource_path_from_absolute_path(
+    root: &Path,
+    absolute_path: &Path,
+) -> Result<String, String> {
+    let relative_path = absolute_path
+        .strip_prefix(root)
+        .map_err(|_| "资源路径无效。".to_string())?;
+    let mut segments = Vec::new();
+
+    for component in relative_path.components() {
+        match component {
+            Component::Normal(segment) => {
+                let segment = segment
+                    .to_str()
+                    .ok_or_else(|| "资源路径包含无法识别的字符。".to_string())?;
+                segments.push(segment);
+            }
+            _ => return Err("资源路径无效。".to_string()),
+        }
+    }
+
+    normalize_managed_resource_path(&segments.join("/"))
+}
+
+fn collect_managed_resource_file_candidates(
+    root: &Path,
+    directory_name: &str,
+    resource_paths: &mut BTreeSet<String>,
+    failures: &mut Vec<ManagedResourceCleanupFailure>,
+) {
+    let directory_path = root.join(directory_name);
+
+    if !directory_path.exists() {
+        return;
+    }
+
+    for entry in WalkDir::new(&directory_path).min_depth(1) {
+        match entry {
+            Ok(entry) => {
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+
+                let entry_path = entry.path();
+                match managed_resource_path_from_absolute_path(root, entry_path) {
+                    Ok(resource_path) => {
+                        resource_paths.insert(resource_path);
+                    }
+                    Err(error) => {
+                        failures.push(to_cleanup_failure(
+                            entry_path.to_string_lossy().to_string(),
+                            error,
+                        ));
+                    }
+                }
+            }
+            Err(error) => {
+                failures.push(to_cleanup_failure(directory_name.to_string(), error.to_string()));
+            }
+        }
+    }
+}
+
+fn cleanup_unreferenced_managed_resources_internal(
+    root: &Path,
+    connection: &Connection,
+) -> Result<ManagedResourceCleanupResult, String> {
+    let mut candidate_paths = BTreeSet::new();
+    let mut failures = Vec::new();
+
+    collect_managed_resource_file_candidates(
+        root,
+        "resources/images",
+        &mut candidate_paths,
+        &mut failures,
+    );
+    collect_managed_resource_file_candidates(
+        root,
+        "resources/covers",
+        &mut candidate_paths,
+        &mut failures,
+    );
+
+    let mut result = cleanup_candidate_unreferenced_managed_resources(
+        root,
+        connection,
+        &candidate_paths.into_iter().collect::<Vec<_>>(),
+    )?;
+    result.failed.extend(failures);
+
+    Ok(result)
+}
+
+fn cleanup_unreferenced_managed_resources_best_effort<R: Runtime>(
+    app: &AppHandle<R>,
+    connection: &Connection,
+    candidate_paths: &[String],
+) {
+    if candidate_paths.is_empty() {
+        return;
+    }
+
+    let root = match resolve_app_root(app) {
+        Ok(root) => root,
+        Err(error) => {
+            eprintln!("[database_ops] 清理孤儿资源失败 [读取应用数据目录]: {error}");
+            return;
+        }
+    };
+
+    match cleanup_candidate_unreferenced_managed_resources(&root, connection, candidate_paths) {
+        Ok(result) => {
+            for failure in result.failed {
+                eprintln!(
+                    "[database_ops] 清理孤儿资源失败 [{}]: {}",
+                    failure.resource_path, failure.message
+                );
+            }
+        }
+        Err(error) => {
+            eprintln!("[database_ops] 清理孤儿资源失败: {error}");
+        }
+    }
+}
+
 #[tauri::command]
 pub fn ensure_note_search_ready(app: AppHandle) -> Result<(), String> {
     let mut connection = open_database_connection(&app)?;
@@ -1770,6 +2729,47 @@ pub fn create_folder_tx(
 }
 
 #[tauri::command]
+pub fn ensure_review_feature_ready_tx(app: AppHandle) -> Result<(), String> {
+    let mut connection = open_database_connection(&app)?;
+    ensure_review_feature_ready_internal(&mut connection)
+}
+
+#[tauri::command]
+pub fn activate_note_review_schedule_tx(
+    app: AppHandle,
+    note_id: i64,
+) -> Result<NoteReviewScheduleRecord, String> {
+    let mut connection = open_database_connection(&app)?;
+    activate_note_review_schedule_tx_internal(&mut connection, note_id)
+}
+
+#[tauri::command]
+pub fn save_note_review_schedule_tx(
+    app: AppHandle,
+    note_id: i64,
+    dates: Vec<String>,
+) -> Result<NoteReviewScheduleRecord, String> {
+    let mut connection = open_database_connection(&app)?;
+    save_note_review_schedule_tx_internal(&mut connection, note_id, &dates)
+}
+
+#[tauri::command]
+pub fn clear_note_review_schedule_tx(app: AppHandle, note_id: i64) -> Result<(), String> {
+    let mut connection = open_database_connection(&app)?;
+    clear_note_review_schedule_tx_internal(&mut connection, note_id)
+}
+
+#[tauri::command]
+pub fn set_note_review_schedule_dirty_tx(
+    app: AppHandle,
+    note_id: i64,
+    is_dirty: bool,
+) -> Result<(), String> {
+    let mut connection = open_database_connection(&app)?;
+    set_note_review_schedule_dirty_tx_internal(&mut connection, note_id, is_dirty)
+}
+
+#[tauri::command]
 pub fn create_review_plan_tx(
     app: AppHandle,
     name: String,
@@ -1798,13 +2798,20 @@ pub fn delete_review_plan_tx(app: AppHandle, plan_id: i64) -> Result<(), String>
 #[tauri::command]
 pub fn delete_notebook_tx(app: AppHandle, notebook_id: i64) -> Result<(), String> {
     let mut connection = open_database_connection(&app)?;
-    delete_notebook_tx_internal(&mut connection, notebook_id)
+    let candidate_paths = collect_managed_resource_paths_for_notebook(&connection, notebook_id)?;
+    delete_notebook_tx_internal(&mut connection, notebook_id)?;
+    cleanup_unreferenced_managed_resources_best_effort(&app, &connection, &candidate_paths);
+    Ok(())
 }
 
 #[tauri::command]
 pub fn delete_folder_tx(app: AppHandle, folder_id: i64) -> Result<(), String> {
     let mut connection = open_database_connection(&app)?;
-    delete_folder_tx_internal(&mut connection, folder_id)
+    let candidate_paths =
+        collect_managed_resource_paths_for_folder_subtree(&connection, folder_id)?;
+    delete_folder_tx_internal(&mut connection, folder_id)?;
+    cleanup_unreferenced_managed_resources_best_effort(&app, &connection, &candidate_paths);
+    Ok(())
 }
 
 #[tauri::command]
@@ -1814,7 +2821,21 @@ pub fn update_notebook_cover_image_tx(
     cover_image_path: String,
 ) -> Result<NotebookRecord, String> {
     let mut connection = open_database_connection(&app)?;
-    update_notebook_cover_image_tx_internal(&mut connection, notebook_id, &cover_image_path)
+    let previous_cover_path = fetch_notebook_cover_image_path(&connection, notebook_id)?;
+    let notebook =
+        update_notebook_cover_image_tx_internal(&mut connection, notebook_id, &cover_image_path)?;
+
+    if let Some(previous_cover_path) = previous_cover_path {
+        if notebook.cover_image_path.as_deref() != Some(previous_cover_path.as_str()) {
+            cleanup_unreferenced_managed_resources_best_effort(
+                &app,
+                &connection,
+                &[previous_cover_path],
+            );
+        }
+    }
+
+    Ok(notebook)
 }
 
 #[tauri::command]
@@ -1823,7 +2844,18 @@ pub fn clear_notebook_cover_image_tx(
     notebook_id: i64,
 ) -> Result<NotebookRecord, String> {
     let mut connection = open_database_connection(&app)?;
-    clear_notebook_cover_image_tx_internal(&mut connection, notebook_id)
+    let previous_cover_path = fetch_notebook_cover_image_path(&connection, notebook_id)?;
+    let notebook = clear_notebook_cover_image_tx_internal(&mut connection, notebook_id)?;
+
+    if let Some(previous_cover_path) = previous_cover_path {
+        cleanup_unreferenced_managed_resources_best_effort(
+            &app,
+            &connection,
+            &[previous_cover_path],
+        );
+    }
+
+    Ok(notebook)
 }
 
 #[tauri::command]
@@ -1845,7 +2877,19 @@ pub fn update_note_content_tx(
 #[tauri::command]
 pub fn delete_note_tx(app: AppHandle, note_id: i64) -> Result<(), String> {
     let mut connection = open_database_connection(&app)?;
-    delete_note_tx_internal(&mut connection, note_id)
+    let candidate_paths = collect_managed_resource_paths_for_note(&connection, note_id)?;
+    delete_note_tx_internal(&mut connection, note_id)?;
+    cleanup_unreferenced_managed_resources_best_effort(&app, &connection, &candidate_paths);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn cleanup_unreferenced_managed_resources(
+    app: AppHandle,
+) -> Result<ManagedResourceCleanupResult, String> {
+    let connection = open_database_connection(&app)?;
+    let root = resolve_app_root(&app)?;
+    cleanup_unreferenced_managed_resources_internal(&root, &connection)
 }
 
 #[tauri::command]
@@ -1898,15 +2942,28 @@ pub fn set_review_task_completed_tx(
 #[cfg(test)]
 mod tests {
     use super::{
-        add_tag_to_note_by_name_tx_internal, bind_review_plan_to_note_tx_internal,
-        clear_notebook_cover_image_tx_internal, create_folder_tx_internal, create_note_tx_internal,
-        create_review_plan_tx_internal, delete_folder_tx_internal, delete_review_plan_tx_internal,
+        add_days, add_tag_to_note_by_name_tx_internal, bind_review_plan_to_note_tx_internal,
+        activate_note_review_schedule_tx_internal, clear_note_review_schedule_tx_internal,
+        cleanup_candidate_unreferenced_managed_resources,
+        cleanup_unreferenced_managed_resources_internal, clear_notebook_cover_image_tx_internal,
+        collect_managed_resource_paths_for_folder_subtree, collect_managed_resource_paths_for_notebook,
+        create_folder_tx_internal, create_note_tx_internal, create_review_plan_tx_internal,
+        delete_folder_tx_internal, delete_note_tx_internal, delete_notebook_tx_internal,
+        delete_review_plan_tx_internal,
         ensure_app_meta_table, ensure_note_search_ready_internal, ensure_note_search_table,
-        extract_indexable_plain_text, rebuild_note_search_index_internal,
+        ensure_review_feature_ready_internal,
+        extract_indexable_plain_text, extract_note_image_resource_paths, rebuild_note_search_index_internal,
         rename_review_plan_tx_internal, set_review_task_completed_tx_internal,
-        update_notebook_cover_image_tx_internal,
+        save_note_review_schedule_tx_internal, set_note_review_schedule_dirty_tx_internal,
+        today_local_date_key, update_notebook_cover_image_tx_internal,
+        APP_META_KEY_REVIEW_FEATURE_REBUILD_V1_DONE, APP_META_KEY_REVIEW_SCHEDULE_DIRTY_NOTE_IDS,
+        DEFAULT_REVIEW_PLAN_NAME,
     };
+    use chrono::Local;
     use rusqlite::Connection;
+    use std::fs;
+    use std::path::Path;
+    use tempfile::tempdir;
 
     fn test_connection() -> Connection {
         let connection = Connection::open_in_memory().expect("open in-memory sqlite");
@@ -2001,6 +3058,21 @@ mod tests {
         ensure_app_meta_table(&connection).expect("ensure app_meta");
         ensure_note_search_table(&connection).expect("ensure note_search");
         connection
+    }
+
+    fn ensure_test_resource_dirs(root: &Path) {
+        fs::create_dir_all(root.join("resources/images")).expect("create images dir");
+        fs::create_dir_all(root.join("resources/covers")).expect("create covers dir");
+    }
+
+    fn write_test_resource(root: &Path, resource_path: &str) {
+        let absolute_path = root.join(resource_path);
+
+        if let Some(parent_path) = absolute_path.parent() {
+            fs::create_dir_all(parent_path).expect("create parent dir");
+        }
+
+        fs::write(absolute_path, b"resource").expect("write resource");
     }
 
     #[test]
@@ -2108,6 +3180,21 @@ mod tests {
     }
 
     #[test]
+    fn extract_note_image_resource_paths_keeps_valid_paths_only_once() {
+        let content = concat!(
+            "<p>正文</p>",
+            "<img data-note-image=\"true\" data-resource-path=\"resources/images/demo-a.png\" alt=\"A\" />",
+            "<img data-note-image=\"true\" data-resource-path=\" resources/images/demo-a.png \" alt=\"A 副本\" />",
+            "<img data-note-image=\"true\" data-resource-path=\"../escape.png\" alt=\"非法\" />",
+            "<img data-note-image=\"true\" alt=\"缺路径\" />",
+        );
+
+        let paths = extract_note_image_resource_paths(content);
+
+        assert_eq!(paths, vec!["resources/images/demo-a.png".to_string()]);
+    }
+
+    #[test]
     fn rebuild_note_search_index_accepts_image_only_note_content() {
         let mut connection = test_connection();
         connection
@@ -2142,6 +3229,163 @@ mod tests {
             .expect("read note_search body_plaintext");
 
         assert!(body_plaintext.contains("示意图"));
+    }
+
+    #[test]
+    fn collect_managed_resource_paths_for_notebook_includes_cover_and_note_images() {
+        let connection = test_connection();
+        connection
+            .execute(
+                "INSERT INTO notebooks (name, cover_image_path) VALUES ('测试本', 'resources/covers/cover-a.png')",
+                [],
+            )
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (?1, ?2, ?3, ?4)",
+                (
+                    1_i64,
+                    1_i64,
+                    "图片文件",
+                    "<p>示意图</p><img data-note-image=\"true\" data-resource-path=\"resources/images/demo-a.png\" alt=\"A\" />",
+                ),
+            )
+            .expect("insert note");
+
+        let paths =
+            collect_managed_resource_paths_for_notebook(&connection, 1).expect("collect paths");
+
+        assert_eq!(
+            paths,
+            vec![
+                "resources/covers/cover-a.png".to_string(),
+                "resources/images/demo-a.png".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn cleanup_candidate_unreferenced_managed_resources_only_removes_orphans() {
+        let temp_dir = tempdir().expect("create temp dir");
+        ensure_test_resource_dirs(temp_dir.path());
+
+        for resource_path in [
+            "resources/images/shared.png",
+            "resources/images/orphan.png",
+            "resources/covers/live-cover.png",
+            "resources/covers/orphan-cover.png",
+        ] {
+            write_test_resource(temp_dir.path(), resource_path);
+        }
+
+        let connection = test_connection();
+        connection
+            .execute(
+                "INSERT INTO notebooks (name, cover_image_path) VALUES ('测试本', 'resources/covers/live-cover.png')",
+                [],
+            )
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (?1, ?2, ?3, ?4)",
+                (
+                    1_i64,
+                    1_i64,
+                    "共享图片文件",
+                    "<img data-note-image=\"true\" data-resource-path=\"resources/images/shared.png\" alt=\"共享图\" />",
+                ),
+            )
+            .expect("insert note");
+
+        let result = cleanup_candidate_unreferenced_managed_resources(
+            temp_dir.path(),
+            &connection,
+            &[
+                "resources/images/shared.png".to_string(),
+                "resources/images/orphan.png".to_string(),
+                "resources/covers/live-cover.png".to_string(),
+                "resources/covers/orphan-cover.png".to_string(),
+            ],
+        )
+        .expect("delete orphan resources");
+
+        assert_eq!(result.deleted_count, 2);
+        assert!(result.failed.is_empty());
+        assert!(temp_dir.path().join("resources/images/shared.png").is_file());
+        assert!(!temp_dir.path().join("resources/images/orphan.png").exists());
+        assert!(temp_dir.path().join("resources/covers/live-cover.png").is_file());
+        assert!(!temp_dir.path().join("resources/covers/orphan-cover.png").exists());
+    }
+
+    #[test]
+    fn cleanup_candidate_unreferenced_managed_resources_ignores_invalid_paths() {
+        let temp_dir = tempdir().expect("create temp dir");
+        ensure_test_resource_dirs(temp_dir.path());
+        write_test_resource(temp_dir.path(), "resources/images/kept.png");
+        let connection = test_connection();
+
+        let result = cleanup_candidate_unreferenced_managed_resources(
+            temp_dir.path(),
+            &connection,
+            &["../outside.png".to_string(), "resources/./images/kept.png".to_string()],
+        )
+        .expect("cleanup candidate resources");
+
+        assert_eq!(result.deleted_count, 0);
+        assert!(result.failed.is_empty());
+        assert!(temp_dir.path().join("resources/images/kept.png").is_file());
+    }
+
+    #[test]
+    fn cleanup_unreferenced_managed_resources_internal_deletes_disk_orphans() {
+        let temp_dir = tempdir().expect("create temp dir");
+        ensure_test_resource_dirs(temp_dir.path());
+        write_test_resource(temp_dir.path(), "resources/images/referenced.png");
+        write_test_resource(temp_dir.path(), "resources/images/orphan.png");
+        write_test_resource(temp_dir.path(), "resources/covers/live-cover.png");
+        write_test_resource(temp_dir.path(), "resources/covers/orphan-cover.png");
+
+        let connection = test_connection();
+        connection
+            .execute(
+                "INSERT INTO notebooks (name, cover_image_path) VALUES ('测试本', 'resources/covers/live-cover.png')",
+                [],
+            )
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', '<img data-note-image=\"true\" data-resource-path=\"resources/images/referenced.png\" alt=\"示意图\" />')",
+                [],
+            )
+            .expect("insert note");
+
+        let result = cleanup_unreferenced_managed_resources_internal(temp_dir.path(), &connection)
+            .expect("cleanup unreferenced managed resources");
+
+        assert_eq!(result.deleted_count, 2);
+        assert!(result.failed.is_empty());
+        assert!(temp_dir.path().join("resources/images/referenced.png").is_file());
+        assert!(!temp_dir.path().join("resources/images/orphan.png").exists());
+        assert!(temp_dir.path().join("resources/covers/live-cover.png").is_file());
+        assert!(!temp_dir.path().join("resources/covers/orphan-cover.png").exists());
     }
 
     #[test]
@@ -2268,6 +3512,58 @@ mod tests {
     }
 
     #[test]
+    fn delete_folder_cleanup_removes_unique_resources_and_keeps_shared_resources() {
+        let temp_dir = tempdir().expect("create temp dir");
+        ensure_test_resource_dirs(temp_dir.path());
+        write_test_resource(temp_dir.path(), "resources/images/folder-unique.png");
+        write_test_resource(temp_dir.path(), "resources/images/shared.png");
+
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, parent_folder_id, name, sort_order) VALUES (1, NULL, '根文件夹', 0)",
+                [],
+            )
+            .expect("insert root folder");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '保留文件夹', 1)",
+                [],
+            )
+            .expect("insert keep folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '待删文件', '<img data-note-image=\"true\" data-resource-path=\"resources/images/folder-unique.png\" alt=\"独占图\" /><img data-note-image=\"true\" data-resource-path=\"resources/images/shared.png\" alt=\"共享图\" />')",
+                [],
+            )
+            .expect("insert folder note");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 2, '保留文件', '<img data-note-image=\"true\" data-resource-path=\"resources/images/shared.png\" alt=\"共享图\" />')",
+                [],
+            )
+            .expect("insert keep note");
+
+        let candidate_paths = collect_managed_resource_paths_for_folder_subtree(&connection, 1)
+            .expect("collect folder subtree resource paths");
+        delete_folder_tx_internal(&mut connection, 1).expect("delete folder subtree");
+        let result = cleanup_candidate_unreferenced_managed_resources(
+            temp_dir.path(),
+            &connection,
+            &candidate_paths,
+        )
+        .expect("cleanup deleted folder resources");
+
+        assert_eq!(result.deleted_count, 1);
+        assert!(result.failed.is_empty());
+        assert!(!temp_dir.path().join("resources/images/folder-unique.png").exists());
+        assert!(temp_dir.path().join("resources/images/shared.png").is_file());
+    }
+
+    #[test]
     fn delete_folder_path_reports_missing_folder() {
         let mut connection = test_connection();
 
@@ -2275,6 +3571,84 @@ mod tests {
             .expect_err("missing folder should fail");
 
         assert_eq!(error, "目标文件夹不存在。");
+    }
+
+    #[test]
+    fn delete_note_cleanup_deletes_unique_note_image() {
+        let temp_dir = tempdir().expect("create temp dir");
+        ensure_test_resource_dirs(temp_dir.path());
+        write_test_resource(temp_dir.path(), "resources/images/note-only.png");
+
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', '<img data-note-image=\"true\" data-resource-path=\"resources/images/note-only.png\" alt=\"独占图\" />')",
+                [],
+            )
+            .expect("insert note");
+
+        delete_note_tx_internal(&mut connection, 1).expect("delete note");
+        let result = cleanup_candidate_unreferenced_managed_resources(
+            temp_dir.path(),
+            &connection,
+            &["resources/images/note-only.png".to_string()],
+        )
+        .expect("cleanup deleted note resource");
+
+        assert_eq!(result.deleted_count, 1);
+        assert!(result.failed.is_empty());
+        assert!(!temp_dir.path().join("resources/images/note-only.png").exists());
+    }
+
+    #[test]
+    fn delete_note_cleanup_keeps_resource_when_another_note_still_references_it() {
+        let temp_dir = tempdir().expect("create temp dir");
+        ensure_test_resource_dirs(temp_dir.path());
+        write_test_resource(temp_dir.path(), "resources/images/shared-note.png");
+
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', '<img data-note-image=\"true\" data-resource-path=\"resources/images/shared-note.png\" alt=\"共享图\" />')",
+                [],
+            )
+            .expect("insert first note");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件二', '<img data-note-image=\"true\" data-resource-path=\"resources/images/shared-note.png\" alt=\"共享图\" />')",
+                [],
+            )
+            .expect("insert second note");
+
+        delete_note_tx_internal(&mut connection, 1).expect("delete first note");
+        let result = cleanup_candidate_unreferenced_managed_resources(
+            temp_dir.path(),
+            &connection,
+            &["resources/images/shared-note.png".to_string()],
+        )
+        .expect("cleanup shared note resource");
+
+        assert_eq!(result.deleted_count, 0);
+        assert!(result.failed.is_empty());
+        assert!(temp_dir.path().join("resources/images/shared-note.png").is_file());
     }
 
     #[test]
@@ -2305,6 +3679,408 @@ mod tests {
             .expect_err("missing notebook should fail");
 
         assert_eq!(error, "目标笔记本不存在。");
+    }
+
+    #[test]
+    fn ensure_review_feature_ready_resets_existing_review_data_to_default() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', NULL)",
+                [],
+            )
+            .expect("insert first note");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件二', NULL)",
+                [],
+            )
+            .expect("insert second note");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件三', NULL)",
+                [],
+            )
+            .expect("insert third note");
+        create_review_plan_tx_internal(&mut connection, "方案一", &[0, 3]).expect("create plan 1");
+        create_review_plan_tx_internal(&mut connection, "方案二", &[1, 4]).expect("create plan 2");
+        bind_review_plan_to_note_tx_internal(&mut connection, 1, 1, "2026-04-07")
+            .expect("bind first note");
+        bind_review_plan_to_note_tx_internal(&mut connection, 2, 2, "2026-04-10")
+            .expect("bind second note");
+
+        let today = today_local_date_key();
+        ensure_review_feature_ready_internal(&mut connection).expect("ensure review feature ready");
+
+        let plan_name: String = connection
+            .query_row("SELECT name FROM review_plans LIMIT 1", [], |row| row.get(0))
+            .expect("read default plan name");
+        let plan_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM review_plans", [], |row| row.get(0))
+            .expect("count review plans");
+        let done_marker: String = connection
+            .query_row(
+                "SELECT value FROM app_meta WHERE key = ?1",
+                [APP_META_KEY_REVIEW_FEATURE_REBUILD_V1_DONE],
+                |row| row.get(0),
+            )
+            .expect("read rebuild marker");
+        let dirty_marker: String = connection
+            .query_row(
+                "SELECT value FROM app_meta WHERE key = ?1",
+                [APP_META_KEY_REVIEW_SCHEDULE_DIRTY_NOTE_IDS],
+                |row| row.get(0),
+            )
+            .expect("read dirty marker");
+        let note_one_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM review_tasks WHERE note_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count note one tasks");
+        let note_two_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM review_tasks WHERE note_id = 2",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count note two tasks");
+        let note_three_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM review_tasks WHERE note_id = 3",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count note three tasks");
+
+        assert_eq!(plan_name, DEFAULT_REVIEW_PLAN_NAME);
+        assert_eq!(plan_count, 1);
+        assert_eq!(done_marker, "1");
+        assert_eq!(dirty_marker, "[]");
+        assert_eq!(note_one_count, 4);
+        assert_eq!(note_two_count, 4);
+        assert_eq!(note_three_count, 0);
+
+        let note_one_dates: Vec<String> = connection
+            .prepare(
+                "SELECT due_date FROM review_tasks WHERE note_id = 1 ORDER BY step_index ASC, id ASC",
+            )
+            .expect("prepare note one dates")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query note one dates")
+            .map(|row| row.expect("map note one date"))
+            .collect();
+
+        assert_eq!(
+            note_one_dates,
+            vec![
+                add_days(&today, 2).expect("day 2"),
+                add_days(&today, 5).expect("day 5"),
+                add_days(&today, 10).expect("day 10"),
+                add_days(&today, 18).expect("day 18"),
+            ]
+        );
+    }
+
+    #[test]
+    fn activate_note_review_schedule_generates_default_dates() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', NULL)",
+                [],
+            )
+            .expect("insert note");
+
+        let today = today_local_date_key();
+        let schedule =
+            activate_note_review_schedule_tx_internal(&mut connection, 1).expect("activate schedule");
+
+        assert_eq!(schedule.note_id, 1);
+        assert_eq!(schedule.activated_at.as_deref(), Some(today.as_str()));
+        assert_eq!(
+            schedule.dates,
+            vec![
+                add_days(&today, 2).expect("day 2"),
+                add_days(&today, 5).expect("day 5"),
+                add_days(&today, 10).expect("day 10"),
+                add_days(&today, 18).expect("day 18"),
+            ]
+        );
+    }
+
+    #[test]
+    fn save_note_review_schedule_rejects_past_duplicate_and_invalid_dates() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', NULL)",
+                [],
+            )
+            .expect("insert note");
+        activate_note_review_schedule_tx_internal(&mut connection, 1).expect("activate schedule");
+
+        let past_date = Local::now()
+            .date_naive()
+            .checked_sub_days(chrono::Days::new(1))
+            .expect("yesterday")
+            .format("%Y-%m-%d")
+            .to_string();
+        let past_error = save_note_review_schedule_tx_internal(
+            &mut connection,
+            1,
+            &[past_date],
+        )
+        .expect_err("past date should fail");
+        let duplicate_error = save_note_review_schedule_tx_internal(
+            &mut connection,
+            1,
+            &["2099-04-20".to_string(), "2099-04-20".to_string()],
+        )
+        .expect_err("duplicate date should fail");
+        let invalid_error = save_note_review_schedule_tx_internal(
+            &mut connection,
+            1,
+            &["2026-02-31".to_string()],
+        )
+        .expect_err("invalid date should fail");
+
+        assert_eq!(past_error, "复习日期不能早于今天。");
+        assert_eq!(duplicate_error, "同一文件内的复习日期不能重复。");
+        assert_eq!(invalid_error, "复习日期无效。");
+    }
+
+    #[test]
+    fn save_note_review_schedule_sorts_dates_and_keeps_activation_date() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', NULL)",
+                [],
+            )
+            .expect("insert note");
+        let activated =
+            activate_note_review_schedule_tx_internal(&mut connection, 1).expect("activate schedule");
+
+        let schedule = save_note_review_schedule_tx_internal(
+            &mut connection,
+            1,
+            &[
+                "2099-12-10".to_string(),
+                "2099-01-01".to_string(),
+                "2099-03-07".to_string(),
+            ],
+        )
+        .expect("save reordered schedule");
+
+        assert_eq!(
+            schedule.dates,
+            vec![
+                "2099-01-01".to_string(),
+                "2099-03-07".to_string(),
+                "2099-12-10".to_string(),
+            ]
+        );
+        assert_eq!(schedule.activated_at, activated.activated_at);
+    }
+
+    #[test]
+    fn clear_note_review_schedule_removes_binding_and_tasks() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', NULL)",
+                [],
+            )
+            .expect("insert note");
+        activate_note_review_schedule_tx_internal(&mut connection, 1).expect("activate schedule");
+
+        clear_note_review_schedule_tx_internal(&mut connection, 1).expect("clear schedule");
+
+        let binding_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM note_review_bindings", [], |row| row.get(0))
+            .expect("count bindings");
+        let task_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM review_tasks", [], |row| row.get(0))
+            .expect("count tasks");
+
+        assert_eq!(binding_count, 0);
+        assert_eq!(task_count, 0);
+    }
+
+    #[test]
+    fn ensure_review_feature_ready_resets_dirty_notes_to_default_schedule() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', NULL)",
+                [],
+            )
+            .expect("insert note");
+        activate_note_review_schedule_tx_internal(&mut connection, 1).expect("activate schedule");
+        save_note_review_schedule_tx_internal(
+            &mut connection,
+            1,
+            &["2099-08-01".to_string(), "2099-08-09".to_string()],
+        )
+        .expect("save custom schedule");
+        set_note_review_schedule_dirty_tx_internal(&mut connection, 1, true)
+            .expect("mark dirty schedule");
+
+        let today = today_local_date_key();
+        ensure_review_feature_ready_internal(&mut connection).expect("ensure review feature ready");
+
+        let due_dates: Vec<String> = connection
+            .prepare(
+                "SELECT due_date FROM review_tasks WHERE note_id = 1 ORDER BY step_index ASC, id ASC",
+            )
+            .expect("prepare tasks")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query tasks")
+            .map(|row| row.expect("map task"))
+            .collect();
+        let dirty_marker: String = connection
+            .query_row(
+                "SELECT value FROM app_meta WHERE key = ?1",
+                [APP_META_KEY_REVIEW_SCHEDULE_DIRTY_NOTE_IDS],
+                |row| row.get(0),
+            )
+            .expect("read dirty marker");
+
+        assert_eq!(
+            due_dates,
+            vec![
+                add_days(&today, 2).expect("day 2"),
+                add_days(&today, 5).expect("day 5"),
+                add_days(&today, 10).expect("day 10"),
+                add_days(&today, 18).expect("day 18"),
+            ]
+        );
+        assert_eq!(dirty_marker, "[]");
+    }
+
+    #[test]
+    fn review_rows_cascade_when_note_folder_and_notebook_are_deleted() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本一')", [])
+            .expect("insert first notebook");
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本二')", [])
+            .expect("insert second notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '文件夹一', 0)",
+                [],
+            )
+            .expect("insert first folder");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (2, '文件夹二', 0)",
+                [],
+            )
+            .expect("insert second folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', NULL)",
+                [],
+            )
+            .expect("insert first note");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (2, 2, '文件二', NULL)",
+                [],
+            )
+            .expect("insert second note");
+        activate_note_review_schedule_tx_internal(&mut connection, 1).expect("activate first note");
+        activate_note_review_schedule_tx_internal(&mut connection, 2).expect("activate second note");
+
+        delete_note_tx_internal(&mut connection, 1).expect("delete first note");
+        let after_note_delete: i64 = connection
+            .query_row("SELECT COUNT(*) FROM review_tasks WHERE note_id = 1", [], |row| row.get(0))
+            .expect("count first note review rows");
+        assert_eq!(after_note_delete, 0);
+
+        delete_folder_tx_internal(&mut connection, 2).expect("delete folder");
+        let after_folder_delete: i64 = connection
+            .query_row("SELECT COUNT(*) FROM review_tasks WHERE note_id = 2", [], |row| row.get(0))
+            .expect("count second note review rows");
+        assert_eq!(after_folder_delete, 0);
+
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '文件夹三', 1)",
+                [],
+            )
+            .expect("insert third folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 3, '文件三', NULL)",
+                [],
+            )
+            .expect("insert third note");
+        activate_note_review_schedule_tx_internal(&mut connection, 3).expect("activate third note");
+
+        delete_notebook_tx_internal(&mut connection, 1).expect("delete notebook");
+        let remaining_review_rows: i64 = connection
+            .query_row("SELECT COUNT(*) FROM review_tasks", [], |row| row.get(0))
+            .expect("count remaining review rows");
+        assert_eq!(remaining_review_rows, 0);
     }
 
     #[test]
@@ -2547,6 +4323,77 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_after_cover_update_deletes_old_cover_when_unreferenced() {
+        let temp_dir = tempdir().expect("create temp dir");
+        ensure_test_resource_dirs(temp_dir.path());
+        write_test_resource(temp_dir.path(), "resources/covers/cover-a.png");
+        write_test_resource(temp_dir.path(), "resources/covers/cover-b.png");
+
+        let mut connection = test_connection();
+        connection
+            .execute(
+                "INSERT INTO notebooks (name, cover_image_path) VALUES ('测试本', 'resources/covers/cover-a.png')",
+                [],
+            )
+            .expect("insert notebook");
+
+        update_notebook_cover_image_tx_internal(&mut connection, 1, "resources/covers/cover-b.png")
+            .expect("update cover");
+        let result = cleanup_candidate_unreferenced_managed_resources(
+            temp_dir.path(),
+            &connection,
+            &["resources/covers/cover-a.png".to_string()],
+        )
+        .expect("cleanup old cover");
+
+        assert_eq!(result.deleted_count, 1);
+        assert!(result.failed.is_empty());
+        assert!(!temp_dir.path().join("resources/covers/cover-a.png").exists());
+        assert!(temp_dir.path().join("resources/covers/cover-b.png").is_file());
+    }
+
+    #[test]
+    fn cleanup_after_cover_update_keeps_old_cover_when_note_still_references_it() {
+        let temp_dir = tempdir().expect("create temp dir");
+        ensure_test_resource_dirs(temp_dir.path());
+        write_test_resource(temp_dir.path(), "resources/covers/shared-cover.png");
+        write_test_resource(temp_dir.path(), "resources/covers/cover-b.png");
+
+        let mut connection = test_connection();
+        connection
+            .execute(
+                "INSERT INTO notebooks (name, cover_image_path) VALUES ('测试本', 'resources/covers/shared-cover.png')",
+                [],
+            )
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', '<img data-note-image=\"true\" data-resource-path=\"resources/covers/shared-cover.png\" alt=\"共享封面\" />')",
+                [],
+            )
+            .expect("insert note");
+
+        update_notebook_cover_image_tx_internal(&mut connection, 1, "resources/covers/cover-b.png")
+            .expect("update cover");
+        let result = cleanup_candidate_unreferenced_managed_resources(
+            temp_dir.path(),
+            &connection,
+            &["resources/covers/shared-cover.png".to_string()],
+        )
+        .expect("cleanup old cover");
+
+        assert_eq!(result.deleted_count, 0);
+        assert!(result.failed.is_empty());
+        assert!(temp_dir.path().join("resources/covers/shared-cover.png").is_file());
+    }
+
+    #[test]
     fn update_notebook_cover_image_path_rejects_empty_cover_path() {
         let mut connection = test_connection();
         connection
@@ -2614,6 +4461,132 @@ mod tests {
         assert_eq!(notebook.id, 1);
         assert_eq!(notebook.cover_image_path, None);
         assert_eq!(stored_cover_path, None);
+    }
+
+    #[test]
+    fn clear_cover_cleanup_keeps_resource_when_note_still_references_it() {
+        let temp_dir = tempdir().expect("create temp dir");
+        ensure_test_resource_dirs(temp_dir.path());
+        write_test_resource(temp_dir.path(), "resources/covers/shared-cover.png");
+
+        let mut connection = test_connection();
+        connection
+            .execute(
+                "INSERT INTO notebooks (name, cover_image_path) VALUES ('测试本', 'resources/covers/shared-cover.png')",
+                [],
+            )
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', '<img data-note-image=\"true\" data-resource-path=\"resources/covers/shared-cover.png\" alt=\"共享封面\" />')",
+                [],
+            )
+            .expect("insert note");
+
+        clear_notebook_cover_image_tx_internal(&mut connection, 1).expect("clear cover");
+        let result = cleanup_candidate_unreferenced_managed_resources(
+            temp_dir.path(),
+            &connection,
+            &["resources/covers/shared-cover.png".to_string()],
+        )
+        .expect("cleanup cleared cover");
+
+        assert_eq!(result.deleted_count, 0);
+        assert!(result.failed.is_empty());
+        assert!(temp_dir.path().join("resources/covers/shared-cover.png").is_file());
+    }
+
+    #[test]
+    fn delete_note_cleanup_keeps_resource_when_cover_still_references_it() {
+        let temp_dir = tempdir().expect("create temp dir");
+        ensure_test_resource_dirs(temp_dir.path());
+        write_test_resource(temp_dir.path(), "resources/covers/shared-cover.png");
+
+        let mut connection = test_connection();
+        connection
+            .execute(
+                "INSERT INTO notebooks (name, cover_image_path) VALUES ('测试本', 'resources/covers/shared-cover.png')",
+                [],
+            )
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', '<img data-note-image=\"true\" data-resource-path=\"resources/covers/shared-cover.png\" alt=\"共享封面\" />')",
+                [],
+            )
+            .expect("insert note");
+
+        delete_note_tx_internal(&mut connection, 1).expect("delete note");
+        let result = cleanup_candidate_unreferenced_managed_resources(
+            temp_dir.path(),
+            &connection,
+            &["resources/covers/shared-cover.png".to_string()],
+        )
+        .expect("cleanup deleted note");
+
+        assert_eq!(result.deleted_count, 0);
+        assert!(result.failed.is_empty());
+        assert!(temp_dir.path().join("resources/covers/shared-cover.png").is_file());
+    }
+
+    #[test]
+    fn shared_resource_between_note_and_cover_is_deleted_only_after_both_references_are_removed() {
+        let temp_dir = tempdir().expect("create temp dir");
+        ensure_test_resource_dirs(temp_dir.path());
+        write_test_resource(temp_dir.path(), "resources/covers/shared-cover.png");
+
+        let mut connection = test_connection();
+        connection
+            .execute(
+                "INSERT INTO notebooks (name, cover_image_path) VALUES ('测试本', 'resources/covers/shared-cover.png')",
+                [],
+            )
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', '<img data-note-image=\"true\" data-resource-path=\"resources/covers/shared-cover.png\" alt=\"共享封面\" />')",
+                [],
+            )
+            .expect("insert note");
+
+        delete_note_tx_internal(&mut connection, 1).expect("delete note");
+        let after_note = cleanup_candidate_unreferenced_managed_resources(
+            temp_dir.path(),
+            &connection,
+            &["resources/covers/shared-cover.png".to_string()],
+        )
+        .expect("cleanup after note deletion");
+        assert_eq!(after_note.deleted_count, 0);
+        assert!(temp_dir.path().join("resources/covers/shared-cover.png").is_file());
+
+        clear_notebook_cover_image_tx_internal(&mut connection, 1).expect("clear cover");
+        let after_cover = cleanup_candidate_unreferenced_managed_resources(
+            temp_dir.path(),
+            &connection,
+            &["resources/covers/shared-cover.png".to_string()],
+        )
+        .expect("cleanup after cover removal");
+        assert_eq!(after_cover.deleted_count, 1);
+        assert!(after_cover.failed.is_empty());
+        assert!(!temp_dir.path().join("resources/covers/shared-cover.png").exists());
     }
 
     #[test]

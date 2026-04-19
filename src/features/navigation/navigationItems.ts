@@ -20,8 +20,8 @@ export const navigationItems: NavigationItem[] = [
     Icon: NotebookIcon,
   },
   {
-    key: "reviewCalendar",
-    label: "复习日历",
+    key: "reviewTasks",
+    label: "复习任务",
     Icon: CalendarIcon,
   },
   {

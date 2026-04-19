@@ -8,16 +8,14 @@
   border-radius: 16px;
 }
 
-.header {
+.header,
+.headerTop {
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
+  flex-direction: column;
+  gap: 10px;
 }
 
-.label,
-.fieldLabel,
-.currentLabel {
+.label {
   margin: 0;
   font-size: 12px;
   line-height: 1;
@@ -29,16 +27,14 @@
 
 .hint,
 .stateText,
-.currentMeta,
-.confirmText {
-  margin: 6px 0 0;
+.errorText {
+  margin: 0;
   font-size: 13px;
   line-height: 1.7;
   color: var(--color-text-secondary);
 }
 
-.stateTitle,
-.currentTitle {
+.stateTitle {
   margin: 0;
   font-size: 15px;
   line-height: 1.5;
@@ -47,83 +43,160 @@
 }
 
 .emptyBlock,
-.currentBlock,
-.previewBlock,
-.confirmBox {
+.listBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
   padding: 14px;
   border-radius: 14px;
   border: 1px solid var(--color-border-soft);
-  background: rgba(255, 255, 255, 0.68);
+  background: rgba(255, 255, 255, 0.72);
 }
 
-.formGrid {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 178px;
-  gap: 12px;
-}
-
-.field {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.input,
-.select {
-  width: 100%;
-  min-height: 40px;
-  padding: 0 14px;
-  color: var(--color-text-primary);
-  background: rgba(255, 255, 255, 0.96);
-  border: 1px solid var(--color-border-soft);
-  border-radius: 12px;
-  outline: none;
-}
-
-.input:focus,
-.select:focus {
-  border-color: var(--color-accent);
-  box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.16);
-}
-
-.actions {
-  display: flex;
-  gap: 10px;
-}
-
-.actionButton,
-.secondaryButton,
-.dangerButton {
+.saveButton,
+.activateButton,
+.activateButtonDisabled,
+.circleButton {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   min-height: 38px;
-  padding: 0 14px;
   border-radius: 12px;
   font-size: 13px;
   font-weight: 700;
   cursor: pointer;
+  transition:
+    transform 140ms ease,
+    background-color 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease,
+    opacity 140ms ease;
 }
 
-.actionButton {
+.saveButton:hover:enabled,
+.activateButton:hover:enabled,
+.circleButton:hover:enabled {
+  transform: translateY(-1px);
+}
+
+.saveButton,
+.activateButton,
+.activateButtonDisabled,
+.circleButton {
+  border: 1px solid transparent;
+}
+
+.saveButton,
+.activateButton {
+  padding: 0 14px;
   color: var(--color-selected-foreground);
   background: var(--color-accent-strong);
 }
 
-.secondaryButton {
-  color: var(--color-text-primary);
-  background: transparent;
-  border: 1px solid var(--color-border-soft);
-}
-
-.dangerButton {
-  color: #fff7f7;
-  background: #dc2626;
-}
-
-.actionButton:disabled,
-.secondaryButton:disabled,
-.dangerButton:disabled {
+.activateButtonDisabled {
+  padding: 0 14px;
+  color: rgba(255, 255, 255, 0.88);
+  background: color-mix(in srgb, var(--color-accent-strong) 56%, #64748b 44%);
   cursor: not-allowed;
-  opacity: 0.56;
+  opacity: 0.78;
+}
+
+.activateButton,
+.activateButtonDisabled {
+  width: 100%;
+}
+
+.circleButton {
+  width: 40px;
+  color: var(--color-text-primary);
+  background: rgba(255, 255, 255, 0.94);
+  border-color: var(--color-border-soft);
+}
+
+.saveButton:disabled,
+.activateButton:disabled,
+.circleButton:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.dateList {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.dateListItem {
+  margin: 0;
+}
+
+.dateRow {
+  width: 100%;
+  min-height: 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 12px;
+  border-radius: 12px;
+  border: 1px solid var(--color-border-soft);
+  background: rgba(255, 255, 255, 0.96);
+  color: var(--color-text-primary);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.dateRowSelected {
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
+}
+
+.dateRowEditing {
+  cursor: default;
+}
+
+.dateInputYear,
+.dateInput {
+  min-height: 30px;
+  text-align: center;
+  border: 1px solid var(--color-border-soft);
+  border-radius: 10px;
+  background: #ffffff;
+  color: var(--color-text-primary);
+  outline: none;
+}
+
+.dateInputYear {
+  width: 76px;
+}
+
+.dateInput {
+  width: 48px;
+}
+
+.dateInputYear:focus,
+.dateInput:focus {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.16);
+}
+
+.dateSeparator {
+  color: var(--color-text-secondary);
+  font-weight: 700;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.errorText {
+  color: #b91c1c;
 }

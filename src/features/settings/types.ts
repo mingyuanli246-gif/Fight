@@ -57,6 +57,16 @@ export interface RestoreBackupResult {
   restoredFileName: string;
 }
 
+export interface ManagedResourceCleanupFailure {
+  resourcePath: string;
+  message: string;
+}
+
+export interface ManagedResourceCleanupResult {
+  deletedCount: number;
+  failed: ManagedResourceCleanupFailure[];
+}
+
 export interface AutoBackupResult {
   status:
     | "created"
@@ -77,4 +87,5 @@ export type BackupOperationState =
   | "idle"
   | "creating"
   | "restoring"
-  | "rebuildingSearch";
+  | "rebuildingSearch"
+  | "cleaningResources";

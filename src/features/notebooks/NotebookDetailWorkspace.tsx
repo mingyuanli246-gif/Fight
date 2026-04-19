@@ -2,6 +2,7 @@ import type { RefObject } from "react";
 import { NoteEditorPane, type NoteEditorPaneRef } from "./NoteEditorPane";
 import { NotebookTreePane } from "./NotebookTreePane";
 import { NotebookRightPanel } from "./NotebookRightPanel";
+import type { NoteReviewPlanManagerRef } from "../review/NoteReviewPlanManager";
 import type {
   Folder,
   Note,
@@ -22,6 +23,7 @@ interface NotebookDetailWorkspaceProps {
   rightPanelCollapsed: boolean;
   highlightRequest: NotebookHighlightRequest | null;
   noteEditorRef: RefObject<NoteEditorPaneRef | null>;
+  reviewManagerRef: RefObject<NoteReviewPlanManagerRef | null>;
   onReturnHome: () => void;
   onSelectEntity: (entity: SelectedEntity) => void;
   onCreateFolder: () => Promise<void>;
@@ -44,6 +46,7 @@ export function NotebookDetailWorkspace({
   rightPanelCollapsed,
   highlightRequest,
   noteEditorRef,
+  reviewManagerRef,
   onReturnHome,
   onSelectEntity,
   onCreateFolder,
@@ -111,6 +114,7 @@ export function NotebookDetailWorkspace({
           note={selectedNote}
           collapsed={rightPanelCollapsed}
           disabled={disabled}
+          reviewManagerRef={reviewManagerRef}
           onToggleCollapsed={onToggleRightPanel}
           onError={onError}
         />

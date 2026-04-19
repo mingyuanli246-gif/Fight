@@ -49,7 +49,7 @@ function renderPage(
           onOpenNote={onOpenNote}
         />
       );
-    case "reviewCalendar":
+    case "reviewTasks":
       return <ReviewCalendarPage onOpenNote={onOpenNote} />;
     case "tagPlaza":
       return <TagPlazaPage onOpenNote={onOpenNote} />;
@@ -102,7 +102,7 @@ export default function AppShell({
 
     const notebookWorkspace = notebookWorkspaceRef.current;
 
-    if (!notebookWorkspace?.hasUnsavedChanges()) {
+    if (!notebookWorkspace?.hasUnsavedChanges(reason)) {
       return true;
     }
 
@@ -115,7 +115,7 @@ export default function AppShell({
         return;
       }
 
-      if (!notebookWorkspaceRef.current?.hasUnsavedChanges()) {
+      if (!notebookWorkspaceRef.current?.hasUnsavedChanges("before-unload")) {
         return;
       }
 
@@ -148,7 +148,7 @@ export default function AppShell({
 
         if (
           currentSectionRef.current !== "notebooks" ||
-          !notebookWorkspaceRef.current?.hasUnsavedChanges()
+          !notebookWorkspaceRef.current?.hasUnsavedChanges("window-close")
         ) {
           return;
         }

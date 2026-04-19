@@ -7,6 +7,7 @@ import type {
   BackupListItem,
   CreateBackupResult,
   DataEnvironmentInfo,
+  ManagedResourceCleanupResult,
   RestoreBackupResult,
 } from "./types";
 
@@ -44,4 +45,10 @@ export async function restoreBackup(fileName: string) {
 
 export async function rebuildSearchIndex() {
   return rebuildNoteSearchIndex();
+}
+
+export async function cleanupUnreferencedManagedResources() {
+  return invoke<ManagedResourceCleanupResult>(
+    "cleanup_unreferenced_managed_resources",
+  );
 }
