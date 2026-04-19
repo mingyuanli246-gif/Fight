@@ -384,6 +384,7 @@ export const NotebookWorkspace = forwardRef<
       return false;
     }
 
+    reviewManagerRef.current?.resolveTransientInteraction();
     return promptReviewScheduleSaveIfNeeded(reason);
   }
 

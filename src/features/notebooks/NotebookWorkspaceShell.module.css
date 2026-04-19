@@ -88,6 +88,8 @@
 }
 
 .homeHeader {
+  position: relative;
+  z-index: 6;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
@@ -95,6 +97,8 @@
 }
 
 .homeSearchBand {
+  position: relative;
+  z-index: 8;
   display: flex;
   grid-column: 2;
   justify-self: center;
@@ -102,6 +106,8 @@
 }
 
 .notebookHomeSearchRoot {
+  position: relative;
+  z-index: 10;
   width: min(540px, 100%);
   max-width: min(540px, 100%);
 }
@@ -240,6 +246,8 @@
 }
 
 .homeGrid {
+  position: relative;
+  z-index: 1;
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(168px, 188px));
   gap: 20px 18px;
@@ -257,11 +265,19 @@
   background: transparent;
   border: 0;
   cursor: pointer;
+  transition: transform 180ms ease;
 }
 
-.notebookCard:hover .notebookCover,
+.notebookCard:not(.notebookCardSelected):hover {
+  transform: scale(1.05);
+  z-index: 1;
+}
+
+.notebookCardSelected:hover {
+  transform: none;
+}
+
 .notebookCardSelected .notebookCover {
-  transform: translateY(-1px);
   box-shadow:
     0 18px 34px rgba(15, 23, 42, 0.08),
     0 6px 12px rgba(15, 23, 42, 0.06);
@@ -648,6 +664,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
+  position: relative;
   width: 100%;
   min-width: 0;
   padding: 10px 12px;
@@ -657,6 +674,7 @@
   border-radius: 14px;
   cursor: pointer;
   transition:
+    transform 140ms ease,
     background-color 140ms ease,
     border-color 140ms ease;
 }
@@ -667,12 +685,21 @@
   cursor: default;
 }
 
-.treeRow:hover:enabled,
-.treeNoteRow:hover:enabled,
 .treeRowActive,
 .treeNoteRowActive {
   background: rgba(219, 234, 254, 0.66);
   border-color: rgba(96, 165, 250, 0.22);
+}
+
+.treeRow:not(.treeRowActive):hover:enabled,
+.treeNoteRow:not(.treeNoteRowActive):hover:enabled {
+  transform: scale(1.05);
+  z-index: 1;
+}
+
+.treeRowActive:hover:enabled,
+.treeNoteRowActive:hover:enabled {
+  transform: none;
 }
 
 .treeDisclosure {

@@ -1,7 +1,7 @@
 .manager {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 12px;
   padding: 14px 16px;
   background: var(--color-surface-primary);
   border: 1px solid var(--color-border-soft);
@@ -12,17 +12,15 @@
 .headerTop {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 6px;
 }
 
 .label {
   margin: 0;
-  font-size: 12px;
-  line-height: 1;
+  font-size: 15px;
+  line-height: 1.4;
   font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--color-text-tertiary);
+  color: var(--color-text-primary);
 }
 
 .hint,
@@ -36,10 +34,10 @@
 
 .stateTitle {
   margin: 0;
-  font-size: 15px;
+  font-size: 14px;
   line-height: 1.5;
-  font-weight: 700;
-  color: var(--color-text-primary);
+  font-weight: 600;
+  color: var(--color-text-secondary);
 }
 
 .emptyBlock,
@@ -47,16 +45,12 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: 14px;
-  border-radius: 14px;
-  border: 1px solid var(--color-border-soft);
-  background: rgba(255, 255, 255, 0.72);
 }
 
 .saveButton,
 .activateButton,
 .activateButtonDisabled,
-.circleButton {
+.actionIconButton {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -75,14 +69,14 @@
 
 .saveButton:hover:enabled,
 .activateButton:hover:enabled,
-.circleButton:hover:enabled {
+.actionIconButton:hover:enabled {
   transform: translateY(-1px);
 }
 
 .saveButton,
 .activateButton,
 .activateButtonDisabled,
-.circleButton {
+.actionIconButton {
   border: 1px solid transparent;
 }
 
@@ -106,16 +100,9 @@
   width: 100%;
 }
 
-.circleButton {
-  width: 40px;
-  color: var(--color-text-primary);
-  background: rgba(255, 255, 255, 0.94);
-  border-color: var(--color-border-soft);
-}
-
 .saveButton:disabled,
 .activateButton:disabled,
-.circleButton:disabled {
+.actionIconButton:disabled {
   opacity: 0.55;
   cursor: not-allowed;
   transform: none;
@@ -144,16 +131,38 @@
   padding: 0 12px;
   border-radius: 12px;
   border: 1px solid var(--color-border-soft);
-  background: rgba(255, 255, 255, 0.96);
+  background: rgba(255, 255, 255, 0.88);
   color: var(--color-text-primary);
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
+  transition:
+    transform 140ms ease,
+    box-shadow 140ms ease;
+}
+
+.dateRow:hover:enabled {
+  transform: scale(1.05);
+  z-index: 1;
 }
 
 .dateRowSelected {
   border-color: var(--color-accent);
   background: var(--color-accent-soft);
+}
+
+.dateRowSelected:hover:enabled {
+  transform: none;
+}
+
+.dateListHasSelection .dateRow:hover:enabled {
+  transform: scale(1.05);
+  z-index: 1;
+}
+
+.dateListHasSelection .dateRowSelected:hover:enabled {
+  transform: none;
+  z-index: auto;
 }
 
 .dateRowEditing {
@@ -195,6 +204,29 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  padding-top: 2px;
+}
+
+.actionIconButton {
+  min-height: auto;
+  padding: 2px 4px;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-tertiary);
+  font-size: 15px;
+  line-height: 1;
+  font-weight: 600;
+  border-radius: 8px;
+}
+
+.actionIconButton:hover:enabled {
+  color: var(--color-text-secondary);
+  background: rgba(148, 163, 184, 0.12);
+}
+
+.saveRow {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .errorText {

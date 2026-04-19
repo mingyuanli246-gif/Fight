@@ -45,6 +45,7 @@
 }
 
 .item {
+  position: relative;
   display: grid;
   grid-template-columns: 20px 1fr;
   align-items: center;
@@ -57,15 +58,15 @@
   border-radius: 18px;
   cursor: pointer;
   transition:
+    transform 160ms ease,
     background-color 160ms ease,
     border-color 160ms ease,
-    color 160ms ease,
-    transform 160ms ease;
+    color 160ms ease;
 }
 
-.item:hover {
-  background: rgba(255, 255, 255, 0.08);
-  border-color: rgba(255, 255, 255, 0.08);
+.item:not(.itemActive):hover {
+  transform: scale(1.05);
+  z-index: 1;
 }
 
 .item:disabled {
@@ -91,7 +92,8 @@
 }
 
 .itemActive:hover {
-  background: var(--color-accent-strong);
+  background: var(--color-accent);
+  transform: none;
 }
 
 .icon {

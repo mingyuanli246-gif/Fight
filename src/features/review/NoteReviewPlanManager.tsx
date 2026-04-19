@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { flushSync } from "react-dom";
 import {
   activateNoteReviewSchedule,
   clearNoteReviewSchedule,
@@ -29,8 +30,15 @@ interface DateEditDraft {
   day: string;
 }
 
+interface EditSession {
+  kind: "new" | "existing";
+  index: number;
+  previousSelectedIndex: number | null;
+}
+
 export interface NoteReviewPlanManagerRef {
   hasUnsavedChanges: () => boolean;
+  resolveTransientInteraction: () => void;
   savePendingChanges: () => Promise<boolean>;
 }
 
@@ -119,7 +127,7 @@ export const NoteReviewPlanManager = forwardRef<
   const [savedSchedule, setSavedSchedule] = useState<NoteReviewSchedule | null>(null);
   const [draftDates, setDraftDates] = useState<string[]>([]);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
-  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const [editSession, setEditSession] = useState<EditSession | null>(null);
   const [editDraft, setEditDraft] = useState<DateEditDraft | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -128,6 +136,8 @@ export const NoteReviewPlanManager = forwardRef<
   const activeNoteIdRef = useRef(noteId);
   const hasLoadedRef = useRef(false);
   const lastDirtyRef = useRef(false);
+  const editScopeRef = useRef<HTMLDivElement | null>(null);
+  const editingIndex = editSession?.index ?? null;
 
   const savedDates = savedSchedule?.dates ?? EMPTY_REVIEW_DATES;
   const isDirty = useMemo(
@@ -150,7 +160,7 @@ export const NoteReviewPlanManager = forwardRef<
       setSavedSchedule(nextSchedule);
       setDraftDates(nextSchedule?.dates ?? []);
       setSelectedIndex(null);
-      setEditingIndex(null);
+      setEditSession(null);
       setEditDraft(null);
       setErrorMessage(null);
       hasLoadedRef.current = true;
@@ -166,7 +176,7 @@ export const NoteReviewPlanManager = forwardRef<
       setSavedSchedule(null);
       setDraftDates([]);
       setSelectedIndex(null);
-      setEditingIndex(null);
+      setEditSession(null);
       setEditDraft(null);
       setErrorMessage(getErrorMessage(error));
       hasLoadedRef.current = true;
@@ -191,7 +201,7 @@ export const NoteReviewPlanManager = forwardRef<
     setIsBusy(false);
     setErrorMessage(null);
     setSelectedIndex(null);
-    setEditingIndex(null);
+    setEditSession(null);
     setEditDraft(null);
     setSavedSchedule(null);
     setDraftDates([]);
@@ -236,7 +246,7 @@ export const NoteReviewPlanManager = forwardRef<
       setSavedSchedule(schedule);
       setDraftDates(schedule.dates);
       setSelectedIndex(null);
-      setEditingIndex(null);
+      setEditSession(null);
       setEditDraft(null);
       lastDirtyRef.current = false;
     } catch (error) {
@@ -260,16 +270,16 @@ export const NoteReviewPlanManager = forwardRef<
     }
 
     setSelectedIndex(index);
-    setEditingIndex(index);
+    setEditSession({
+      kind: "existing",
+      index,
+      previousSelectedIndex: selectedIndex,
+    });
     setEditDraft(splitDateKey(dateValue));
     setErrorMessage(null);
   }
 
   function handleSelect(index: number) {
-    if (editingIndex !== null) {
-      return;
-    }
-
     setSelectedIndex(index);
     setErrorMessage(null);
   }
@@ -286,7 +296,7 @@ export const NoteReviewPlanManager = forwardRef<
   }
 
   function stopEditing() {
-    setEditingIndex(null);
+    setEditSession(null);
     setEditDraft(null);
   }
 
@@ -326,6 +336,61 @@ export const NoteReviewPlanManager = forwardRef<
     return sortedDates;
   }
 
+  const resolveTransientInteractionState = useCallback(() => {
+    if (editSession === null) {
+      return draftDates;
+    }
+
+    if (editSession.kind === "new") {
+      const nextDates = draftDates.filter((_, index) => index !== editSession.index);
+      setDraftDates(nextDates);
+      setSelectedIndex(
+        editSession.previousSelectedIndex !== null &&
+          nextDates[editSession.previousSelectedIndex] !== undefined
+          ? editSession.previousSelectedIndex
+          : null,
+      );
+      stopEditing();
+      setErrorMessage(null);
+      return nextDates;
+    }
+
+    stopEditing();
+    setErrorMessage(null);
+    return draftDates;
+  }, [draftDates, editSession]);
+
+  const resolveTransientInteraction = useCallback(() => {
+    let nextDates = draftDates;
+
+    flushSync(() => {
+      nextDates = resolveTransientInteractionState();
+    });
+
+    return nextDates;
+  }, [draftDates, resolveTransientInteractionState]);
+
+  useEffect(() => {
+    if (editSession === null) {
+      return;
+    }
+
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target as Node | null;
+
+      if (target && editScopeRef.current?.contains(target)) {
+        return;
+      }
+
+      resolveTransientInteraction();
+    }
+
+    window.addEventListener("pointerdown", handlePointerDown, true);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown, true);
+    };
+  }, [editSession, resolveTransientInteraction]);
+
   function handleAddDate() {
     if (disabled || isBusy || !isScheduleActive || editingIndex !== null) {
       return;
@@ -334,7 +399,11 @@ export const NoteReviewPlanManager = forwardRef<
     const nextDates = [...draftDates, getTodayDateKey()];
     setDraftDates(nextDates);
     setSelectedIndex(nextDates.length - 1);
-    setEditingIndex(nextDates.length - 1);
+    setEditSession({
+      kind: "new",
+      index: nextDates.length - 1,
+      previousSelectedIndex: selectedIndex,
+    });
     setEditDraft(splitDateKey(getTodayDateKey()));
     setErrorMessage(null);
   }
@@ -368,7 +437,7 @@ export const NoteReviewPlanManager = forwardRef<
         setSavedSchedule(null);
         setDraftDates([]);
         setSelectedIndex(null);
-        setEditingIndex(null);
+        setEditSession(null);
         setEditDraft(null);
         lastDirtyRef.current = false;
       } catch (error) {
@@ -392,7 +461,7 @@ export const NoteReviewPlanManager = forwardRef<
     setErrorMessage(null);
   }
 
-  async function savePendingChanges() {
+  const savePendingChanges = useCallback(async () => {
     if (!isDirty) {
       return true;
     }
@@ -401,17 +470,7 @@ export const NoteReviewPlanManager = forwardRef<
       return true;
     }
 
-    let nextDates = draftDates;
-
-    if (editingIndex !== null) {
-      const committedDates = commitDateEdit();
-
-      if (!committedDates) {
-        return false;
-      }
-
-      nextDates = committedDates;
-    }
+    const nextDates = resolveTransientInteraction();
 
     const expectedNoteId = noteId;
     setIsBusy(true);
@@ -427,7 +486,7 @@ export const NoteReviewPlanManager = forwardRef<
       setSavedSchedule(schedule);
       setDraftDates(schedule.dates);
       setSelectedIndex(null);
-      setEditingIndex(null);
+      setEditSession(null);
       setEditDraft(null);
       lastDirtyRef.current = false;
       return true;
@@ -444,37 +503,22 @@ export const NoteReviewPlanManager = forwardRef<
         setIsBusy(false);
       }
     }
-  }
+  }, [isDirty, isScheduleActive, noteId, onError, resolveTransientInteraction]);
 
   useImperativeHandle(
     ref,
     () => ({
       hasUnsavedChanges: () => isDirty,
+      resolveTransientInteraction,
       savePendingChanges,
     }),
+    [isDirty, resolveTransientInteraction, savePendingChanges],
   );
 
   return (
     <section className={styles.manager}>
       <div className={styles.header}>
-        <div className={styles.headerTop}>
-          {isDirty ? (
-            <button
-              type="button"
-              className={styles.saveButton}
-              onClick={() => {
-                void savePendingChanges();
-              }}
-              disabled={disabled || isBusy}
-            >
-              保存
-            </button>
-          ) : null}
-          <div>
-            <p className={styles.label}>复习计划</p>
-            <p className={styles.hint}>每个文件独立维护自己的复习日期，默认按第 2 / 5 / 10 / 18 天生成。</p>
-          </div>
-        </div>
+        <p className={styles.label}>复习计划</p>
       </div>
 
       {isLoading ? (
@@ -504,7 +548,11 @@ export const NoteReviewPlanManager = forwardRef<
           </button>
 
           <div className={styles.listBlock}>
-            <ul className={styles.dateList}>
+            <ul
+              className={`${styles.dateList} ${
+                selectedIndex !== null ? styles.dateListHasSelection : ""
+              }`}
+            >
               {draftDates.map((dateValue, index) => {
                 const isSelected = selectedIndex === index;
                 const isEditing = editingIndex === index && editDraft !== null;
@@ -512,7 +560,10 @@ export const NoteReviewPlanManager = forwardRef<
                 return (
                   <li key={`${dateValue}-${index}`} className={styles.dateListItem}>
                     {isEditing ? (
-                      <div className={`${styles.dateRow} ${styles.dateRowEditing}`}>
+                      <div
+                        ref={editScopeRef}
+                        className={`${styles.dateRow} ${styles.dateRowEditing}`}
+                      >
                         <input
                           type="text"
                           inputMode="numeric"
@@ -598,7 +649,7 @@ export const NoteReviewPlanManager = forwardRef<
             <div className={styles.actions}>
               <button
                 type="button"
-                className={styles.circleButton}
+                className={styles.actionIconButton}
                 onClick={handleAddDate}
                 disabled={disabled || isBusy || editingIndex !== null}
                 aria-label="新增复习日期"
@@ -607,7 +658,7 @@ export const NoteReviewPlanManager = forwardRef<
               </button>
               <button
                 type="button"
-                className={styles.circleButton}
+                className={styles.actionIconButton}
                 onClick={() => {
                   void handleDeleteDate();
                 }}
@@ -617,6 +668,21 @@ export const NoteReviewPlanManager = forwardRef<
                 ➖
               </button>
             </div>
+
+            {isDirty ? (
+              <div className={styles.saveRow}>
+                <button
+                  type="button"
+                  className={styles.saveButton}
+                  onClick={() => {
+                    void savePendingChanges();
+                  }}
+                  disabled={disabled || isBusy}
+                >
+                  保存
+                </button>
+              </div>
+            ) : null}
           </div>
         </>
       )}

@@ -1,5 +1,6 @@
 .searchRoot {
   position: relative;
+  z-index: 20;
   max-width: 540px;
 }
 
@@ -60,6 +61,7 @@
 
 .searchPanel {
   position: absolute;
+  z-index: 40;
   top: calc(100% + 12px);
   left: 0;
   right: 0;
