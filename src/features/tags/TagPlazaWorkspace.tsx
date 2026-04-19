@@ -480,7 +480,7 @@ export function TagPlazaWorkspace({ onOpenNote }: TagPlazaWorkspaceProps) {
             </div>
           </header>
 
-          <div className={styles.panelBody}>
+          <div className={`${styles.panelBody} ${styles.notePanelBody}`}>
             {selectedTag === null ? (
               <div className={`${styles.emptyBlock} ${styles.emptyBlockCompact}`}>
                 <p className={styles.emptyTitle}>先选择一个标签</p>

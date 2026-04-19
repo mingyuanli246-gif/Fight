@@ -16,6 +16,7 @@ interface NotebooksPageProps {
   workspaceRef: RefObject<NotebookWorkspaceRef | null>;
   onChromeModeChange: (mode: NotebookShellMode) => void;
   onOpenNote: (target: NoteOpenTarget) => void;
+  onReturnToReviewTasks?: () => void;
 }
 
 export function NotebooksPage({
@@ -24,6 +25,7 @@ export function NotebooksPage({
   workspaceRef,
   onChromeModeChange,
   onOpenNote,
+  onReturnToReviewTasks,
 }: NotebooksPageProps) {
   return (
     <section
@@ -35,6 +37,7 @@ export function NotebooksPage({
         onConsumeOpenRequest={onConsumeOpenRequest}
         onChromeModeChange={onChromeModeChange}
         onOpenNote={onOpenNote}
+        onReturnToReviewTasks={onReturnToReviewTasks}
       />
     </section>
   );

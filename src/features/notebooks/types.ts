@@ -73,7 +73,7 @@ export interface NoteOpenRequest {
   notebookId: number;
   highlightQuery?: string;
   highlightExcerpt?: string;
-  source?: "global-search" | "external-open";
+  source?: "global-search" | "external-open" | "review-tasks";
 }
 
 export type NoteOpenTarget = Omit<NoteOpenRequest, "requestId">;

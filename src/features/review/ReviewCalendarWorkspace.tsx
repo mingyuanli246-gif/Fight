@@ -20,11 +20,6 @@ function formatTaskPath(task: TodayReviewTaskItem) {
   return `${task.notebookName} / ${task.folderPath}`;
 }
 
-function formatDueDate(value: string) {
-  const [year, month, day] = value.split("-");
-  return `${year}年${month}月${day}日`;
-}
-
 export function ReviewCalendarWorkspace({
   onOpenNote,
 }: ReviewCalendarWorkspaceProps) {
@@ -93,25 +88,21 @@ export function ReviewCalendarWorkspace({
       ) : (
         <div className={styles.taskList}>
           {tasks.map((task) => (
-            <article key={task.noteId} className={styles.taskCard}>
-              <div className={styles.taskMetaRow}>
-                <span className={styles.taskBadge}>今天到期</span>
-                <span className={styles.taskDate}>{formatDueDate(task.dueDate)}</span>
-              </div>
-              <button
-                type="button"
-                className={styles.taskTitleButton}
-                onClick={() =>
-                  onOpenNote({
-                    noteId: task.noteId,
-                    notebookId: task.notebookId,
-                  })
-                }
-              >
-                {task.title}
-              </button>
-              <p className={styles.taskPath}>{formatTaskPath(task)}</p>
-            </article>
+            <button
+              key={task.noteId}
+              type="button"
+              className={styles.taskCard}
+              onClick={() =>
+                onOpenNote({
+                  noteId: task.noteId,
+                  notebookId: task.notebookId,
+                  source: "review-tasks",
+                })
+              }
+            >
+              <span className={styles.taskTitle}>{task.title}</span>
+              <span className={styles.taskPath}>{formatTaskPath(task)}</span>
+            </button>
           ))}
         </div>
       )}

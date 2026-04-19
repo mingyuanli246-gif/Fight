@@ -33,6 +33,7 @@ function renderPage(
   noteOpenRequest: NoteOpenRequest | null,
   onConsumeNoteOpenRequest: (requestId: number) => void,
   onOpenNote: (target: NoteOpenTarget) => void,
+  onReturnToReviewTasks: () => void,
   settingsStartupNotice: SettingsNotice | null,
   notebookWorkspaceRef: RefObject<NotebookWorkspaceRef | null>,
   beforeRestoreBackup: () => Promise<boolean>,
@@ -47,6 +48,7 @@ function renderPage(
           workspaceRef={notebookWorkspaceRef}
           onChromeModeChange={onNotebookChromeModeChange}
           onOpenNote={onOpenNote}
+          onReturnToReviewTasks={onReturnToReviewTasks}
         />
       );
     case "reviewTasks":
@@ -68,6 +70,7 @@ function renderPage(
           workspaceRef={notebookWorkspaceRef}
           onChromeModeChange={onNotebookChromeModeChange}
           onOpenNote={onOpenNote}
+          onReturnToReviewTasks={onReturnToReviewTasks}
         />
       );
   }
@@ -237,6 +240,7 @@ export default function AppShell({
             noteOpenRequest,
             onConsumeNoteOpenRequest,
             onOpenNote,
+            () => onSectionChange("reviewTasks"),
             settingsStartupNotice,
             notebookWorkspaceRef,
             () => guardNotebookBeforeDangerousLeave("restore-backup"),

@@ -204,6 +204,7 @@ interface NotebookWorkspaceProps {
   onConsumeOpenRequest: (requestId: number) => void;
   onOpenNote: (target: NoteOpenTarget) => void;
   onChromeModeChange?: (mode: NotebookShellMode) => void;
+  onReturnToReviewTasks?: () => void;
 }
 
 export type NotebookChromeMode = NotebookShellMode;
@@ -227,7 +228,13 @@ export const NotebookWorkspace = forwardRef<
   NotebookWorkspaceRef,
   NotebookWorkspaceProps
 >(function NotebookWorkspace(
-  { openRequest, onConsumeOpenRequest, onOpenNote, onChromeModeChange },
+  {
+    openRequest,
+    onConsumeOpenRequest,
+    onOpenNote,
+    onChromeModeChange,
+    onReturnToReviewTasks,
+  },
   ref,
 ) {
   const [notebooks, setNotebooks] = useState<Notebook[]>([]);
@@ -260,6 +267,9 @@ export const NotebookWorkspace = forwardRef<
   const [isBusy, setIsBusy] = useState(false);
   const [isLeavePromptOpen, setIsLeavePromptOpen] = useState(false);
   const [isLeavePromptSaving, setIsLeavePromptSaving] = useState(false);
+  const [returnDestination, setReturnDestination] = useState<"reviewTasks" | null>(
+    null,
+  );
   const noteEditorRef = useRef<NoteEditorPaneRef | null>(null);
   const reviewManagerRef = useRef<NoteReviewPlanManagerRef | null>(null);
   const lastHandledOpenRequestRef = useRef<number | null>(null);
@@ -509,6 +519,9 @@ export const NotebookWorkspace = forwardRef<
               }
             : null,
         );
+        setReturnDestination(
+          openRequest.source === "review-tasks" ? "reviewTasks" : null,
+        );
       } catch (error) {
         const message = getErrorMessage(error);
         setErrorMessage(
@@ -546,6 +559,7 @@ export const NotebookWorkspace = forwardRef<
 
     setErrorMessage(null);
     setHighlightRequest(null);
+    setReturnDestination(null);
     setSelectedEntity(nextSelection);
   }
 
@@ -617,6 +631,13 @@ export const NotebookWorkspace = forwardRef<
     const saved = await prepareLeave();
 
     if (!saved) {
+      return;
+    }
+
+    if (returnDestination === "reviewTasks") {
+      setReturnDestination(null);
+      setHighlightRequest(null);
+      onReturnToReviewTasks?.();
       return;
     }
 
