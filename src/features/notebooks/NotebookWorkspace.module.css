@@ -653,7 +653,6 @@
   color: var(--color-text-primary);
   outline: none;
   font-size: var(--editor-font-size, 14px);
-  line-height: 1.9;
   white-space: pre-wrap;
 }
 
@@ -686,15 +685,15 @@
 }
 
 .editorCanvas :global(.ProseMirror p) {
-  margin: 0 0 1.2em;
+  margin: 0 0 0.7em;
   font-size: 16px;
-  line-height: 1.75;
+  line-height: 1.4;
   letter-spacing: -0.011em;
 }
 
 .editorCanvas :global(.ProseMirror ul),
 .editorCanvas :global(.ProseMirror ol) {
-  margin: 0 0 1.2em;
+  margin: 0 0 0.8em;
 }
 
 .editorCanvas :global(.ProseMirror ul),
