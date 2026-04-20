@@ -36,6 +36,8 @@ interface EditSession {
   previousSelectedIndex: number | null;
 }
 
+type EditResolutionMode = "dismiss" | "submit";
+
 export interface NoteReviewPlanManagerRef {
   hasUnsavedChanges: () => boolean;
   resolveTransientInteraction: () => void;
@@ -72,6 +74,26 @@ function formatDisplayDate(value: string) {
 function splitDateKey(value: string): DateEditDraft {
   const [year = "", month = "", day = ""] = value.split("-");
   return { year, month, day };
+}
+
+function buildDateKeyFromDraft(draft: DateEditDraft) {
+  return `${draft.year.padStart(4, "0")}-${draft.month.padStart(
+    2,
+    "0",
+  )}-${draft.day.padStart(2, "0")}`;
+}
+
+function isEditDraftComplete(draft: DateEditDraft) {
+  return draft.year.length === 4 && draft.month.length === 2 && draft.day.length === 2;
+}
+
+function isEditDraftChanged(draft: DateEditDraft, originalValue: string) {
+  const originalDraft = splitDateKey(originalValue);
+  return (
+    draft.year !== originalDraft.year ||
+    draft.month !== originalDraft.month ||
+    draft.day !== originalDraft.day
+  );
 }
 
 function stripDigits(value: string, maxLength: number) {
@@ -145,6 +167,14 @@ export const NoteReviewPlanManager = forwardRef<
     [draftDates, savedDates],
   );
   const isScheduleActive = savedSchedule !== null;
+  const currentEditingValue =
+    editingIndex !== null ? draftDates[editingIndex] ?? null : null;
+  const hasPendingEditChange =
+    editSession?.kind === "existing" &&
+    editDraft !== null &&
+    currentEditingValue !== null &&
+    isEditDraftChanged(editDraft, currentEditingValue);
+  const hasPendingChanges = isDirty || hasPendingEditChange;
 
   const loadSchedule = useCallback(async (expectedNoteId: number, requestVersion: number) => {
     try {
@@ -300,30 +330,68 @@ export const NoteReviewPlanManager = forwardRef<
     setEditDraft(null);
   }
 
-  function commitDateEdit() {
-    if (editingIndex === null || editDraft === null) {
-      return draftDates;
+  const resolveEditSessionState = useCallback((mode: EditResolutionMode) => {
+    if (editingIndex === null || editSession === null || editDraft === null) {
+      if (mode === "dismiss") {
+        setErrorMessage(null);
+      }
+
+      return {
+        ok: true,
+        dates: draftDates,
+      };
     }
 
-    if (
-      editDraft.year.length !== 4 ||
-      editDraft.month.length !== 2 ||
-      editDraft.day.length !== 2
-    ) {
-      setErrorMessage("请补全日期。");
-      return null;
-    }
-
-    const nextDate = `${editDraft.year.padStart(4, "0")}-${editDraft.month.padStart(
-      2,
-      "0",
-    )}-${editDraft.day.padStart(2, "0")}`;
     const originalValue = draftDates[editingIndex];
+
+    if (!originalValue) {
+      setSelectedIndex(null);
+      stopEditing();
+      if (mode === "dismiss") {
+        setErrorMessage(null);
+      }
+
+      return {
+        ok: true,
+        dates: draftDates,
+      };
+    }
+
+    if (!isEditDraftComplete(editDraft)) {
+      if (mode === "dismiss") {
+        stopEditing();
+        setErrorMessage(null);
+        return {
+          ok: true,
+          dates: draftDates,
+        };
+      }
+
+      setErrorMessage("请补全日期。");
+      return {
+        ok: false,
+        dates: draftDates,
+      };
+    }
+
+    const nextDate = buildDateKeyFromDraft(editDraft);
     const validationMessage = validateDateKey(nextDate, draftDates, originalValue);
 
     if (validationMessage) {
+      if (mode === "dismiss") {
+        stopEditing();
+        setErrorMessage(null);
+        return {
+          ok: true,
+          dates: draftDates,
+        };
+      }
+
       setErrorMessage(validationMessage);
-      return null;
+      return {
+        ok: false,
+        dates: draftDates,
+      };
     }
 
     const nextDates = [...draftDates];
@@ -333,42 +401,18 @@ export const NoteReviewPlanManager = forwardRef<
     setSelectedIndex(sortedDates.indexOf(nextDate));
     stopEditing();
     setErrorMessage(null);
-    return sortedDates;
-  }
 
-  const resolveTransientInteractionState = useCallback(() => {
-    if (editSession === null) {
-      return draftDates;
-    }
-
-    if (editSession.kind === "new") {
-      const nextDates = draftDates.filter((_, index) => index !== editSession.index);
-      setDraftDates(nextDates);
-      setSelectedIndex(
-        editSession.previousSelectedIndex !== null &&
-          nextDates[editSession.previousSelectedIndex] !== undefined
-          ? editSession.previousSelectedIndex
-          : null,
-      );
-      stopEditing();
-      setErrorMessage(null);
-      return nextDates;
-    }
-
-    stopEditing();
-    setErrorMessage(null);
-    return draftDates;
-  }, [draftDates, editSession]);
+    return {
+      ok: true,
+      dates: sortedDates,
+    };
+  }, [draftDates, editDraft, editSession, editingIndex]);
 
   const resolveTransientInteraction = useCallback(() => {
-    let nextDates = draftDates;
-
     flushSync(() => {
-      nextDates = resolveTransientInteractionState();
+      resolveEditSessionState("dismiss");
     });
-
-    return nextDates;
-  }, [draftDates, resolveTransientInteractionState]);
+  }, [resolveEditSessionState]);
 
   useEffect(() => {
     if (editSession === null) {
@@ -422,16 +466,61 @@ export const NoteReviewPlanManager = forwardRef<
 
     const nextDates = draftDates.filter((_, index) => index !== selectedIndex);
 
-    if (nextDates.length === 0) {
-      const expectedNoteId = noteId;
-      setIsBusy(true);
-      setErrorMessage(null);
+    setDraftDates(nextDates);
+    setSelectedIndex(nextDates.length > 0 ? Math.min(selectedIndex, nextDates.length - 1) : null);
+    stopEditing();
+    setErrorMessage(null);
+  }
 
-      try {
+  function handleCancelPendingChanges() {
+    setDraftDates(savedDates);
+    setSelectedIndex(null);
+    setEditSession(null);
+    setEditDraft(null);
+    setErrorMessage(null);
+  }
+
+  const savePendingChanges = useCallback(async () => {
+    if (!isScheduleActive) {
+      return true;
+    }
+
+    if (!hasPendingChanges && editSession === null) {
+      return true;
+    }
+
+    let resolution = {
+      ok: true,
+      dates: draftDates,
+    };
+
+    flushSync(() => {
+      resolution = resolveEditSessionState("submit");
+    });
+
+    if (!resolution.ok) {
+      return false;
+    }
+
+    const nextDates = resolution.dates;
+
+    if (!arraysEqual(savedDates, nextDates)) {
+      setErrorMessage(null);
+    } else {
+      setErrorMessage(null);
+      return true;
+    }
+
+    const expectedNoteId = noteId;
+    setIsBusy(true);
+    setErrorMessage(null);
+
+    try {
+      if (nextDates.length === 0) {
         await clearNoteReviewSchedule(expectedNoteId);
 
         if (activeNoteIdRef.current !== expectedNoteId) {
-          return;
+          return false;
         }
 
         setSavedSchedule(null);
@@ -439,44 +528,11 @@ export const NoteReviewPlanManager = forwardRef<
         setSelectedIndex(null);
         setEditSession(null);
         setEditDraft(null);
+        setErrorMessage(null);
         lastDirtyRef.current = false;
-      } catch (error) {
-        if (activeNoteIdRef.current === expectedNoteId) {
-          const message = getErrorMessage(error);
-          setErrorMessage(message);
-          onError(message);
-        }
-      } finally {
-        if (activeNoteIdRef.current === expectedNoteId) {
-          setIsBusy(false);
-        }
+        return true;
       }
 
-      return;
-    }
-
-    setDraftDates(nextDates);
-    setSelectedIndex(Math.min(selectedIndex, nextDates.length - 1));
-    stopEditing();
-    setErrorMessage(null);
-  }
-
-  const savePendingChanges = useCallback(async () => {
-    if (!isDirty) {
-      return true;
-    }
-
-    if (!isScheduleActive) {
-      return true;
-    }
-
-    const nextDates = resolveTransientInteraction();
-
-    const expectedNoteId = noteId;
-    setIsBusy(true);
-    setErrorMessage(null);
-
-    try {
       const schedule = await saveNoteReviewSchedule(expectedNoteId, nextDates);
 
       if (activeNoteIdRef.current !== expectedNoteId) {
@@ -488,6 +544,7 @@ export const NoteReviewPlanManager = forwardRef<
       setSelectedIndex(null);
       setEditSession(null);
       setEditDraft(null);
+      setErrorMessage(null);
       lastDirtyRef.current = false;
       return true;
     } catch (error) {
@@ -503,16 +560,25 @@ export const NoteReviewPlanManager = forwardRef<
         setIsBusy(false);
       }
     }
-  }, [isDirty, isScheduleActive, noteId, onError, resolveTransientInteraction]);
+  }, [
+    draftDates,
+    editSession,
+    hasPendingChanges,
+    isScheduleActive,
+    noteId,
+    onError,
+    resolveEditSessionState,
+    savedDates,
+  ]);
 
   useImperativeHandle(
     ref,
     () => ({
-      hasUnsavedChanges: () => isDirty,
+      hasUnsavedChanges: () => hasPendingChanges,
       resolveTransientInteraction,
       savePendingChanges,
     }),
-    [isDirty, resolveTransientInteraction, savePendingChanges],
+    [hasPendingChanges, resolveTransientInteraction, savePendingChanges],
   );
 
   return (
@@ -575,11 +641,12 @@ export const NoteReviewPlanManager = forwardRef<
                           onKeyDown={(event) => {
                             if (event.key === "Enter") {
                               event.preventDefault();
-                              commitDateEdit();
+                              resolveEditSessionState("submit");
                             }
 
                             if (event.key === "Escape") {
                               event.preventDefault();
+                              setErrorMessage(null);
                               stopEditing();
                             }
                           }}
@@ -597,11 +664,12 @@ export const NoteReviewPlanManager = forwardRef<
                           onKeyDown={(event) => {
                             if (event.key === "Enter") {
                               event.preventDefault();
-                              commitDateEdit();
+                              resolveEditSessionState("submit");
                             }
 
                             if (event.key === "Escape") {
                               event.preventDefault();
+                              setErrorMessage(null);
                               stopEditing();
                             }
                           }}
@@ -618,11 +686,12 @@ export const NoteReviewPlanManager = forwardRef<
                           onKeyDown={(event) => {
                             if (event.key === "Enter") {
                               event.preventDefault();
-                              commitDateEdit();
+                              resolveEditSessionState("submit");
                             }
 
                             if (event.key === "Escape") {
                               event.preventDefault();
+                              setErrorMessage(null);
                               stopEditing();
                             }
                           }}
@@ -669,8 +738,16 @@ export const NoteReviewPlanManager = forwardRef<
               </button>
             </div>
 
-            {isDirty ? (
+            {hasPendingChanges ? (
               <div className={styles.saveRow}>
+                <button
+                  type="button"
+                  className={styles.cancelButton}
+                  onClick={handleCancelPendingChanges}
+                  disabled={disabled || isBusy}
+                >
+                  取消
+                </button>
                 <button
                   type="button"
                   className={styles.saveButton}

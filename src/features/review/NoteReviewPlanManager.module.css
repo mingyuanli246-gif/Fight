@@ -48,6 +48,7 @@
 }
 
 .saveButton,
+.cancelButton,
 .activateButton,
 .activateButtonDisabled,
 .actionIconButton {
@@ -68,12 +69,14 @@
 }
 
 .saveButton:hover:enabled,
+.cancelButton:hover:enabled,
 .activateButton:hover:enabled,
 .actionIconButton:hover:enabled {
   transform: translateY(-1px);
 }
 
 .saveButton,
+.cancelButton,
 .activateButton,
 .activateButtonDisabled,
 .actionIconButton {
@@ -100,7 +103,20 @@
   width: 100%;
 }
 
+.saveButton,
+.cancelButton {
+  flex: 1;
+}
+
+.cancelButton {
+  padding: 0 14px;
+  color: var(--color-text-primary);
+  background: rgba(255, 255, 255, 0.96);
+  border-color: var(--color-border-soft);
+}
+
 .saveButton:disabled,
+.cancelButton:disabled,
 .activateButton:disabled,
 .actionIconButton:disabled {
   opacity: 0.55;
@@ -255,7 +271,8 @@
 
 .saveRow {
   display: flex;
-  justify-content: flex-end;
+  gap: 10px;
+  align-items: stretch;
 }
 
 .errorText {

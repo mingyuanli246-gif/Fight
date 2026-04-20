@@ -30,6 +30,8 @@ interface NotebookDetailWorkspaceProps {
   onCreateNote: () => Promise<void>;
   onRenameFolder: (id: number, name: string) => Promise<void>;
   onRenameNote: (id: number, title: string) => Promise<void>;
+  onRequestDeleteFolder: (folder: Folder) => void;
+  onRequestDeleteNote: (note: Note) => void;
   onToggleRightPanel: () => void;
   onNoteUpdated: (note: Note) => void;
   onError: (message: string) => void;
@@ -53,6 +55,8 @@ export function NotebookDetailWorkspace({
   onCreateNote,
   onRenameFolder,
   onRenameNote,
+  onRequestDeleteFolder,
+  onRequestDeleteNote,
   onToggleRightPanel,
   onNoteUpdated,
   onError,
@@ -77,6 +81,8 @@ export function NotebookDetailWorkspace({
           onCreateNote={onCreateNote}
           onRenameFolder={onRenameFolder}
           onRenameNote={onRenameNote}
+          onRequestDeleteFolder={onRequestDeleteFolder}
+          onRequestDeleteNote={onRequestDeleteNote}
         />
 
         <section className={styles.detailMain}>

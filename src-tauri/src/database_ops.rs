@@ -3922,7 +3922,7 @@ mod tests {
     }
 
     #[test]
-    fn clear_note_review_schedule_removes_binding_and_tasks() {
+    fn save_note_review_schedule_accepts_reduced_non_empty_dates() {
         let mut connection = test_connection();
         connection
             .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
@@ -3941,6 +3941,48 @@ mod tests {
             .expect("insert note");
         activate_note_review_schedule_tx_internal(&mut connection, 1).expect("activate schedule");
 
+        let schedule = save_note_review_schedule_tx_internal(
+            &mut connection,
+            1,
+            &["2099-02-18".to_string(), "2099-06-03".to_string()],
+        )
+        .expect("save reduced schedule");
+
+        let task_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM review_tasks WHERE note_id = 1", [], |row| {
+                row.get(0)
+            })
+            .expect("count tasks");
+
+        assert_eq!(
+            schedule.dates,
+            vec!["2099-02-18".to_string(), "2099-06-03".to_string()]
+        );
+        assert_eq!(task_count, 2);
+    }
+
+    #[test]
+    fn clear_note_review_schedule_removes_binding_and_tasks() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', NULL)",
+                [],
+            )
+            .expect("insert note");
+        activate_note_review_schedule_tx_internal(&mut connection, 1).expect("activate schedule");
+        set_note_review_schedule_dirty_tx_internal(&mut connection, 1, true)
+            .expect("mark dirty schedule");
+
         clear_note_review_schedule_tx_internal(&mut connection, 1).expect("clear schedule");
 
         let binding_count: i64 = connection
@@ -3949,9 +3991,17 @@ mod tests {
         let task_count: i64 = connection
             .query_row("SELECT COUNT(*) FROM review_tasks", [], |row| row.get(0))
             .expect("count tasks");
+        let dirty_marker: String = connection
+            .query_row(
+                "SELECT value FROM app_meta WHERE key = ?1",
+                [APP_META_KEY_REVIEW_SCHEDULE_DIRTY_NOTE_IDS],
+                |row| row.get(0),
+            )
+            .expect("read dirty marker");
 
         assert_eq!(binding_count, 0);
         assert_eq!(task_count, 0);
+        assert_eq!(dirty_marker, "[]");
     }
 
     #[test]

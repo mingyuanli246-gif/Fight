@@ -751,6 +751,46 @@
   flex: 1;
 }
 
+.treeItemActionButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  padding: 0;
+  color: var(--color-text-secondary);
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(226, 232, 240, 0.96);
+  border-radius: 10px;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 140ms ease,
+    background-color 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease,
+    transform 140ms ease;
+}
+
+.treeItemActionButton:hover:enabled {
+  color: var(--color-text-primary);
+  background: rgba(255, 255, 255, 0.98);
+  border-color: rgba(203, 213, 225, 0.98);
+  transform: translateY(-1px);
+}
+
+.treeItemActionButton:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.treeItemActionIcon {
+  width: 16px;
+  height: 16px;
+}
+
 .treeLabel {
   font-size: 13px;
   line-height: 1.5;
@@ -770,6 +810,17 @@
 .treeRow:hover:enabled .treeLabel,
 .treeNoteRow:hover:enabled .treeLabel {
   color: color-mix(in srgb, var(--color-text-primary) 88%, #020617 12%);
+}
+
+.treeRow:hover:enabled .treeItemActionButton,
+.treeNoteRow:hover:enabled .treeItemActionButton,
+.treeRow:focus-visible .treeItemActionButton,
+.treeNoteRow:focus-visible .treeItemActionButton,
+.treeRowActive .treeItemActionButton,
+.treeNoteRowActive .treeItemActionButton,
+.treeItemActionButton:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .treeRowActive .treeLabel,

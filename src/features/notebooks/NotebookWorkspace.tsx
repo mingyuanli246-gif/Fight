@@ -1016,6 +1016,20 @@ export const NotebookWorkspace = forwardRef<
           onCreateNote={handleCreateNote}
           onRenameFolder={handleRenameFolder}
           onRenameNote={handleRenameNote}
+          onRequestDeleteFolder={(folder) =>
+            setDeleteTarget({
+              kind: "folder",
+              id: folder.id,
+              title: "确定删除这个文件夹吗",
+            })
+          }
+          onRequestDeleteNote={(note) =>
+            setDeleteTarget({
+              kind: "note",
+              id: note.id,
+              title: "确定删除这个文件吗",
+            })
+          }
           onToggleRightPanel={() =>
             setIsRightPanelCollapsed((current) => !current)
           }

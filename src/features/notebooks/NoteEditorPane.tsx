@@ -3,6 +3,7 @@ import {
   useEditor,
   type Editor,
 } from "@tiptap/react";
+import { undoDepth } from "@tiptap/pm/history";
 import {
   type CSSProperties,
   forwardRef,
@@ -95,6 +96,12 @@ interface MathDialogState {
   position: number | null;
 }
 
+interface FontSizeHistoryEntry {
+  from: number;
+  to: number;
+  anchorUndoDepth: number;
+}
+
 function formatDate(value: string) {
   const normalized = value.trim();
   const isoLikeValue = normalized.includes("T")
@@ -179,6 +186,8 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
     const [lastSavedAt, setLastSavedAt] = useState(note.updatedAt);
     const [isLoadingNote, setIsLoadingNote] = useState(true);
     const [editorFontSize, setEditorFontSize] = useState(getInitialEditorFontSize);
+    const [fontUndoStack, setFontUndoStack] = useState<FontSizeHistoryEntry[]>([]);
+    const [fontRedoStack, setFontRedoStack] = useState<FontSizeHistoryEntry[]>([]);
     const [mathDialogState, setMathDialogState] = useState<MathDialogState | null>(
       null,
     );
@@ -264,6 +273,81 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
     const editorCanvasStyle = {
       "--editor-font-size": `${editorFontSize}px`,
     } as CSSProperties;
+
+    function getEditorUndoDepth(currentEditor: Editor | null) {
+      return currentEditor ? undoDepth(currentEditor.state) : 0;
+    }
+
+    function canUndoEditor(currentEditor: Editor | null) {
+      return currentEditor?.can().chain().focus().undo().run() ?? false;
+    }
+
+    function canRedoEditor(currentEditor: Editor | null) {
+      return currentEditor?.can().chain().focus().redo().run() ?? false;
+    }
+
+    function recordFontSizeChange(nextFontSize: number) {
+      if (nextFontSize === editorFontSize) {
+        return;
+      }
+
+      setFontUndoStack((currentStack) => [
+        ...currentStack,
+        {
+          from: editorFontSize,
+          to: nextFontSize,
+          anchorUndoDepth: getEditorUndoDepth(editor),
+        },
+      ]);
+      setFontRedoStack([]);
+      setEditorFontSize(nextFontSize);
+    }
+
+    function handleToolbarUndo() {
+      const latestFontChange = fontUndoStack[fontUndoStack.length - 1];
+      const currentUndoDepth = getEditorUndoDepth(editor);
+      const shouldUndoEditorFirst =
+        latestFontChange !== undefined &&
+        canUndoEditor(editor) &&
+        currentUndoDepth > latestFontChange.anchorUndoDepth;
+
+      if (shouldUndoEditorFirst) {
+        editor?.chain().focus().undo().run();
+        return;
+      }
+
+      if (latestFontChange) {
+        setEditorFontSize(latestFontChange.from);
+        setFontUndoStack((currentStack) => currentStack.slice(0, -1));
+        setFontRedoStack((currentStack) => [...currentStack, latestFontChange]);
+        return;
+      }
+
+      editor?.chain().focus().undo().run();
+    }
+
+    function handleToolbarRedo() {
+      const latestFontChange = fontRedoStack[fontRedoStack.length - 1];
+      const currentUndoDepth = getEditorUndoDepth(editor);
+      const shouldRedoEditorFirst =
+        latestFontChange !== undefined &&
+        canRedoEditor(editor) &&
+        currentUndoDepth < latestFontChange.anchorUndoDepth;
+
+      if (shouldRedoEditorFirst) {
+        editor?.chain().focus().redo().run();
+        return;
+      }
+
+      if (latestFontChange) {
+        setEditorFontSize(latestFontChange.to);
+        setFontRedoStack((currentStack) => currentStack.slice(0, -1));
+        setFontUndoStack((currentStack) => [...currentStack, latestFontChange]);
+        return;
+      }
+
+      editor?.chain().focus().redo().run();
+    }
 
     function openMathInsertDialog(displayMode: MathDisplayMode) {
       setMathDialogState({
@@ -572,6 +656,8 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
       clearSearchHighlight(editor);
       ongoingSaveRef.current = null;
       ongoingSaveContentRef.current = null;
+      setFontUndoStack([]);
+      setFontRedoStack([]);
       setIsLoadingNote(true);
       setSaveStatus("unchanged");
       setMathDialogState(null);
@@ -706,6 +792,10 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
             <RichTextToolbar
               editor={editor}
               disabled={disabled || isLoadingNote}
+              hasFontUndo={fontUndoStack.length > 0}
+              hasFontRedo={fontRedoStack.length > 0}
+              onUndo={handleToolbarUndo}
+              onRedo={handleToolbarRedo}
               onInsertInlineMath={() => openMathInsertDialog("inline")}
               onInsertBlockMath={() => openMathInsertDialog("block")}
               onInsertImage={() => {
@@ -717,8 +807,8 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
                     type="button"
                     className={editorStyles.toolbarIconButton}
                     onClick={() =>
-                      setEditorFontSize((current) =>
-                        clampEditorFontSize(current - 1),
+                      recordFontSizeChange(
+                        clampEditorFontSize(editorFontSize - 1),
                       )
                     }
                     disabled={isDecreaseFontDisabled}
@@ -731,8 +821,8 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
                     type="button"
                     className={editorStyles.toolbarIconButton}
                     onClick={() =>
-                      setEditorFontSize((current) =>
-                        clampEditorFontSize(current + 1),
+                      recordFontSizeChange(
+                        clampEditorFontSize(editorFontSize + 1),
                       )
                     }
                     disabled={isIncreaseFontDisabled}

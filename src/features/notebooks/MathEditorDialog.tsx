@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import type { MathDisplayMode } from "./mathSerialization";
 import editorStyles from "./NoteEditorSurface.module.css";
 import styles from "./NotebookWorkspace.module.css";
@@ -55,7 +56,11 @@ export function MathEditorDialog({
     return null;
   }
 
-  return (
+  if (typeof document === "undefined") {
+    return null;
+  }
+
+  return createPortal(
     <div
       className={editorStyles.mathDialogOverlay}
       role="presentation"
@@ -75,9 +80,6 @@ export function MathEditorDialog({
           <h4 id="math-editor-title" className={editorStyles.mathDialogTitle}>
             {getDialogTitle(intent, displayMode)}
           </h4>
-          <p className={editorStyles.mathDialogHint}>
-            输入 LaTeX 源码后确认插入。当前阶段不启用 `$` 或 `$$` 自动解析。
-          </p>
         </div>
 
         <textarea
@@ -102,11 +104,7 @@ export function MathEditorDialog({
 
         {errorMessage ? (
           <p className={editorStyles.mathDialogError}>{errorMessage}</p>
-        ) : (
-          <p className={editorStyles.mathDialogHint}>
-            提示：可用 `Ctrl+Enter` 或 `Cmd+Enter` 快速确认。
-          </p>
-        )}
+        ) : null}
 
         <div className={styles.formActions}>
           <button
@@ -125,6 +123,7 @@ export function MathEditorDialog({
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

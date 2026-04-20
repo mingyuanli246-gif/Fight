@@ -10,6 +10,10 @@ import styles from "./NoteEditorSurface.module.css";
 interface RichTextToolbarProps {
   editor: Editor | null;
   disabled: boolean;
+  hasFontUndo: boolean;
+  hasFontRedo: boolean;
+  onUndo: () => void;
+  onRedo: () => void;
   onInsertInlineMath: () => void;
   onInsertBlockMath: () => void;
   onInsertImage: () => void;
@@ -221,6 +225,10 @@ const Icons = {
 export function RichTextToolbar({
   editor,
   disabled,
+  hasFontUndo,
+  hasFontRedo,
+  onUndo,
+  onRedo,
   onInsertInlineMath,
   onInsertBlockMath,
   onInsertImage,
@@ -250,6 +258,10 @@ export function RichTextToolbar({
       getSelectedNoteImageDisplaySize(currentEditor),
   });
   const isUnavailable = disabled || editor === null;
+  const canUndoEditor =
+    editor?.can().chain().focus().undo().run() ?? false;
+  const canRedoEditor =
+    editor?.can().chain().focus().redo().run() ?? false;
   const isCentered = editor?.isActive({ textAlign: "center" }) ?? false;
   const hasSelectedImage = selectedImageDisplaySize !== null;
   const blockButtons: ToolbarButtonDescriptor[] = [
@@ -452,22 +464,18 @@ export function RichTextToolbar({
       key: "undo",
       label: "撤销",
       icon: Icons.Undo,
-      disabled:
-        isUnavailable ||
-        !(editor?.can().chain().focus().undo().run() ?? false),
+      disabled: isUnavailable || (!hasFontUndo && !canUndoEditor),
       onClick() {
-        editor?.chain().focus().undo().run();
+        onUndo();
       },
     },
     {
       key: "redo",
       label: "重做",
       icon: Icons.Redo,
-      disabled:
-        isUnavailable ||
-        !(editor?.can().chain().focus().redo().run() ?? false),
+      disabled: isUnavailable || (!hasFontRedo && !canRedoEditor),
       onClick() {
-        editor?.chain().focus().redo().run();
+        onRedo();
       },
     },
   ];

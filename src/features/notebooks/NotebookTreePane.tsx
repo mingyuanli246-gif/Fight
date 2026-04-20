@@ -4,13 +4,22 @@ import {
   ArrowLeftIcon,
   ChevronDownIcon,
   ChevronRightIcon,
+  MoreIcon,
 } from "./NotebookUiIcons";
+import { ItemActionMenu } from "./ItemActionMenu";
 import styles from "./NotebookWorkspaceShell.module.css";
 
 interface RenameState {
   kind: "folder" | "note";
   id: number;
   value: string;
+}
+
+interface ContextMenuState {
+  kind: "folder" | "note";
+  id: number;
+  x: number;
+  y: number;
 }
 
 interface NotebookTreePaneProps {
@@ -26,6 +35,8 @@ interface NotebookTreePaneProps {
   onCreateNote: () => Promise<void>;
   onRenameFolder: (id: number, name: string) => Promise<void>;
   onRenameNote: (id: number, title: string) => Promise<void>;
+  onRequestDeleteFolder: (folder: Folder) => void;
+  onRequestDeleteNote: (note: Note) => void;
 }
 
 function buildExpandedSet(folderIds: number[]) {
@@ -45,11 +56,14 @@ export function NotebookTreePane({
   onCreateNote,
   onRenameFolder,
   onRenameNote,
+  onRequestDeleteFolder,
+  onRequestDeleteNote,
 }: NotebookTreePaneProps) {
   const [expandedFolderIds, setExpandedFolderIds] = useState<Set<number>>(
     () => buildExpandedSet([]),
   );
   const [renameState, setRenameState] = useState<RenameState | null>(null);
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const lastNotebookIdRef = useRef<number | null>(null);
 
   const notesByFolder = useMemo(() => {
@@ -77,6 +91,7 @@ export function NotebookTreePane({
     if (!notebook) {
       setExpandedFolderIds(buildExpandedSet([]));
       setRenameState(null);
+      setContextMenu(null);
       lastNotebookIdRef.current = null;
       return;
     }
@@ -126,6 +141,27 @@ export function NotebookTreePane({
     });
   }, [notes, selectedEntity]);
 
+  useEffect(() => {
+    if (contextMenu === null) {
+      return;
+    }
+
+    if (
+      contextMenu.kind === "folder" &&
+      !folders.some((folder) => folder.id === contextMenu.id)
+    ) {
+      setContextMenu(null);
+      return;
+    }
+
+    if (
+      contextMenu.kind === "note" &&
+      !notes.some((note) => note.id === contextMenu.id)
+    ) {
+      setContextMenu(null);
+    }
+  }, [contextMenu, folders, notes]);
+
   function toggleFolder(folderId: number) {
     setExpandedFolderIds((current) => {
       const next = new Set(current);
@@ -141,6 +177,7 @@ export function NotebookTreePane({
   }
 
   function startRename(kind: RenameState["kind"], id: number, value: string) {
+    setContextMenu(null);
     setRenameState({
       kind,
       id,
@@ -163,6 +200,19 @@ export function NotebookTreePane({
     setRenameState(null);
   }
 
+  function openContextMenu(
+    item: { kind: "folder"; value: Folder } | { kind: "note"; value: Note },
+    position: { x: number; y: number },
+  ) {
+    onSelectEntity({ kind: item.kind, id: item.value.id });
+    setContextMenu({
+      kind: item.kind,
+      id: item.value.id,
+      x: position.x,
+      y: position.y,
+    });
+  }
+
   async function submitRename() {
     if (!renameState) {
       return;
@@ -182,6 +232,16 @@ export function NotebookTreePane({
   }
 
   const canCreateNote = activeFolderId !== null;
+  const contextMenuFolder =
+    contextMenu?.kind === "folder"
+      ? folders.find((folder) => folder.id === contextMenu.id) ?? null
+      : null;
+  const contextMenuNote =
+    contextMenu?.kind === "note"
+      ? notes.find((note) => note.id === contextMenu.id) ?? null
+      : null;
+  const contextMenuX = contextMenu?.x ?? 0;
+  const contextMenuY = contextMenu?.y ?? 0;
 
   return (
     <section className={styles.detailSidebar}>
@@ -191,6 +251,7 @@ export function NotebookTreePane({
             type="button"
             className={styles.treeBackButton}
             onClick={onReturnHome}
+            onPointerDown={() => setContextMenu(null)}
             aria-label="返回笔记本首页"
           >
             <ArrowLeftIcon className={styles.buttonIcon} />
@@ -204,6 +265,7 @@ export function NotebookTreePane({
             type="button"
             className={styles.secondaryButton}
             onClick={() => {
+              setContextMenu(null);
               void onCreateFolder();
             }}
             disabled={disabled || notebook === null}
@@ -214,6 +276,7 @@ export function NotebookTreePane({
             type="button"
             className={styles.primaryButton}
             onClick={() => {
+              setContextMenu(null);
               void onCreateNote();
             }}
             disabled={disabled || !canCreateNote}
@@ -283,7 +346,15 @@ export function NotebookTreePane({
                       className={`${styles.treeRow} ${
                         isActive ? styles.treeRowActive : ""
                       }`}
+                      onContextMenu={(event) => {
+                        event.preventDefault();
+                        openContextMenu(
+                          { kind: "folder", value: folder },
+                          { x: event.clientX, y: event.clientY },
+                        );
+                      }}
                       onClick={() => {
+                        setContextMenu(null);
                         toggleFolder(folder.id);
                         onSelectEntity({ kind: "folder", id: folder.id });
                       }}
@@ -308,6 +379,23 @@ export function NotebookTreePane({
                         </span>
                         <span className={styles.treeMeta}>{folderNotes.length} 个文件</span>
                       </span>
+                      <button
+                        type="button"
+                        className={styles.treeItemActionButton}
+                        aria-label={`打开 ${folder.name} 的操作菜单`}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          const rect = event.currentTarget.getBoundingClientRect();
+                          openContextMenu(
+                            { kind: "folder", value: folder },
+                            { x: rect.right - 164, y: rect.bottom + 8 },
+                          );
+                        }}
+                        onPointerDown={(event) => event.stopPropagation()}
+                        disabled={disabled}
+                      >
+                        <MoreIcon className={styles.treeItemActionIcon} />
+                      </button>
                     </button>
                   )}
 
@@ -359,7 +447,15 @@ export function NotebookTreePane({
                                   className={`${styles.treeNoteRow} ${
                                     isNoteActive ? styles.treeNoteRowActive : ""
                                   }`}
+                                  onContextMenu={(event) => {
+                                    event.preventDefault();
+                                    openContextMenu(
+                                      { kind: "note", value: note },
+                                      { x: event.clientX, y: event.clientY },
+                                    );
+                                  }}
                                   onClick={() => {
+                                    setContextMenu(null);
                                     if (isNoteActive) {
                                       return;
                                     }
@@ -380,6 +476,24 @@ export function NotebookTreePane({
                                     </span>
                                     <span className={styles.treeMeta}>文件</span>
                                   </span>
+                                  <button
+                                    type="button"
+                                    className={styles.treeItemActionButton}
+                                    aria-label={`打开 ${note.title} 的操作菜单`}
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      const rect =
+                                        event.currentTarget.getBoundingClientRect();
+                                      openContextMenu(
+                                        { kind: "note", value: note },
+                                        { x: rect.right - 164, y: rect.bottom + 8 },
+                                      );
+                                    }}
+                                    onPointerDown={(event) => event.stopPropagation()}
+                                    disabled={disabled}
+                                  >
+                                    <MoreIcon className={styles.treeItemActionIcon} />
+                                  </button>
                                 </button>
                               )}
                             </li>
@@ -443,7 +557,15 @@ export function NotebookTreePane({
                             className={`${styles.treeNoteRow} ${
                               isNoteActive ? styles.treeNoteRowActive : ""
                             }`}
+                            onContextMenu={(event) => {
+                              event.preventDefault();
+                              openContextMenu(
+                                { kind: "note", value: note },
+                                { x: event.clientX, y: event.clientY },
+                              );
+                            }}
                             onClick={() => {
+                              setContextMenu(null);
                               if (isNoteActive) {
                                 return;
                               }
@@ -464,6 +586,23 @@ export function NotebookTreePane({
                               </span>
                               <span className={styles.treeMeta}>尚未归入文件夹</span>
                             </span>
+                            <button
+                              type="button"
+                              className={styles.treeItemActionButton}
+                              aria-label={`打开 ${note.title} 的操作菜单`}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                const rect = event.currentTarget.getBoundingClientRect();
+                                openContextMenu(
+                                  { kind: "note", value: note },
+                                  { x: rect.right - 164, y: rect.bottom + 8 },
+                                );
+                              }}
+                              onPointerDown={(event) => event.stopPropagation()}
+                              disabled={disabled}
+                            >
+                              <MoreIcon className={styles.treeItemActionIcon} />
+                            </button>
                           </button>
                         )}
                       </li>
@@ -475,6 +614,28 @@ export function NotebookTreePane({
           </ul>
         )}
       </div>
+      {contextMenuFolder ? (
+        <ItemActionMenu
+          x={contextMenuX}
+          y={contextMenuY}
+          onClose={() => setContextMenu(null)}
+          onRename={() =>
+            startRename("folder", contextMenuFolder.id, contextMenuFolder.name)
+          }
+          onDelete={() => onRequestDeleteFolder(contextMenuFolder)}
+        />
+      ) : null}
+      {contextMenuNote ? (
+        <ItemActionMenu
+          x={contextMenuX}
+          y={contextMenuY}
+          onClose={() => setContextMenu(null)}
+          onRename={() =>
+            startRename("note", contextMenuNote.id, contextMenuNote.title)
+          }
+          onDelete={() => onRequestDeleteNote(contextMenuNote)}
+        />
+      ) : null}
     </section>
   );
 }
