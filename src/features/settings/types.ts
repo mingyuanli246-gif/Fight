@@ -1,7 +1,9 @@
+import type { EditorFontFamilyName } from "../notebooks/editorTypography";
 import type { ThemeName } from "../theme/types";
 
 export interface AppSettings {
   theme: ThemeName;
+  editorFontFamily: EditorFontFamilyName;
   autoBackupEnabled: boolean;
   backupRetentionCount: 3 | 5 | 10;
   lastAutoBackupDate: string | null;
@@ -9,6 +11,7 @@ export interface AppSettings {
 
 export interface AppSettingsUpdate {
   theme?: ThemeName;
+  editorFontFamily?: EditorFontFamilyName;
   autoBackupEnabled?: boolean;
   backupRetentionCount?: 3 | 5 | 10;
 }

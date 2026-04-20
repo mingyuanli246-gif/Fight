@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import type { MathDisplayMode } from "./mathSerialization";
+import editorStyles from "./NoteEditorSurface.module.css";
 import styles from "./NotebookWorkspace.module.css";
 
 interface MathEditorDialogProps {
@@ -56,7 +57,7 @@ export function MathEditorDialog({
 
   return (
     <div
-      className={styles.mathDialogOverlay}
+      className={editorStyles.mathDialogOverlay}
       role="presentation"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) {
@@ -65,23 +66,23 @@ export function MathEditorDialog({
       }}
     >
       <div
-        className={styles.mathDialog}
+        className={editorStyles.mathDialog}
         role="dialog"
         aria-modal="true"
         aria-labelledby="math-editor-title"
       >
-        <div className={styles.mathDialogHeader}>
-          <h4 id="math-editor-title" className={styles.mathDialogTitle}>
+        <div className={editorStyles.mathDialogHeader}>
+          <h4 id="math-editor-title" className={editorStyles.mathDialogTitle}>
             {getDialogTitle(intent, displayMode)}
           </h4>
-          <p className={styles.mathDialogHint}>
+          <p className={editorStyles.mathDialogHint}>
             输入 LaTeX 源码后确认插入。当前阶段不启用 `$` 或 `$$` 自动解析。
           </p>
         </div>
 
         <textarea
           ref={textareaRef}
-          className={styles.mathTextarea}
+          className={editorStyles.mathTextarea}
           value={latex}
           rows={displayMode === "block" ? 5 : 3}
           placeholder={getPlaceholder(displayMode)}
@@ -100,9 +101,9 @@ export function MathEditorDialog({
         />
 
         {errorMessage ? (
-          <p className={styles.mathDialogError}>{errorMessage}</p>
+          <p className={editorStyles.mathDialogError}>{errorMessage}</p>
         ) : (
-          <p className={styles.mathDialogHint}>
+          <p className={editorStyles.mathDialogHint}>
             提示：可用 `Ctrl+Enter` 或 `Cmd+Enter` 快速确认。
           </p>
         )}

@@ -21,6 +21,8 @@ const BACKUP_FORMAT_VERSION: u32 = 1;
 const CURRENT_SCHEMA_VERSION: u32 = 5;
 const STORED_RESOURCE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif"];
 const VALID_THEMES: &[&str] = &["blue", "pink", "red", "yellow"];
+const VALID_EDITOR_FONT_FAMILIES: &[&str] =
+    &["modernSans", "elegantSerif", "systemDefault"];
 const VALID_RETENTION_COUNTS: &[u32] = &[3, 5, 10];
 const SCHEMA_V1_REQUIRED_TABLES: &[&str] = &["notebooks", "folders", "notes"];
 const SCHEMA_V2_REQUIRED_TABLES: &[&str] = &["note_search"];
@@ -37,15 +39,22 @@ const SCHEMA_V5_REQUIRED_TABLES: &[&str] = &["app_meta"];
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
     pub theme: String,
+    #[serde(default = "default_editor_font_family")]
+    pub editor_font_family: String,
     pub auto_backup_enabled: bool,
     pub backup_retention_count: u32,
     pub last_auto_backup_date: Option<String>,
+}
+
+fn default_editor_font_family() -> String {
+    "modernSans".to_string()
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
             theme: "blue".to_string(),
+            editor_font_family: default_editor_font_family(),
             auto_backup_enabled: false,
             backup_retention_count: 5,
             last_auto_backup_date: None,
@@ -57,6 +66,7 @@ impl Default for AppSettings {
 #[serde(rename_all = "camelCase")]
 pub struct AppSettingsUpdate {
     pub theme: Option<String>,
+    pub editor_font_family: Option<String>,
     pub auto_backup_enabled: Option<bool>,
     pub backup_retention_count: Option<u32>,
 }
@@ -301,6 +311,17 @@ fn validate_theme(theme: &str) -> Result<(), String> {
     }
 }
 
+fn validate_editor_font_family(font_family: &str) -> Result<(), String> {
+    if VALID_EDITOR_FONT_FAMILIES
+        .iter()
+        .any(|candidate| candidate == &font_family)
+    {
+        Ok(())
+    } else {
+        Err("编辑器字体配置无效。".to_string())
+    }
+}
+
 fn validate_retention_count(count: u32) -> Result<(), String> {
     if VALID_RETENTION_COUNTS
         .iter()
@@ -314,6 +335,7 @@ fn validate_retention_count(count: u32) -> Result<(), String> {
 
 fn validate_app_settings(settings: &AppSettings) -> Result<(), String> {
     validate_theme(&settings.theme)?;
+    validate_editor_font_family(&settings.editor_font_family)?;
     validate_retention_count(settings.backup_retention_count)?;
 
     if let Some(date) = &settings.last_auto_backup_date {
@@ -331,6 +353,9 @@ fn merge_app_settings(
 ) -> Result<AppSettings, String> {
     let next = AppSettings {
         theme: update.theme.unwrap_or_else(|| current.theme.clone()),
+        editor_font_family: update
+            .editor_font_family
+            .unwrap_or_else(|| current.editor_font_family.clone()),
         auto_backup_enabled: update
             .auto_backup_enabled
             .unwrap_or(current.auto_backup_enabled),

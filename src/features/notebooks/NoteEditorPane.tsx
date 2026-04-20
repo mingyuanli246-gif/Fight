@@ -61,6 +61,7 @@ import type {
   Notebook,
   NotebookHighlightRequest,
 } from "./types";
+import editorStyles from "./NoteEditorSurface.module.css";
 import styles from "./NotebookWorkspace.module.css";
 
 const AUTOSAVE_DELAY_MS = 800;
@@ -69,7 +70,8 @@ const SEARCH_HIGHLIGHT_DURATION_MS = 5000;
 const EDITOR_FONT_SIZE_STORAGE_KEY = "notebooks.editor.font-size";
 const MIN_EDITOR_FONT_SIZE = 12;
 const MAX_EDITOR_FONT_SIZE = 20;
-const DEFAULT_EDITOR_FONT_SIZE = 14;
+const DEFAULT_EDITOR_FONT_SIZE = 16;
+const LEGACY_DEFAULT_EDITOR_FONT_SIZE = 14;
 
 export interface NoteEditorPaneRef {
   flushPendingSave: () => Promise<boolean>;
@@ -147,9 +149,15 @@ function getInitialEditorFontSize() {
     10,
   );
 
-  return Number.isFinite(storedValue)
-    ? clampEditorFontSize(storedValue)
-    : DEFAULT_EDITOR_FONT_SIZE;
+  if (!Number.isFinite(storedValue)) {
+    return DEFAULT_EDITOR_FONT_SIZE;
+  }
+
+  if (storedValue === LEGACY_DEFAULT_EDITOR_FONT_SIZE) {
+    return DEFAULT_EDITOR_FONT_SIZE;
+  }
+
+  return clampEditorFontSize(storedValue);
 }
 
 export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>(
@@ -215,7 +223,7 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
         ...createNotebookEditorExtensions({
           mathBridge: mathBridgeRef.current,
         }),
-        createSearchHighlightExtension(styles.searchHighlight),
+        createSearchHighlightExtension(editorStyles.searchHighlight),
       ],
     );
     const enabledInputRulesRef = useRef([...NOTE_EDITOR_ENABLED_INPUT_RULES]);
@@ -228,7 +236,7 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
       autofocus: false,
       editorProps: {
         attributes: {
-          class: styles.proseMirrorRoot,
+          class: editorStyles.proseMirrorRoot,
         },
       },
       onUpdate({ editor: currentEditor }) {
@@ -499,7 +507,7 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
 
       window.requestAnimationFrame(() => {
         const matchElement = editor.view.dom.querySelector(
-          `.${styles.searchHighlight}`,
+          `.${editorStyles.searchHighlight}`,
         );
 
         if (matchElement instanceof HTMLElement) {
@@ -666,35 +674,35 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
       <section
         className={`${styles.panel} ${styles.workspacePanel} ${styles.workspacePanelShell}`}
       >
-        <header className={`${styles.panelHeader} ${styles.editorPanelHeader}`}>
-          <div className={styles.editorHeader}>
-            <h3 className={styles.editorTitle}>{note.title}</h3>
-            <div className={styles.editorSubline}>
-              <p className={styles.editorPath}>{notePath}</p>
+        <header className={`${styles.panelHeader} ${editorStyles.editorPanelHeader}`}>
+          <div className={editorStyles.editorHeader}>
+            <h3 className={editorStyles.editorTitle}>{note.title}</h3>
+            <div className={editorStyles.editorSubline}>
+              <p className={editorStyles.editorPath}>{notePath}</p>
               <div
-                className={`${styles.saveStatusBadge} ${
+                className={`${editorStyles.saveStatusBadge} ${
                   saveStatus === "error"
-                    ? styles.saveStatusError
+                    ? editorStyles.saveStatusError
                     : saveStatus === "saving"
-                      ? styles.saveStatusSaving
+                      ? editorStyles.saveStatusSaving
                       : saveStatus === "saved"
-                        ? styles.saveStatusSaved
+                        ? editorStyles.saveStatusSaved
                         : saveStatus === "dirty"
-                          ? styles.saveStatusDirty
+                          ? editorStyles.saveStatusDirty
                           : ""
                 }`}
               >
                 {getSaveStatusLabel(saveStatus)}
               </div>
             </div>
-            <p className={styles.editorMeta}>
+            <p className={editorStyles.editorMeta}>
               最近更新时间：{formatDate(lastSavedAt)}
             </p>
           </div>
         </header>
 
-        <div className={styles.editorBody}>
-          <div className={styles.editorSurface}>
+        <div className={editorStyles.editorBody}>
+          <div className={editorStyles.editorSurface}>
             <RichTextToolbar
               editor={editor}
               disabled={disabled || isLoadingNote}
@@ -707,7 +715,7 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
                 <>
                   <button
                     type="button"
-                    className={styles.toolbarIconButton}
+                    className={editorStyles.toolbarIconButton}
                     onClick={() =>
                       setEditorFontSize((current) =>
                         clampEditorFontSize(current - 1),
@@ -717,11 +725,11 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
                     aria-label="缩小正文字号"
                     title="缩小正文字号"
                   >
-                    <TextSizeDecreaseIcon className={styles.toolbarIcon} />
+                    <TextSizeDecreaseIcon className={editorStyles.toolbarIcon} />
                   </button>
                   <button
                     type="button"
-                    className={styles.toolbarIconButton}
+                    className={editorStyles.toolbarIconButton}
                     onClick={() =>
                       setEditorFontSize((current) =>
                         clampEditorFontSize(current + 1),
@@ -731,16 +739,16 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
                     aria-label="放大正文字号"
                     title="放大正文字号"
                   >
-                    <TextSizeIncreaseIcon className={styles.toolbarIcon} />
+                    <TextSizeIncreaseIcon className={editorStyles.toolbarIcon} />
                   </button>
                 </>
               }
             />
-            <p className={styles.editorShortcutHint}>{MARKDOWN_SHORTCUT_HINT}</p>
-            <div className={styles.editorContent}>
+            <p className={editorStyles.editorShortcutHint}>{MARKDOWN_SHORTCUT_HINT}</p>
+            <div className={editorStyles.editorContent}>
               <EditorContent
                 editor={editor}
-                className={styles.editorCanvas}
+                className={editorStyles.editorCanvas}
                 style={editorCanvasStyle}
               />
             </div>

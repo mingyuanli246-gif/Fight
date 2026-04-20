@@ -4,7 +4,7 @@ import {
   resolveLocalResourcePath,
   type LocalResourceResolutionResult,
 } from "./editorResources";
-import styles from "./NotebookWorkspace.module.css";
+import styles from "./NoteEditorSurface.module.css";
 
 interface ManagedResourceImageProps {
   resourcePath: string | null;

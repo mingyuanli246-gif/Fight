@@ -1,7 +1,7 @@
 import { mergeAttributes, Node } from "@tiptap/core";
 import type { NodeViewRendererProps } from "@tiptap/core";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
-import styles from "./NotebookWorkspace.module.css";
+import styles from "./NoteEditorSurface.module.css";
 import { renderMathToHtml } from "./mathRender";
 import {
   BLOCK_MATH_NODE_NAME,

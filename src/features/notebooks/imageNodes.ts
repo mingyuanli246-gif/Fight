@@ -5,7 +5,7 @@ import {
   MISSING_RESOURCE_MESSAGE,
   resolveLocalResourcePath,
 } from "./editorResources";
-import styles from "./NotebookWorkspace.module.css";
+import styles from "./NoteEditorSurface.module.css";
 
 export const NOTE_IMAGE_NODE_NAME = "noteImage";
 const NOTE_IMAGE_ATTRIBUTE = "data-note-image";

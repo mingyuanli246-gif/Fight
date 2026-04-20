@@ -5,7 +5,7 @@ import {
   getSelectedNoteImageDisplaySize,
   setSelectedNoteImageDisplaySize,
 } from "./editorCommands";
-import styles from "./NotebookWorkspace.module.css";
+import styles from "./NoteEditorSurface.module.css";
 
 interface RichTextToolbarProps {
   editor: Editor | null;

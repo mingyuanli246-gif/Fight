@@ -5,6 +5,10 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import {
+  DEFAULT_EDITOR_FONT_FAMILY,
+  applyEditorFontFamilyPreference,
+} from "../notebooks/editorTypography";
 import { loadAppSettings, saveAppSettings } from "../settings/commands";
 import type { ThemeName } from "./types";
 
@@ -29,6 +33,7 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
 
   useEffect(() => {
     isMountedRef.current = true;
+    applyEditorFontFamilyPreference(DEFAULT_EDITOR_FONT_FAMILY);
 
     void (async () => {
       try {
@@ -36,6 +41,7 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
 
         if (isMountedRef.current) {
           setTheme(settings.theme);
+          applyEditorFontFamilyPreference(settings.editorFontFamily);
         }
       } catch (error) {
         console.error("[theme] 读取持久化主题失败", error);

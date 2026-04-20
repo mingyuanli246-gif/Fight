@@ -1,0 +1,651 @@
+.editorPanelHeader {
+  min-height: var(--detail-header-min-height, 120px);
+  align-items: stretch;
+  position: relative;
+  padding: var(--detail-header-padding-top, 18px) 22px
+    var(--detail-header-padding-bottom, 14px);
+  box-sizing: border-box;
+  border-bottom: 0;
+  background: transparent;
+}
+
+.editorPanelHeader::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  background: var(--color-border-soft);
+}
+
+.editorHeader {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: auto 1fr auto;
+  align-items: end;
+  column-gap: 18px;
+  row-gap: 10px;
+  min-width: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.editorTitle {
+  margin: 0;
+  grid-column: 1;
+  grid-row: 1;
+  font-size: 24px;
+  line-height: 1.2;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.editorSubline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 12px;
+  grid-column: 1;
+  grid-row: 3;
+  min-width: 0;
+}
+
+.editorPath,
+.editorMeta {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+}
+
+.editorPath {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.editorMeta {
+  grid-column: 2;
+  grid-row: 3;
+  align-self: end;
+  justify-self: end;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.saveStatusBadge {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  min-height: 30px;
+  padding: 0 12px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid var(--color-border-soft);
+  border-radius: 999px;
+}
+
+.saveStatusDirty {
+  color: var(--color-accent-strong);
+  background: var(--color-accent-soft);
+}
+
+.saveStatusSaving {
+  color: #92400e;
+  background: rgba(251, 191, 36, 0.18);
+  border-color: rgba(251, 191, 36, 0.32);
+}
+
+.saveStatusSaved {
+  color: #166534;
+  background: rgba(187, 247, 208, 0.46);
+  border-color: rgba(34, 197, 94, 0.24);
+}
+
+.saveStatusError {
+  color: #991b1b;
+  background: rgba(254, 226, 226, 0.9);
+  border-color: rgba(248, 113, 113, 0.36);
+}
+
+.editorBody {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  min-height: 0;
+  flex: 1;
+  padding: 0;
+  background: transparent;
+  overflow: hidden;
+}
+
+.editorSurface {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  overflow: hidden;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  padding: 12px 22px;
+  border-bottom: 1px solid var(--color-border-soft);
+  background: transparent;
+}
+
+.toolbarGroup {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.toolbarUtilityGroup {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  padding-left: 10px;
+}
+
+.toolbarIconButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  min-height: 34px;
+  color: var(--color-text-primary);
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid var(--color-border-soft);
+  border-radius: 12px;
+  cursor: pointer;
+  transition:
+    transform 140ms ease,
+    background-color 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease,
+    opacity 140ms ease;
+}
+
+.toolbarIconButton:hover:enabled {
+  transform: translateY(-1px);
+  border-color: var(--color-border-strong);
+}
+
+.toolbarIconButton:active:enabled {
+  transform: translateY(0);
+  background: rgba(241, 245, 249, 0.94);
+}
+
+.toolbarIconButton:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+.toolbarIcon {
+  width: 18px;
+  height: 18px;
+}
+
+.toolbarButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  padding: 0 12px;
+  color: var(--color-text-primary);
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid var(--color-border-soft);
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition:
+    transform 140ms ease,
+    background-color 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease;
+}
+
+.toolbarButton:hover:enabled {
+  transform: translateY(-1px);
+  border-color: var(--color-border-strong);
+}
+
+.toolbarButton:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+.toolbarButtonActive {
+  color: var(--color-selected-foreground);
+  background: var(--color-accent-strong);
+  border-color: transparent;
+}
+
+.editorShortcutHint {
+  margin: 0;
+  flex-shrink: 0;
+  padding: 10px 22px 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--color-text-tertiary);
+  background: transparent;
+}
+
+.editorContent {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  padding: 0;
+  background: transparent;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.editorCanvas {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+.editorCanvas :global(.ProseMirror) {
+  flex: 1;
+  min-height: 100%;
+  outline: none;
+}
+
+.proseMirrorRoot,
+.editorDocument {
+  --editor-reading-width: 760px;
+  --editor-shell-max-width: 816px;
+  --editor-inline-padding: 28px;
+  --editor-top-padding: 24px;
+  --editor-bottom-padding: 180px;
+  min-height: 100%;
+  width: min(100%, var(--editor-shell-max-width));
+  max-width: var(--editor-shell-max-width);
+  margin: 0 auto;
+  padding: var(--editor-top-padding) var(--editor-inline-padding)
+    var(--editor-bottom-padding);
+  box-sizing: border-box;
+  color: #37352f;
+  outline: none;
+  font-size: var(--editor-font-size, 16px);
+  font-family:
+    var(
+      --editor-font-family,
+      Inter,
+      "PingFang SC",
+      "Hiragino Sans GB",
+      "Microsoft YaHei",
+      "Segoe UI",
+      sans-serif
+    );
+  white-space: pre-wrap;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.editorDocument {
+  min-height: 0;
+}
+
+.proseMirrorRoot > *:first-child,
+.editorDocument > *:first-child {
+  margin-top: 0;
+}
+
+.proseMirrorRoot > *:last-child,
+.editorDocument > *:last-child {
+  margin-bottom: 0;
+}
+
+.proseMirrorRoot h1,
+.editorDocument h1 {
+  margin: 0 0 0.68em;
+  font-size: 2em;
+  line-height: 1.28;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+}
+
+.proseMirrorRoot h2,
+.editorDocument h2 {
+  margin: 1.18em 0 0.56em;
+  font-size: 1.5em;
+  line-height: 1.38;
+  font-weight: 700;
+  letter-spacing: 0.006em;
+}
+
+.proseMirrorRoot p,
+.editorDocument p {
+  margin: 0 0 0.82em;
+  font-size: inherit;
+  line-height: 1.74;
+  letter-spacing: 0.005em;
+}
+
+.proseMirrorRoot ul,
+.proseMirrorRoot ol,
+.editorDocument ul,
+.editorDocument ol {
+  margin: 0 0 0.82em;
+  padding-left: 1.6em;
+}
+
+.proseMirrorRoot li,
+.editorDocument li {
+  line-height: 1.74;
+  letter-spacing: 0.005em;
+}
+
+.proseMirrorRoot li + li,
+.editorDocument li + li {
+  margin-top: 0.32em;
+}
+
+.proseMirrorRoot li > p,
+.editorDocument li > p {
+  margin: 0;
+}
+
+.proseMirrorRoot li > ul,
+.proseMirrorRoot li > ol,
+.editorDocument li > ul,
+.editorDocument li > ol {
+  margin-top: 0.36em;
+  margin-bottom: 0;
+}
+
+.proseMirrorRoot blockquote,
+.editorDocument blockquote {
+  margin: 0 0 0.82em;
+  padding-left: 1em;
+  border-left: 3px solid rgba(148, 163, 184, 0.42);
+  color: var(--color-text-secondary);
+}
+
+.proseMirrorRoot strong,
+.editorDocument strong {
+  font-weight: 800;
+}
+
+.proseMirrorRoot u,
+.editorDocument u {
+  text-decoration-skip-ink: none;
+  text-underline-offset: 4px;
+}
+
+.proseMirrorRoot p:empty::before,
+.proseMirrorRoot p.is-editor-empty:first-child::before {
+  content: "";
+  display: inline-block;
+}
+
+.searchHighlight {
+  color: inherit;
+  background: rgba(250, 204, 21, 0.28);
+  border-radius: 0.3em;
+  box-shadow: 0 0 0 1px rgba(250, 204, 21, 0.14);
+  animation: searchHighlightFade 5s ease forwards;
+}
+
+@keyframes searchHighlightFade {
+  0% {
+    background: rgba(250, 204, 21, 0.44);
+    box-shadow: 0 0 0 1px rgba(250, 204, 21, 0.24);
+  }
+
+  100% {
+    background: rgba(250, 204, 21, 0);
+    box-shadow: 0 0 0 1px rgba(250, 204, 21, 0);
+  }
+}
+
+.mathDialogOverlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(15, 23, 42, 0.28);
+  backdrop-filter: blur(6px);
+  z-index: 60;
+}
+
+.mathDialog {
+  width: min(560px, calc(100vw - 32px));
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 22px;
+  background: rgba(255, 255, 255, 0.98);
+  border: 1px solid var(--color-border-soft);
+  border-radius: 20px;
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.18);
+}
+
+.mathDialogHeader {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mathDialogTitle {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.4;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.mathDialogHint {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--color-text-secondary);
+}
+
+.mathDialogError {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  color: #991b1b;
+}
+
+.mathTextarea {
+  width: 100%;
+  min-height: 120px;
+  padding: 14px 16px;
+  color: var(--color-text-primary);
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid var(--color-border-soft);
+  border-radius: 16px;
+  outline: none;
+  resize: vertical;
+  font: inherit;
+  line-height: 1.7;
+}
+
+.mathTextarea:focus {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.18);
+}
+
+.mathNode {
+  cursor: pointer;
+  user-select: none;
+}
+
+.mathNodeInline {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  margin: 0 0.2em;
+  padding: 0.1em 0.35em;
+  border-radius: 10px;
+  vertical-align: middle;
+  transition:
+    box-shadow 140ms ease,
+    background-color 140ms ease;
+}
+
+.mathNodeBlock {
+  display: block;
+  margin: 1.1em 0;
+  padding: 16px;
+  background: rgba(248, 250, 252, 0.9);
+  border: 1px solid var(--color-border-soft);
+  border-radius: 16px;
+  transition:
+    box-shadow 140ms ease,
+    border-color 140ms ease;
+}
+
+.mathNodeSelected {
+  box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.2);
+}
+
+.mathNodeBlock :global(.katex-display) {
+  margin: 0;
+}
+
+.mathNodeError {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+  background: rgba(254, 226, 226, 0.78);
+  border: 1px solid rgba(248, 113, 113, 0.34);
+}
+
+.mathNodeErrorTitle {
+  font-size: 12px;
+  font-weight: 700;
+  color: #991b1b;
+}
+
+.mathNodeSource {
+  font-family:
+    "SFMono-Regular",
+    ui-monospace,
+    "Cascadia Code",
+    "Source Code Pro",
+    Menlo,
+    Consolas,
+    monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #7f1d1d;
+  word-break: break-word;
+}
+
+.mathNodeHint {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+}
+
+.noteImageNode {
+  --note-image-max-inline-size: 560px;
+  display: flex;
+  justify-content: center;
+  width: 100%;
+  margin: 1.1em 0;
+  cursor: pointer;
+}
+
+.noteImageNode[data-note-image-display-size="small"] {
+  --note-image-max-inline-size: 320px;
+}
+
+.noteImageNode[data-note-image-display-size="medium"] {
+  --note-image-max-inline-size: 460px;
+}
+
+.noteImageNode[data-note-image-display-size="large"] {
+  --note-image-max-inline-size: 680px;
+}
+
+.noteImageSelected {
+  filter: none;
+}
+
+.noteImageFrame {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  max-inline-size: min(100%, var(--note-image-max-inline-size));
+  min-height: 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  overflow: hidden;
+}
+
+.noteImageFrameError {
+  min-width: min(100%, 360px);
+  padding: 12px;
+  background: rgba(254, 242, 242, 0.92);
+  border: 1px solid rgba(248, 113, 113, 0.3);
+  border-radius: 18px;
+}
+
+.noteImageSelected .noteImageElement {
+  box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.2);
+}
+
+.noteImageElement {
+  display: block;
+  width: auto;
+  max-inline-size: min(100%, var(--note-image-max-inline-size));
+  max-width: 100%;
+  height: auto;
+  max-block-size: min(70vh, 640px);
+  border-radius: 14px;
+  object-fit: contain;
+}
+
+.noteImageLoading {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+}
+
+.noteImageFallback {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  padding: 18px;
+  text-align: left;
+}
+
+.noteImageFallbackTitle {
+  font-size: 13px;
+  line-height: 1.4;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.noteImageFallbackText {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+}

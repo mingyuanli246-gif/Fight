@@ -10,6 +10,15 @@ import { closeNotebookDatabase } from "../notebooks/db";
 import { ThemeContext } from "../theme/ThemeProvider";
 import { themeOptions } from "../theme/themeOptions";
 import {
+  DEFAULT_EDITOR_FONT_FAMILY,
+  EDITOR_FONT_FAMILY_OPTIONS,
+  NOTE_EDITOR_PREVIEW_HTML,
+  applyEditorFontFamilyPreference,
+  getEditorFontFamilyStack,
+  type EditorFontFamilyName,
+} from "../notebooks/editorTypography";
+import editorSurfaceStyles from "../notebooks/NoteEditorSurface.module.css";
+import {
   cleanupUnreferencedManagedResources,
   createBackup,
   getDataEnvironmentInfo,
@@ -212,6 +221,23 @@ export function SettingsWorkspace({
       invalidCount,
     };
   }, [backups]);
+
+  const selectedEditorFontFamily =
+    settings?.editorFontFamily ?? DEFAULT_EDITOR_FONT_FAMILY;
+
+  const editorPreviewStyle = useMemo(
+    () =>
+      ({
+        "--editor-font-size": "16px",
+        "--editor-font-family": getEditorFontFamilyStack(selectedEditorFontFamily),
+        "--editor-top-padding": "20px",
+        "--editor-bottom-padding": "24px",
+        "--editor-inline-padding": "24px",
+        "--editor-reading-width": "760px",
+        "--editor-shell-max-width": "808px",
+      }) as CSSProperties,
+    [selectedEditorFontFamily],
+  );
 
   useEffect(() => {
     setNotice(startupNotice);
@@ -561,6 +587,30 @@ export function SettingsWorkspace({
     );
   }
 
+  async function handleEditorFontFamilyChange(
+    nextFontFamily: EditorFontFamilyName,
+  ) {
+    try {
+      const nextSettings = await saveAppSettings({
+        editorFontFamily: nextFontFamily,
+      });
+      applyEditorFontFamilyPreference(nextSettings.editorFontFamily);
+      setSettings(nextSettings);
+      setNotice(buildNotice("info", `编辑器字体已切换为“${
+        EDITOR_FONT_FAMILY_OPTIONS.find(
+          (option) => option.value === nextSettings.editorFontFamily,
+        )?.label ?? "现代无衬线"
+      }”。`));
+    } catch (error) {
+      setNotice(
+        buildNotice(
+          "error",
+          getErrorMessage(error, "更新编辑器字体失败，请稍后重试。"),
+        ),
+      );
+    }
+  }
+
   async function handleCreateBackup() {
     setOperationState("creating");
     setConfirmRestoreFileName(null);
@@ -818,6 +868,56 @@ export function SettingsWorkspace({
             );
           })}
         </div>
+
+        <section className={styles.typographyPanel}>
+          <div className={styles.typographyHeader}>
+            <div>
+              <h4 className={styles.typographyTitle}>编辑器排版</h4>
+              <p className={styles.typographyDescription}>
+                字体族偏好会同步作用于正式编辑区和下方预览样本，方便直接比对中文正文的松紧、行长和段距。
+              </p>
+            </div>
+            <span className={styles.metaText}>
+              当前字体：{
+                EDITOR_FONT_FAMILY_OPTIONS.find(
+                  (option) => option.value === selectedEditorFontFamily,
+                )?.label ?? "现代无衬线"
+              }
+            </span>
+          </div>
+
+          <div className={styles.fontFamilyGrid}>
+            {EDITOR_FONT_FAMILY_OPTIONS.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                className={`${styles.fontFamilyButton} ${
+                  selectedEditorFontFamily === option.value
+                    ? styles.fontFamilyButtonActive
+                    : ""
+                }`}
+                disabled={isBusy || !settings}
+                onClick={() => void handleEditorFontFamilyChange(option.value)}
+                style={{ fontFamily: getEditorFontFamilyStack(option.value) }}
+              >
+                <div className={styles.fontFamilyMeta}>
+                  <p className={styles.fontFamilyLabel}>{option.label}</p>
+                  <p className={styles.fontFamilyDescription}>
+                    {option.description}
+                  </p>
+                </div>
+              </button>
+            ))}
+          </div>
+
+          <div className={styles.editorPreviewShell}>
+            <div
+              className={editorSurfaceStyles.editorDocument}
+              style={editorPreviewStyle}
+              dangerouslySetInnerHTML={{ __html: NOTE_EDITOR_PREVIEW_HTML }}
+            />
+          </div>
+        </section>
       </section>
 
       <div className={styles.grid}>
