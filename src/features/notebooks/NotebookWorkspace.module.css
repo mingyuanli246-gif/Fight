@@ -671,24 +671,30 @@
   margin-bottom: 0;
 }
 
-.editorCanvas :global(.ProseMirror p),
-.editorCanvas :global(.ProseMirror ul),
-.editorCanvas :global(.ProseMirror ol),
-.editorCanvas :global(.ProseMirror h1),
-.editorCanvas :global(.ProseMirror h2) {
-  margin: 0 0 14px;
-}
-
 .editorCanvas :global(.ProseMirror h1) {
-  font-size: 28px;
-  line-height: 1.25;
+  margin: 0 0 0.8em;
+  font-size: 2em;
+  line-height: 1.2;
   font-weight: 800;
 }
 
 .editorCanvas :global(.ProseMirror h2) {
-  font-size: 22px;
+  margin: 1.2em 0 0.5em;
+  font-size: 1.5em;
   line-height: 1.3;
-  font-weight: 800;
+  font-weight: 700;
+}
+
+.editorCanvas :global(.ProseMirror p) {
+  margin: 0 0 1.2em;
+  font-size: 16px;
+  line-height: 1.75;
+  letter-spacing: -0.011em;
+}
+
+.editorCanvas :global(.ProseMirror ul),
+.editorCanvas :global(.ProseMirror ol) {
+  margin: 0 0 1.2em;
 }
 
 .editorCanvas :global(.ProseMirror ul),
@@ -705,7 +711,8 @@
 }
 
 .editorCanvas :global(.ProseMirror u) {
-  text-underline-offset: 0.18em;
+  text-decoration-skip-ink: none;
+  text-underline-offset: 4px;
 }
 
 .mathNode {
