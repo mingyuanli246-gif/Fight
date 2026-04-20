@@ -42,7 +42,6 @@ import {
   createNotebookEditorExtensions,
   NOTE_EDITOR_ENABLED_INPUT_RULES,
 } from "./editorExtensions";
-import { MARKDOWN_SHORTCUT_HINT } from "./editorShortcuts";
 import {
   clearSearchHighlight,
   createSearchHighlightExtension,
@@ -834,7 +833,6 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
                 </>
               }
             />
-            <p className={editorStyles.editorShortcutHint}>{MARKDOWN_SHORTCUT_HINT}</p>
             <div className={editorStyles.editorContent}>
               <EditorContent
                 editor={editor}

@@ -1,22 +1,10 @@
 .editorPanelHeader {
   min-height: var(--detail-header-min-height, 120px);
   align-items: stretch;
-  position: relative;
   padding: var(--detail-header-padding-top, 18px) 22px
     var(--detail-header-padding-bottom, 14px);
   box-sizing: border-box;
-  border-bottom: 0;
   background: transparent;
-}
-
-.editorPanelHeader::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 1px;
-  background: var(--color-border-soft);
 }
 
 .editorHeader {
@@ -234,16 +222,6 @@
   border-color: transparent;
 }
 
-.editorShortcutHint {
-  margin: 0;
-  flex-shrink: 0;
-  padding: 10px 22px 0;
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--color-text-tertiary);
-  background: transparent;
-}
-
 .editorContent {
   min-height: 0;
   flex: 1;
@@ -271,7 +249,7 @@
   --editor-reading-width: 760px;
   --editor-shell-max-width: 816px;
   --editor-inline-padding: 28px;
-  --editor-top-padding: 24px;
+  --editor-top-padding: 14px;
   --editor-bottom-padding: 180px;
   min-height: 100%;
   width: min(100%, var(--editor-shell-max-width));
