@@ -172,7 +172,7 @@
   pointer-events: none;
 }
 
-.dateRow:hover:enabled {
+.dateRow:not(.dateRowSelected):hover:enabled {
   transform: scale(1.05);
   z-index: 1;
   background: rgba(248, 250, 252, 0.98);
@@ -192,9 +192,16 @@
 
 .dateRowSelected:hover:enabled {
   transform: scale(1.05);
+  border-color: rgba(96, 165, 250, 0.9);
+  background: var(--color-accent-soft);
+  color: color-mix(in srgb, var(--color-text-primary) 82%, #020617 18%);
+  box-shadow:
+    0 0 0 1px rgba(96, 165, 250, 0.22),
+    0 10px 22px rgba(96, 165, 250, 0.08);
+  z-index: 3;
 }
 
-.dateListHasSelection .dateRow:hover:enabled {
+.dateListHasSelection .dateRow:not(.dateRowSelected):hover:enabled {
   transform: scale(1.05);
   z-index: 1;
   background: rgba(248, 250, 252, 0.98);
@@ -203,6 +210,12 @@
 
 .dateListHasSelection .dateRowSelected:hover:enabled {
   transform: scale(1.05);
+  border-color: rgba(96, 165, 250, 0.9);
+  background: var(--color-accent-soft);
+  color: color-mix(in srgb, var(--color-text-primary) 82%, #020617 18%);
+  box-shadow:
+    0 0 0 1px rgba(96, 165, 250, 0.22),
+    0 10px 22px rgba(96, 165, 250, 0.08);
   z-index: 3;
 }
 

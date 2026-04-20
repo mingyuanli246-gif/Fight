@@ -4,7 +4,6 @@ import {
   ArrowLeftIcon,
   ChevronDownIcon,
   ChevronRightIcon,
-  MoreIcon,
 } from "./NotebookUiIcons";
 import { ItemActionMenu } from "./ItemActionMenu";
 import styles from "./NotebookWorkspaceShell.module.css";
@@ -379,23 +378,6 @@ export function NotebookTreePane({
                         </span>
                         <span className={styles.treeMeta}>{folderNotes.length} 个文件</span>
                       </span>
-                      <button
-                        type="button"
-                        className={styles.treeItemActionButton}
-                        aria-label={`打开 ${folder.name} 的操作菜单`}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          const rect = event.currentTarget.getBoundingClientRect();
-                          openContextMenu(
-                            { kind: "folder", value: folder },
-                            { x: rect.right - 164, y: rect.bottom + 8 },
-                          );
-                        }}
-                        onPointerDown={(event) => event.stopPropagation()}
-                        disabled={disabled}
-                      >
-                        <MoreIcon className={styles.treeItemActionIcon} />
-                      </button>
                     </button>
                   )}
 
@@ -465,7 +447,7 @@ export function NotebookTreePane({
                                   disabled={disabled}
                                 >
                                   <span className={styles.treeLabelWrap}>
-                                    <span
+                                  <span
                                       className={styles.treeLabel}
                                       onDoubleClick={(event) => {
                                         event.stopPropagation();
@@ -476,24 +458,6 @@ export function NotebookTreePane({
                                     </span>
                                     <span className={styles.treeMeta}>文件</span>
                                   </span>
-                                  <button
-                                    type="button"
-                                    className={styles.treeItemActionButton}
-                                    aria-label={`打开 ${note.title} 的操作菜单`}
-                                    onClick={(event) => {
-                                      event.stopPropagation();
-                                      const rect =
-                                        event.currentTarget.getBoundingClientRect();
-                                      openContextMenu(
-                                        { kind: "note", value: note },
-                                        { x: rect.right - 164, y: rect.bottom + 8 },
-                                      );
-                                    }}
-                                    onPointerDown={(event) => event.stopPropagation()}
-                                    disabled={disabled}
-                                  >
-                                    <MoreIcon className={styles.treeItemActionIcon} />
-                                  </button>
                                 </button>
                               )}
                             </li>
@@ -586,23 +550,6 @@ export function NotebookTreePane({
                               </span>
                               <span className={styles.treeMeta}>尚未归入文件夹</span>
                             </span>
-                            <button
-                              type="button"
-                              className={styles.treeItemActionButton}
-                              aria-label={`打开 ${note.title} 的操作菜单`}
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                const rect = event.currentTarget.getBoundingClientRect();
-                                openContextMenu(
-                                  { kind: "note", value: note },
-                                  { x: rect.right - 164, y: rect.bottom + 8 },
-                                );
-                              }}
-                              onPointerDown={(event) => event.stopPropagation()}
-                              disabled={disabled}
-                            >
-                              <MoreIcon className={styles.treeItemActionIcon} />
-                            </button>
                           </button>
                         )}
                       </li>

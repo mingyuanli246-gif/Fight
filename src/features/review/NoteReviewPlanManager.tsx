@@ -159,6 +159,7 @@ export const NoteReviewPlanManager = forwardRef<
   const hasLoadedRef = useRef(false);
   const lastDirtyRef = useRef(false);
   const editScopeRef = useRef<HTMLDivElement | null>(null);
+  const managerRef = useRef<HTMLElement | null>(null);
   const editingIndex = editSession?.index ?? null;
 
   const savedDates = savedSchedule?.dates ?? EMPTY_REVIEW_DATES;
@@ -309,9 +310,21 @@ export const NoteReviewPlanManager = forwardRef<
     setErrorMessage(null);
   }
 
-  function handleSelect(index: number) {
-    setSelectedIndex(index);
+  function handleSelect(index: number, clickCount: number) {
+    if (clickCount !== 1) {
+      return;
+    }
+
+    setSelectedIndex((current) => (current === index ? null : index));
     setErrorMessage(null);
+  }
+
+  function clearSelection() {
+    setSelectedIndex(null);
+  }
+
+  function handleDateDoubleClick(index: number) {
+    startEditingDate(index);
   }
 
   function updateEditDraft(part: keyof DateEditDraft, value: string) {
@@ -434,6 +447,32 @@ export const NoteReviewPlanManager = forwardRef<
       window.removeEventListener("pointerdown", handlePointerDown, true);
     };
   }, [editSession, resolveTransientInteraction]);
+
+  useEffect(() => {
+    if (selectedIndex === null || editSession !== null) {
+      return;
+    }
+
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target as Node | null;
+
+      if (
+        target &&
+        managerRef.current?.contains(target) &&
+        target instanceof HTMLElement &&
+        target.closest("[data-review-selection-preserve='true']")
+      ) {
+        return;
+      }
+
+      clearSelection();
+    }
+
+    window.addEventListener("pointerdown", handlePointerDown, true);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown, true);
+    };
+  }, [editSession, selectedIndex]);
 
   function handleAddDate() {
     if (disabled || isBusy || !isScheduleActive || editingIndex !== null) {
@@ -582,7 +621,7 @@ export const NoteReviewPlanManager = forwardRef<
   );
 
   return (
-    <section className={styles.manager}>
+    <section ref={managerRef} className={styles.manager}>
       <div className={styles.header}>
         <p className={styles.label}>复习计划</p>
       </div>
@@ -595,6 +634,7 @@ export const NoteReviewPlanManager = forwardRef<
           <button
             type="button"
             className={styles.activateButton}
+            data-review-selection-preserve="true"
             onClick={() => {
               void handleActivate();
             }}
@@ -605,14 +645,6 @@ export const NoteReviewPlanManager = forwardRef<
         </div>
       ) : (
         <>
-          <button
-            type="button"
-            className={styles.activateButtonDisabled}
-            disabled
-          >
-            执行复习计划
-          </button>
-
           <div className={styles.listBlock}>
             <ul
               className={`${styles.dateList} ${
@@ -628,6 +660,7 @@ export const NoteReviewPlanManager = forwardRef<
                     {isEditing ? (
                       <div
                         ref={editScopeRef}
+                        data-review-selection-preserve="true"
                         className={`${styles.dateRow} ${styles.dateRowEditing}`}
                       >
                         <input
@@ -703,8 +736,9 @@ export const NoteReviewPlanManager = forwardRef<
                         className={`${styles.dateRow} ${
                           isSelected ? styles.dateRowSelected : ""
                         }`}
-                        onClick={() => handleSelect(index)}
-                        onDoubleClick={() => startEditingDate(index)}
+                        data-review-selection-preserve="true"
+                        onClick={(event) => handleSelect(index, event.detail)}
+                        onDoubleClick={() => handleDateDoubleClick(index)}
                         disabled={disabled || isBusy}
                       >
                         {formatDisplayDate(dateValue)}
@@ -719,6 +753,7 @@ export const NoteReviewPlanManager = forwardRef<
               <button
                 type="button"
                 className={styles.actionIconButton}
+                data-review-selection-preserve="true"
                 onClick={handleAddDate}
                 disabled={disabled || isBusy || editingIndex !== null}
                 aria-label="新增复习日期"
@@ -728,6 +763,7 @@ export const NoteReviewPlanManager = forwardRef<
               <button
                 type="button"
                 className={styles.actionIconButton}
+                data-review-selection-preserve="true"
                 onClick={() => {
                   void handleDeleteDate();
                 }}
@@ -743,6 +779,7 @@ export const NoteReviewPlanManager = forwardRef<
                 <button
                   type="button"
                   className={styles.cancelButton}
+                  data-review-selection-preserve="true"
                   onClick={handleCancelPendingChanges}
                   disabled={disabled || isBusy}
                 >
@@ -751,6 +788,7 @@ export const NoteReviewPlanManager = forwardRef<
                 <button
                   type="button"
                   className={styles.saveButton}
+                  data-review-selection-preserve="true"
                   onClick={() => {
                     void savePendingChanges();
                   }}
