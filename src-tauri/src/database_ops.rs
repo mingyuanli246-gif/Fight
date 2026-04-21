@@ -30,6 +30,7 @@ const APP_META_KEY_REVIEW_FEATURE_REBUILD_V1_DONE: &str = "review_feature_rebuil
 const APP_META_KEY_REVIEW_SCHEDULE_DIRTY_NOTE_IDS: &str = "review_schedule_dirty_note_ids";
 const DEFAULT_REVIEW_PLAN_NAME: &str = "系统默认计划";
 const DEFAULT_REVIEW_STEP_OFFSETS: [i64; 4] = [2, 5, 10, 18];
+const LEGACY_RECOVERY_FOLDER_NAME: &str = "未归档迁移";
 const TAG_COLOR_PALETTE: [&str; 8] = [
     "#2563EB", "#DC2626", "#CA8A04", "#059669", "#7C3AED", "#DB2777", "#0891B2", "#EA580C",
 ];
@@ -40,6 +41,7 @@ pub struct NotebookRecord {
     pub id: i64,
     pub name: String,
     pub cover_image_path: Option<String>,
+    pub custom_sort_order: i64,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -62,6 +64,7 @@ pub struct NoteRecord {
     pub id: i64,
     pub notebook_id: i64,
     pub folder_id: Option<i64>,
+    pub sort_order: i64,
     pub title: String,
     pub content_plaintext: Option<String>,
     pub created_at: String,
@@ -403,6 +406,7 @@ fn fetch_note_by_id(connection: &Connection, note_id: i64) -> Result<NoteRecord,
                 id,
                 notebook_id,
                 folder_id,
+                sort_order,
                 title,
                 content_plaintext,
                 created_at,
@@ -416,10 +420,11 @@ fn fetch_note_by_id(connection: &Connection, note_id: i64) -> Result<NoteRecord,
                     id: row.get(0)?,
                     notebook_id: row.get(1)?,
                     folder_id: row.get(2)?,
-                    title: row.get(3)?,
-                    content_plaintext: row.get(4)?,
-                    created_at: row.get(5)?,
-                    updated_at: row.get(6)?,
+                    sort_order: row.get(3)?,
+                    title: row.get(4)?,
+                    content_plaintext: row.get(5)?,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
                 })
             },
         )
@@ -437,6 +442,7 @@ fn fetch_notebook_by_id(
                 id,
                 name,
                 cover_image_path,
+                custom_sort_order,
                 created_at,
                 updated_at
               FROM notebooks
@@ -448,8 +454,9 @@ fn fetch_notebook_by_id(
                     id: row.get(0)?,
                     name: row.get(1)?,
                     cover_image_path: row.get(2)?,
-                    created_at: row.get(3)?,
-                    updated_at: row.get(4)?,
+                    custom_sort_order: row.get(3)?,
+                    created_at: row.get(4)?,
+                    updated_at: row.get(5)?,
                 })
             },
         )
@@ -506,6 +513,274 @@ fn fetch_folder_by_id(connection: &Connection, folder_id: i64) -> Result<FolderR
         .map_err(|error| to_command_error("读取文件夹", error))
 }
 
+fn notebook_exists(connection: &Connection, notebook_id: i64) -> Result<bool, String> {
+    connection
+        .query_row(
+            "SELECT 1 FROM notebooks WHERE id = ?1 LIMIT 1",
+            [notebook_id],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|error| to_command_error("校验笔记本是否存在", error))
+        .map(|value| value.is_some())
+}
+
+fn fetch_all_notebook_ids(connection: &Connection) -> Result<Vec<i64>, String> {
+    let mut statement = connection
+        .prepare(
+            "
+              SELECT id
+              FROM notebooks
+              ORDER BY custom_sort_order ASC, created_at ASC, id ASC
+            ",
+        )
+        .map_err(|error| to_command_error("读取笔记本顺序", error))?;
+
+    let rows = statement
+        .query_map([], |row| row.get::<_, i64>(0))
+        .map_err(|error| to_command_error("读取笔记本顺序", error))?;
+
+    let mut notebook_ids = Vec::new();
+    for row in rows {
+        notebook_ids.push(row.map_err(|error| to_command_error("读取笔记本顺序", error))?);
+    }
+
+    Ok(notebook_ids)
+}
+
+fn fetch_top_level_folder_ids(
+    connection: &Connection,
+    notebook_id: i64,
+) -> Result<Vec<i64>, String> {
+    let mut statement = connection
+        .prepare(
+            "
+              SELECT id
+              FROM folders
+              WHERE notebook_id = ?1 AND parent_folder_id IS NULL
+              ORDER BY sort_order ASC, created_at ASC, id ASC
+            ",
+        )
+        .map_err(|error| to_command_error("读取文件夹顺序", error))?;
+
+    let rows = statement
+        .query_map([notebook_id], |row| row.get::<_, i64>(0))
+        .map_err(|error| to_command_error("读取文件夹顺序", error))?;
+
+    let mut folder_ids = Vec::new();
+    for row in rows {
+        folder_ids.push(row.map_err(|error| to_command_error("读取文件夹顺序", error))?);
+    }
+
+    Ok(folder_ids)
+}
+
+fn fetch_note_ids_by_folder(connection: &Connection, folder_id: i64) -> Result<Vec<i64>, String> {
+    let mut statement = connection
+        .prepare(
+            "
+              SELECT id
+              FROM notes
+              WHERE folder_id = ?1
+              ORDER BY sort_order ASC, created_at ASC, id ASC
+            ",
+        )
+        .map_err(|error| to_command_error("读取文件顺序", error))?;
+
+    let rows = statement
+        .query_map([folder_id], |row| row.get::<_, i64>(0))
+        .map_err(|error| to_command_error("读取文件顺序", error))?;
+
+    let mut note_ids = Vec::new();
+    for row in rows {
+        note_ids.push(row.map_err(|error| to_command_error("读取文件顺序", error))?);
+    }
+
+    Ok(note_ids)
+}
+
+fn assign_notebook_custom_sort_orders(
+    connection: &Connection,
+    notebook_ids: &[i64],
+) -> Result<(), String> {
+    for (index, notebook_id) in notebook_ids.iter().enumerate() {
+        connection
+            .execute(
+                "
+                  UPDATE notebooks
+                  SET custom_sort_order = ?1
+                  WHERE id = ?2
+                ",
+                params![index as i64, notebook_id],
+            )
+            .map_err(|error| to_command_error("写入笔记本顺序", error))?;
+    }
+
+    Ok(())
+}
+
+fn assign_folder_sort_orders(connection: &Connection, folder_ids: &[i64]) -> Result<(), String> {
+    for (index, folder_id) in folder_ids.iter().enumerate() {
+        connection
+            .execute(
+                "
+                  UPDATE folders
+                  SET parent_folder_id = NULL, sort_order = ?1
+                  WHERE id = ?2
+                ",
+                params![index as i64, folder_id],
+            )
+            .map_err(|error| to_command_error("写入文件夹顺序", error))?;
+    }
+
+    Ok(())
+}
+
+fn assign_note_sort_orders(connection: &Connection, note_ids: &[i64]) -> Result<(), String> {
+    for (index, note_id) in note_ids.iter().enumerate() {
+        connection
+            .execute(
+                "
+                  UPDATE notes
+                  SET sort_order = ?1
+                  WHERE id = ?2
+                ",
+                params![index as i64, note_id],
+            )
+            .map_err(|error| to_command_error("写入文件顺序", error))?;
+    }
+
+    Ok(())
+}
+
+fn validate_reorder_ids(
+    current_ids: &[i64],
+    next_ids: &[i64],
+    incomplete_message: &str,
+    invalid_message: &str,
+) -> Result<(), String> {
+    if current_ids.len() != next_ids.len() {
+        return Err(incomplete_message.to_string());
+    }
+
+    let current_set = current_ids.iter().copied().collect::<BTreeSet<_>>();
+    let next_set = next_ids.iter().copied().collect::<BTreeSet<_>>();
+
+    if next_set.len() != next_ids.len() || current_set != next_set {
+        return Err(invalid_message.to_string());
+    }
+
+    Ok(())
+}
+
+fn create_unique_name(base_name: &str, existing_values: &BTreeSet<String>) -> String {
+    if !existing_values.contains(base_name) {
+        return base_name.to_string();
+    }
+
+    let mut index = 2;
+
+    loop {
+        let candidate = format!("{base_name} {index}");
+        if !existing_values.contains(&candidate) {
+            return candidate;
+        }
+        index += 1;
+    }
+}
+
+fn fetch_notebook_folder_names(
+    connection: &Connection,
+    notebook_id: i64,
+) -> Result<BTreeSet<String>, String> {
+    let mut statement = connection
+        .prepare(
+            "
+              SELECT name
+              FROM folders
+              WHERE notebook_id = ?1
+            ",
+        )
+        .map_err(|error| to_command_error("读取文件夹名称", error))?;
+
+    let rows = statement
+        .query_map([notebook_id], |row| row.get::<_, String>(0))
+        .map_err(|error| to_command_error("读取文件夹名称", error))?;
+
+    let mut names = BTreeSet::new();
+    for row in rows {
+        names.insert(row.map_err(|error| to_command_error("读取文件夹名称", error))?);
+    }
+
+    Ok(names)
+}
+
+fn fetch_notebook_folder_ids_in_tree_order(
+    connection: &Connection,
+    notebook_id: i64,
+) -> Result<Vec<i64>, String> {
+    let mut statement = connection
+        .prepare(
+            "
+              WITH RECURSIVE folder_tree(id, path) AS (
+                SELECT
+                  id,
+                  printf('%08d:%08d', sort_order, id) AS path
+                FROM folders
+                WHERE notebook_id = ?1 AND parent_folder_id IS NULL
+                UNION ALL
+                SELECT
+                  child.id,
+                  folder_tree.path || '/' || printf('%08d:%08d', child.sort_order, child.id)
+                FROM folders AS child
+                INNER JOIN folder_tree ON folder_tree.id = child.parent_folder_id
+              )
+              SELECT id
+              FROM folder_tree
+              ORDER BY path ASC
+            ",
+        )
+        .map_err(|error| to_command_error("读取文件夹层级顺序", error))?;
+
+    let rows = statement
+        .query_map([notebook_id], |row| row.get::<_, i64>(0))
+        .map_err(|error| to_command_error("读取文件夹层级顺序", error))?;
+
+    let mut folder_ids = Vec::new();
+    for row in rows {
+        folder_ids.push(row.map_err(|error| to_command_error("读取文件夹层级顺序", error))?);
+    }
+
+    Ok(folder_ids)
+}
+
+fn fetch_orphan_note_ids_by_notebook(
+    connection: &Connection,
+    notebook_id: i64,
+) -> Result<Vec<i64>, String> {
+    let mut statement = connection
+        .prepare(
+            "
+              SELECT id
+              FROM notes
+              WHERE notebook_id = ?1 AND folder_id IS NULL
+              ORDER BY created_at ASC, id ASC
+            ",
+        )
+        .map_err(|error| to_command_error("读取未归档文件", error))?;
+
+    let rows = statement
+        .query_map([notebook_id], |row| row.get::<_, i64>(0))
+        .map_err(|error| to_command_error("读取未归档文件", error))?;
+
+    let mut note_ids = Vec::new();
+    for row in rows {
+        note_ids.push(row.map_err(|error| to_command_error("读取未归档文件", error))?);
+    }
+
+    Ok(note_ids)
+}
+
 fn create_folder_tx_internal(
     connection: &mut Connection,
     notebook_id: i64,
@@ -515,30 +790,20 @@ fn create_folder_tx_internal(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| to_command_error("开启创建文件夹事务", error))?;
 
-    let notebook_exists = transaction
-        .query_row(
-            "SELECT 1 FROM notebooks WHERE id = ?1 LIMIT 1",
-            [notebook_id],
-            |_| Ok(()),
-        )
-        .optional()
-        .map_err(|error| to_command_error("校验笔记本是否存在", error))?;
-
-    if notebook_exists.is_none() {
+    if !notebook_exists(&transaction, notebook_id)? {
         return Err("目标笔记本不存在。".to_string());
     }
 
-    let sort_order = transaction
-        .query_row(
+    transaction
+        .execute(
             "
-              SELECT COALESCE(MAX(sort_order), -1) + 1
-              FROM folders
+              UPDATE folders
+              SET sort_order = sort_order + 1
               WHERE notebook_id = ?1 AND parent_folder_id IS NULL
             ",
             [notebook_id],
-            |row| row.get::<_, i64>(0),
         )
-        .map_err(|error| to_command_error("计算文件夹排序", error))?;
+        .map_err(|error| to_command_error("调整文件夹排序", error))?;
 
     transaction
         .execute(
@@ -546,7 +811,7 @@ fn create_folder_tx_internal(
               INSERT INTO folders (notebook_id, parent_folder_id, name, sort_order)
               VALUES (?1, NULL, ?2, ?3)
             ",
-            params![notebook_id, name, sort_order],
+            params![notebook_id, name, 0_i64],
         )
         .map_err(|error| to_command_error("创建文件夹", error))?;
 
@@ -556,6 +821,40 @@ fn create_folder_tx_internal(
         .map_err(|error| to_command_error("提交创建文件夹事务", error))?;
 
     fetch_folder_by_id(connection, folder_id)
+}
+
+fn create_notebook_tx_internal(
+    connection: &mut Connection,
+    name: &str,
+) -> Result<NotebookRecord, String> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| to_command_error("开启创建笔记本事务", error))?;
+
+    let custom_sort_order = transaction
+        .query_row(
+            "SELECT COALESCE(MAX(custom_sort_order), -1) + 1 FROM notebooks",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| to_command_error("计算笔记本排序", error))?;
+
+    transaction
+        .execute(
+            "
+              INSERT INTO notebooks (name, cover_image_path, custom_sort_order)
+              VALUES (?1, NULL, ?2)
+            ",
+            params![name, custom_sort_order],
+        )
+        .map_err(|error| to_command_error("创建笔记本", error))?;
+
+    let notebook_id = transaction.last_insert_rowid();
+    transaction
+        .commit()
+        .map_err(|error| to_command_error("提交创建笔记本事务", error))?;
+
+    fetch_notebook_by_id(connection, notebook_id)
 }
 
 fn ensure_note_exists(connection: &Connection, note_id: i64) -> Result<(), String> {
@@ -1381,13 +1680,23 @@ fn create_note_tx_internal(
     ensure_note_search_ready_internal(connection)?;
 
     let transaction = connection
-        .transaction()
+        .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| to_command_error("开启创建文件事务", error))?;
     transaction
         .execute(
             "
-              INSERT INTO notes (notebook_id, folder_id, title, content_plaintext)
-              VALUES (?1, ?2, ?3, NULL)
+              UPDATE notes
+              SET sort_order = sort_order + 1
+              WHERE folder_id = ?1
+            ",
+            [folder_id],
+        )
+        .map_err(|error| to_command_error("调整文件排序", error))?;
+    transaction
+        .execute(
+            "
+              INSERT INTO notes (notebook_id, folder_id, sort_order, title, content_plaintext)
+              VALUES (?1, ?2, 0, ?3, NULL)
             ",
             params![notebook_id, folder_id, title],
         )
@@ -1406,6 +1715,193 @@ fn create_note_tx_internal(
     transaction
         .commit()
         .map_err(|error| to_command_error("提交创建文件事务", error))?;
+
+    fetch_note_by_id(connection, note_id)
+}
+
+fn ensure_notebook_tree_constraints_tx_internal(connection: &mut Connection) -> Result<(), String> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| to_command_error("开启修复笔记结构事务", error))?;
+
+    let notebook_ids = fetch_all_notebook_ids(&transaction)?;
+
+    for notebook_id in notebook_ids {
+        let mut ordered_folder_ids =
+            fetch_notebook_folder_ids_in_tree_order(&transaction, notebook_id)?;
+        let orphan_note_ids = fetch_orphan_note_ids_by_notebook(&transaction, notebook_id)?;
+
+        transaction
+            .execute(
+                "
+                  UPDATE folders
+                  SET parent_folder_id = NULL
+                  WHERE notebook_id = ?1 AND parent_folder_id IS NOT NULL
+                ",
+                [notebook_id],
+            )
+            .map_err(|error| to_command_error("拍平旧文件夹结构", error))?;
+
+        if !orphan_note_ids.is_empty() {
+            let existing_names = fetch_notebook_folder_names(&transaction, notebook_id)?;
+            let recovery_folder_name =
+                create_unique_name(LEGACY_RECOVERY_FOLDER_NAME, &existing_names);
+
+            transaction
+                .execute(
+                    "
+                      INSERT INTO folders (notebook_id, parent_folder_id, name, sort_order)
+                      VALUES (?1, NULL, ?2, ?3)
+                    ",
+                    params![notebook_id, recovery_folder_name, ordered_folder_ids.len() as i64],
+                )
+                .map_err(|error| to_command_error("创建恢复文件夹", error))?;
+
+            let recovery_folder_id = transaction.last_insert_rowid();
+            ordered_folder_ids.push(recovery_folder_id);
+
+            for note_id in &orphan_note_ids {
+                transaction
+                    .execute(
+                        "
+                          UPDATE notes
+                          SET folder_id = ?1
+                          WHERE id = ?2
+                        ",
+                        params![recovery_folder_id, note_id],
+                    )
+                    .map_err(|error| to_command_error("迁移未归档文件", error))?;
+            }
+
+            assign_note_sort_orders(&transaction, &orphan_note_ids)?;
+        }
+
+        assign_folder_sort_orders(&transaction, &ordered_folder_ids)?;
+
+        for folder_id in ordered_folder_ids {
+            let note_ids = fetch_note_ids_by_folder(&transaction, folder_id)?;
+            assign_note_sort_orders(&transaction, &note_ids)?;
+        }
+    }
+
+    transaction
+        .commit()
+        .map_err(|error| to_command_error("提交修复笔记结构事务", error))
+}
+
+fn reorder_notebooks_tx_internal(
+    connection: &mut Connection,
+    ordered_notebook_ids: &[i64],
+) -> Result<(), String> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| to_command_error("开启保存笔记本排序事务", error))?;
+    let current_notebook_ids = fetch_all_notebook_ids(&transaction)?;
+
+    validate_reorder_ids(
+        &current_notebook_ids,
+        ordered_notebook_ids,
+        "笔记本顺序数据不完整。",
+        "笔记本顺序数据无效。",
+    )?;
+    assign_notebook_custom_sort_orders(&transaction, ordered_notebook_ids)?;
+
+    transaction
+        .commit()
+        .map_err(|error| to_command_error("提交保存笔记本排序事务", error))
+}
+
+fn reorder_folders_tx_internal(
+    connection: &mut Connection,
+    notebook_id: i64,
+    ordered_folder_ids: &[i64],
+) -> Result<(), String> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| to_command_error("开启保存文件夹排序事务", error))?;
+
+    if !notebook_exists(&transaction, notebook_id)? {
+        return Err("目标笔记本不存在。".to_string());
+    }
+
+    let current_folder_ids = fetch_top_level_folder_ids(&transaction, notebook_id)?;
+    validate_reorder_ids(
+        &current_folder_ids,
+        ordered_folder_ids,
+        "文件夹顺序数据不完整。",
+        "文件夹顺序数据无效。",
+    )?;
+    assign_folder_sort_orders(&transaction, ordered_folder_ids)?;
+
+    transaction
+        .commit()
+        .map_err(|error| to_command_error("提交保存文件夹排序事务", error))
+}
+
+fn move_note_tx_internal(
+    connection: &mut Connection,
+    note_id: i64,
+    target_folder_id: i64,
+    target_index: usize,
+) -> Result<NoteRecord, String> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| to_command_error("开启移动文件事务", error))?;
+
+    let (note_notebook_id, source_folder_id) = transaction
+        .query_row(
+            "
+              SELECT notebook_id, folder_id
+              FROM notes
+              WHERE id = ?1
+            ",
+            [note_id],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?)),
+        )
+        .optional()
+        .map_err(|error| to_command_error("读取目标文件", error))?
+        .ok_or_else(|| "目标文件不存在。".to_string())?;
+
+    ensure_folder_belongs_to_notebook(&transaction, target_folder_id, note_notebook_id)?;
+
+    let mut target_note_ids = fetch_note_ids_by_folder(&transaction, target_folder_id)?;
+
+    if source_folder_id == Some(target_folder_id) {
+        target_note_ids.retain(|current_id| *current_id != note_id);
+        if target_index > target_note_ids.len() {
+            return Err("目标插入位置无效。".to_string());
+        }
+        target_note_ids.insert(target_index, note_id);
+        assign_note_sort_orders(&transaction, &target_note_ids)?;
+    } else {
+        if target_index > target_note_ids.len() {
+            return Err("目标插入位置无效。".to_string());
+        }
+
+        if let Some(source_folder_id) = source_folder_id {
+            let mut source_note_ids = fetch_note_ids_by_folder(&transaction, source_folder_id)?;
+            source_note_ids.retain(|current_id| *current_id != note_id);
+            assign_note_sort_orders(&transaction, &source_note_ids)?;
+        }
+
+        transaction
+            .execute(
+                "
+                  UPDATE notes
+                  SET folder_id = ?1
+                  WHERE id = ?2
+                ",
+                params![target_folder_id, note_id],
+            )
+            .map_err(|error| to_command_error("更新文件归属", error))?;
+
+        target_note_ids.insert(target_index, note_id);
+        assign_note_sort_orders(&transaction, &target_note_ids)?;
+    }
+
+    transaction
+        .commit()
+        .map_err(|error| to_command_error("提交移动文件事务", error))?;
 
     fetch_note_by_id(connection, note_id)
 }
@@ -2719,6 +3215,12 @@ pub fn create_note_tx(
 }
 
 #[tauri::command]
+pub fn create_notebook_tx(app: AppHandle, name: String) -> Result<NotebookRecord, String> {
+    let mut connection = open_database_connection(&app)?;
+    create_notebook_tx_internal(&mut connection, &name)
+}
+
+#[tauri::command]
 pub fn create_folder_tx(
     app: AppHandle,
     notebook_id: i64,
@@ -2726,6 +3228,42 @@ pub fn create_folder_tx(
 ) -> Result<FolderRecord, String> {
     let mut connection = open_database_connection(&app)?;
     create_folder_tx_internal(&mut connection, notebook_id, &name)
+}
+
+#[tauri::command]
+pub fn ensure_notebook_tree_constraints_tx(app: AppHandle) -> Result<(), String> {
+    let mut connection = open_database_connection(&app)?;
+    ensure_notebook_tree_constraints_tx_internal(&mut connection)
+}
+
+#[tauri::command]
+pub fn reorder_notebooks_tx(
+    app: AppHandle,
+    ordered_notebook_ids: Vec<i64>,
+) -> Result<(), String> {
+    let mut connection = open_database_connection(&app)?;
+    reorder_notebooks_tx_internal(&mut connection, &ordered_notebook_ids)
+}
+
+#[tauri::command]
+pub fn reorder_folders_tx(
+    app: AppHandle,
+    notebook_id: i64,
+    ordered_folder_ids: Vec<i64>,
+) -> Result<(), String> {
+    let mut connection = open_database_connection(&app)?;
+    reorder_folders_tx_internal(&mut connection, notebook_id, &ordered_folder_ids)
+}
+
+#[tauri::command]
+pub fn move_note_tx(
+    app: AppHandle,
+    note_id: i64,
+    target_folder_id: i64,
+    target_index: usize,
+) -> Result<NoteRecord, String> {
+    let mut connection = open_database_connection(&app)?;
+    move_note_tx_internal(&mut connection, note_id, target_folder_id, target_index)
 }
 
 #[tauri::command]
@@ -2947,13 +3485,17 @@ mod tests {
         cleanup_candidate_unreferenced_managed_resources,
         cleanup_unreferenced_managed_resources_internal, clear_notebook_cover_image_tx_internal,
         collect_managed_resource_paths_for_folder_subtree, collect_managed_resource_paths_for_notebook,
-        create_folder_tx_internal, create_note_tx_internal, create_review_plan_tx_internal,
+        create_folder_tx_internal, create_note_tx_internal, create_notebook_tx_internal,
+        create_review_plan_tx_internal,
         delete_folder_tx_internal, delete_note_tx_internal, delete_notebook_tx_internal,
         delete_review_plan_tx_internal,
         ensure_app_meta_table, ensure_note_search_ready_internal, ensure_note_search_table,
+        ensure_notebook_tree_constraints_tx_internal,
         ensure_review_feature_ready_internal,
         extract_indexable_plain_text, extract_note_image_resource_paths, rebuild_note_search_index_internal,
+        move_note_tx_internal,
         rename_review_plan_tx_internal, set_review_task_completed_tx_internal,
+        reorder_folders_tx_internal, reorder_notebooks_tx_internal,
         save_note_review_schedule_tx_internal, set_note_review_schedule_dirty_tx_internal,
         today_local_date_key, update_notebook_cover_image_tx_internal,
         APP_META_KEY_REVIEW_FEATURE_REBUILD_V1_DONE, APP_META_KEY_REVIEW_SCHEDULE_DIRTY_NOTE_IDS,
@@ -2977,6 +3519,7 @@ mod tests {
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
                   name TEXT NOT NULL,
                   cover_image_path TEXT,
+                  custom_sort_order INTEGER NOT NULL DEFAULT 0,
                   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
@@ -2995,6 +3538,7 @@ mod tests {
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
                   notebook_id INTEGER NOT NULL,
                   folder_id INTEGER,
+                  sort_order INTEGER NOT NULL DEFAULT 0,
                   title TEXT NOT NULL,
                   content_plaintext TEXT,
                   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -3419,12 +3963,66 @@ mod tests {
         for title in ["文件一", "文件二", "文件三"] {
             let note = create_note_tx_internal(&mut connection, 1, 1, title).expect("create note");
             assert_eq!(note.title, title);
+            assert_eq!(note.sort_order, 0);
         }
 
         let count: i64 = connection
             .query_row("SELECT COUNT(*) FROM notes", [], |row| row.get(0))
             .expect("count notes");
         assert_eq!(count, 3);
+
+        let ordered_titles = connection
+            .prepare(
+                "SELECT title FROM notes WHERE folder_id = 1 ORDER BY sort_order ASC, id ASC",
+            )
+            .expect("prepare ordered notes")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query ordered notes")
+            .map(|row| row.expect("map ordered note"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(ordered_titles, vec!["文件三", "文件二", "文件一"]);
+    }
+
+    #[test]
+    fn create_notebook_path_appends_to_custom_order_tail() {
+        let mut connection = test_connection();
+        connection
+            .execute(
+                "INSERT INTO notebooks (name, custom_sort_order) VALUES ('测试本 A', 0), ('测试本 B', 1)",
+                [],
+            )
+            .expect("insert notebooks");
+
+        let notebook =
+            create_notebook_tx_internal(&mut connection, "测试本 C").expect("create notebook");
+
+        assert_eq!(notebook.name, "测试本 C");
+        assert_eq!(notebook.custom_sort_order, 2);
+    }
+
+    #[test]
+    fn reorder_notebooks_path_persists_custom_order() {
+        let mut connection = test_connection();
+        connection
+            .execute(
+                "INSERT INTO notebooks (name, custom_sort_order) VALUES ('测试本 A', 0), ('测试本 B', 1), ('测试本 C', 2)",
+                [],
+            )
+            .expect("insert notebooks");
+
+        reorder_notebooks_tx_internal(&mut connection, &[3, 1, 2])
+            .expect("reorder notebooks");
+
+        let ordered_ids = connection
+            .prepare("SELECT id FROM notebooks ORDER BY custom_sort_order ASC, id ASC")
+            .expect("prepare ordered notebooks")
+            .query_map([], |row| row.get::<_, i64>(0))
+            .expect("query ordered notebooks")
+            .map(|row| row.expect("map ordered notebook"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(ordered_ids, vec![3, 1, 2]);
     }
 
     #[test]
@@ -3658,17 +4256,25 @@ mod tests {
             .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
             .expect("insert notebook");
 
-        for (name, expected_sort_order) in [
-            ("文件夹一", 0_i64),
-            ("文件夹二", 1_i64),
-            ("文件夹三", 2_i64),
-        ] {
+        for name in ["文件夹一", "文件夹二", "文件夹三"] {
             let folder =
                 create_folder_tx_internal(&mut connection, 1, name).expect("create folder");
             assert_eq!(folder.name, name);
-            assert_eq!(folder.sort_order, expected_sort_order);
+            assert_eq!(folder.sort_order, 0);
             assert_eq!(folder.parent_folder_id, None);
         }
+
+        let ordered_folder_names = connection
+            .prepare(
+                "SELECT name FROM folders WHERE notebook_id = 1 ORDER BY sort_order ASC, id ASC",
+            )
+            .expect("prepare ordered folders")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query ordered folders")
+            .map(|row| row.expect("map ordered folder"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(ordered_folder_names, vec!["文件夹三", "文件夹二", "文件夹一"]);
     }
 
     #[test]
@@ -3679,6 +4285,183 @@ mod tests {
             .expect_err("missing notebook should fail");
 
         assert_eq!(error, "目标笔记本不存在。");
+    }
+
+    #[test]
+    fn reorder_folders_path_persists_top_level_order() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '文件夹一', 0), (1, '文件夹二', 1), (1, '文件夹三', 2)",
+                [],
+            )
+            .expect("insert folders");
+
+        reorder_folders_tx_internal(&mut connection, 1, &[3, 1, 2])
+            .expect("reorder folders");
+
+        let ordered_ids = connection
+            .prepare(
+                "SELECT id FROM folders WHERE notebook_id = 1 ORDER BY sort_order ASC, id ASC",
+            )
+            .expect("prepare ordered folders")
+            .query_map([], |row| row.get::<_, i64>(0))
+            .expect("query ordered folders")
+            .map(|row| row.expect("map ordered folder"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(ordered_ids, vec![3, 1, 2]);
+    }
+
+    #[test]
+    fn move_note_path_can_reorder_within_same_folder() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, sort_order, title, content_plaintext) VALUES (1, 1, 0, '文件一', NULL), (1, 1, 1, '文件二', NULL), (1, 1, 2, '文件三', NULL)",
+                [],
+            )
+            .expect("insert notes");
+
+        let moved_note = move_note_tx_internal(&mut connection, 3, 1, 0).expect("move note");
+        assert_eq!(moved_note.folder_id, Some(1));
+        assert_eq!(moved_note.sort_order, 0);
+
+        let ordered_ids = connection
+            .prepare("SELECT id FROM notes WHERE folder_id = 1 ORDER BY sort_order ASC, id ASC")
+            .expect("prepare ordered notes")
+            .query_map([], |row| row.get::<_, i64>(0))
+            .expect("query ordered notes")
+            .map(|row| row.expect("map ordered note"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(ordered_ids, vec![3, 1, 2]);
+    }
+
+    #[test]
+    fn move_note_path_can_move_between_folders() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '文件夹 A', 0), (1, '文件夹 B', 1)",
+                [],
+            )
+            .expect("insert folders");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, sort_order, title, content_plaintext) VALUES (1, 1, 0, '文件一', NULL), (1, 1, 1, '文件二', NULL), (1, 2, 0, '文件三', NULL)",
+                [],
+            )
+            .expect("insert notes");
+
+        let moved_note = move_note_tx_internal(&mut connection, 2, 2, 1).expect("move note");
+        assert_eq!(moved_note.folder_id, Some(2));
+        assert_eq!(moved_note.sort_order, 1);
+
+        let folder_a_ids = connection
+            .prepare("SELECT id FROM notes WHERE folder_id = 1 ORDER BY sort_order ASC, id ASC")
+            .expect("prepare folder a notes")
+            .query_map([], |row| row.get::<_, i64>(0))
+            .expect("query folder a notes")
+            .map(|row| row.expect("map folder a note"))
+            .collect::<Vec<_>>();
+        let folder_b_ids = connection
+            .prepare("SELECT id FROM notes WHERE folder_id = 2 ORDER BY sort_order ASC, id ASC")
+            .expect("prepare folder b notes")
+            .query_map([], |row| row.get::<_, i64>(0))
+            .expect("query folder b notes")
+            .map(|row| row.expect("map folder b note"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(folder_a_ids, vec![1]);
+        assert_eq!(folder_b_ids, vec![3, 2]);
+    }
+
+    #[test]
+    fn ensure_notebook_tree_constraints_path_flattens_legacy_structure() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name, custom_sort_order) VALUES ('测试本', 0)", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, parent_folder_id, name, sort_order) VALUES (1, NULL, '根文件夹', 0)",
+                [],
+            )
+            .expect("insert root folder");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, parent_folder_id, name, sort_order) VALUES (1, 1, '子文件夹', 0)",
+                [],
+            )
+            .expect("insert child folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, sort_order, title, content_plaintext) VALUES (1, 2, 0, '子文件', NULL), (1, NULL, 0, '未归档文件', NULL)",
+                [],
+            )
+            .expect("insert legacy notes");
+
+        ensure_notebook_tree_constraints_tx_internal(&mut connection)
+            .expect("repair notebook tree");
+
+        let folder_rows = connection
+            .prepare(
+                "SELECT name, parent_folder_id, sort_order FROM folders WHERE notebook_id = 1 ORDER BY sort_order ASC, id ASC",
+            )
+            .expect("prepare folder rows")
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .expect("query folder rows")
+            .map(|row| row.expect("map folder row"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            folder_rows,
+            vec![
+                ("根文件夹".to_string(), None, 0),
+                ("子文件夹".to_string(), None, 1),
+                ("未归档迁移".to_string(), None, 2),
+            ]
+        );
+
+        let orphan_note_row: (Option<i64>, i64) = connection
+            .query_row(
+                "SELECT folder_id, sort_order FROM notes WHERE title = '未归档文件'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read repaired note");
+        let child_note_row: (Option<i64>, i64) = connection
+            .query_row(
+                "SELECT folder_id, sort_order FROM notes WHERE title = '子文件'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read child note");
+
+        assert_eq!(orphan_note_row, (Some(3), 0));
+        assert_eq!(child_note_row, (Some(2), 0));
     }
 
     #[test]

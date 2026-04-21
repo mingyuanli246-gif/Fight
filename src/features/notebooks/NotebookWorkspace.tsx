@@ -23,9 +23,12 @@ import {
   listFoldersByNotebook,
   listNotesByNotebook,
   listNotebooks,
+  moveNote,
   renameFolder,
   renameNote,
   renameNotebook,
+  reorderFolders,
+  reorderNotebooks,
   updateNotebookCoverImage,
 } from "./repository";
 import {
@@ -87,6 +90,7 @@ function readStoredHomeSort(): NotebookHomeSort {
   if (
     value === "updated-desc" ||
     value === "created-desc" ||
+    value === "custom" ||
     value === "name-asc" ||
     value === "name-desc"
   ) {
@@ -180,11 +184,132 @@ function sortNotebooks(notebooks: Notebook[], sort: NotebookHomeSort) {
       return collatorCompare(right.name, left.name);
     }
 
+    if (sort === "custom") {
+      return left.customSortOrder - right.customSortOrder || left.id - right.id;
+    }
+
     const updatedDiff =
       Date.parse(right.updatedAt.replace(" ", "T")) -
       Date.parse(left.updatedAt.replace(" ", "T"));
     return updatedDiff || collatorCompare(left.name, right.name);
   });
+}
+
+function sortNotesByFolderAndOrder(notes: Note[]) {
+  return [...notes].sort((left, right) => {
+    const leftFolderId = left.folderId ?? -1;
+    const rightFolderId = right.folderId ?? -1;
+
+    if (leftFolderId !== rightFolderId) {
+      return leftFolderId - rightFolderId;
+    }
+
+    if (left.sortOrder !== right.sortOrder) {
+      return left.sortOrder - right.sortOrder;
+    }
+
+    const createdDiff =
+      Date.parse(left.createdAt.replace(" ", "T")) -
+      Date.parse(right.createdAt.replace(" ", "T"));
+
+    return createdDiff || left.id - right.id;
+  });
+}
+
+function applyNotebookCustomOrder(notebooks: Notebook[], orderedIds: number[]) {
+  const notebookById = new Map(notebooks.map((notebook) => [notebook.id, notebook]));
+
+  return orderedIds
+    .map((notebookId, index) => {
+      const notebook = notebookById.get(notebookId);
+
+      if (!notebook) {
+        return null;
+      }
+
+      return {
+        ...notebook,
+        customSortOrder: index,
+      };
+    })
+    .filter((notebook): notebook is Notebook => notebook !== null);
+}
+
+function applyFolderOrder(folders: Folder[], orderedFolderIds: number[]) {
+  const folderById = new Map(folders.map((folder) => [folder.id, folder]));
+  const nextFolders: Folder[] = [];
+
+  for (const [index, folderId] of orderedFolderIds.entries()) {
+    const folder = folderById.get(folderId);
+
+    if (!folder) {
+      continue;
+    }
+
+    nextFolders.push({
+      ...folder,
+      parentFolderId: null,
+      sortOrder: index,
+    });
+  }
+
+  return nextFolders;
+}
+
+function applyLocalNoteMove(
+  notes: Note[],
+  noteId: number,
+  targetFolderId: number,
+  targetIndex: number,
+) {
+  const noteById = new Map(notes.map((note) => [note.id, note]));
+  const targetNote = noteById.get(noteId);
+
+  if (!targetNote) {
+    return notes;
+  }
+
+  const sourceFolderId = targetNote.folderId;
+  const nextNotes = notes.map((note) => ({ ...note }));
+
+  const byFolder = new Map<number, Note[]>();
+  for (const note of nextNotes) {
+    if (note.folderId === null) {
+      continue;
+    }
+
+    const current = byFolder.get(note.folderId) ?? [];
+    current.push(note);
+    byFolder.set(note.folderId, current);
+  }
+
+  const sourceFolderNotes =
+    sourceFolderId === null ? [] : [...(byFolder.get(sourceFolderId) ?? [])];
+  const targetFolderNotes = [...(byFolder.get(targetFolderId) ?? [])];
+
+  if (sourceFolderId === targetFolderId) {
+    const reorderedNotes = targetFolderNotes.filter((note) => note.id !== noteId);
+    reorderedNotes.splice(targetIndex, 0, targetNote);
+    reorderedNotes.forEach((note, index) => {
+      note.folderId = targetFolderId;
+      note.sortOrder = index;
+    });
+  } else {
+    const updatedSourceNotes = sourceFolderNotes.filter((note) => note.id !== noteId);
+    updatedSourceNotes.forEach((note, index) => {
+      note.sortOrder = index;
+    });
+
+    const updatedTargetNotes = targetFolderNotes.filter((note) => note.id !== noteId);
+    targetNote.folderId = targetFolderId;
+    updatedTargetNotes.splice(targetIndex, 0, targetNote);
+    updatedTargetNotes.forEach((note, index) => {
+      note.folderId = targetFolderId;
+      note.sortOrder = index;
+    });
+  }
+
+  return sortNotesByFolderAndOrder(nextNotes);
 }
 
 function isEditableElement(target: EventTarget | null) {
@@ -265,6 +390,8 @@ export const NotebookWorkspace = forwardRef<
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isInitializing, setIsInitializing] = useState(true);
   const [isBusy, setIsBusy] = useState(false);
+  const [isNotebookOrderSaving, setIsNotebookOrderSaving] = useState(false);
+  const [isTreeOrderSaving, setIsTreeOrderSaving] = useState(false);
   const [isLeavePromptOpen, setIsLeavePromptOpen] = useState(false);
   const [isLeavePromptSaving, setIsLeavePromptSaving] = useState(false);
   const [returnDestination, setReturnDestination] = useState<"reviewTasks" | null>(
@@ -274,6 +401,8 @@ export const NotebookWorkspace = forwardRef<
   const reviewManagerRef = useRef<NoteReviewPlanManagerRef | null>(null);
   const lastHandledOpenRequestRef = useRef<number | null>(null);
   const leavePromptResolverRef = useRef<((value: boolean) => void) | null>(null);
+  const notebookOrderSaveTokenRef = useRef(0);
+  const treeOrderSaveTokenRef = useRef(0);
 
   const sortedNotebooks = useMemo(
     () => sortNotebooks(notebooks, homeSort),
@@ -595,6 +724,117 @@ export const NotebookWorkspace = forwardRef<
         resourcePath,
         error,
       });
+    }
+  }
+
+  async function handleReorderNotebooks(orderedNotebookIds: number[]) {
+    const previousNotebooks = notebooks;
+    const nextNotebooks = applyNotebookCustomOrder(previousNotebooks, orderedNotebookIds);
+
+    if (nextNotebooks.length !== previousNotebooks.length) {
+      throw new Error("笔记本顺序数据无效。");
+    }
+
+    const hasChanged = nextNotebooks.some(
+      (notebook, index) =>
+        notebook.id !== previousNotebooks[index]?.id ||
+        notebook.customSortOrder !== previousNotebooks[index]?.customSortOrder,
+    );
+
+    if (!hasChanged) {
+      return;
+    }
+
+    const token = notebookOrderSaveTokenRef.current + 1;
+    notebookOrderSaveTokenRef.current = token;
+    setErrorMessage(null);
+    setIsNotebookOrderSaving(true);
+    setNotebooks(nextNotebooks);
+
+    try {
+      await reorderNotebooks(orderedNotebookIds);
+    } catch (error) {
+      if (notebookOrderSaveTokenRef.current === token) {
+        setNotebooks(previousNotebooks);
+        setErrorMessage(getErrorMessage(error));
+      }
+      throw error;
+    } finally {
+      if (notebookOrderSaveTokenRef.current === token) {
+        setIsNotebookOrderSaving(false);
+      }
+    }
+  }
+
+  async function handleReorderFolders(orderedFolderIds: number[]) {
+    if (selectedNotebookId === null) {
+      throw new Error("请先选择笔记本，再调整文件夹顺序。");
+    }
+
+    const previousFolders = folders;
+    const nextFolders = applyFolderOrder(previousFolders, orderedFolderIds);
+
+    if (nextFolders.length !== previousFolders.length) {
+      throw new Error("文件夹顺序数据无效。");
+    }
+
+    const hasChanged = nextFolders.some(
+      (folder, index) =>
+        folder.id !== previousFolders[index]?.id ||
+        folder.sortOrder !== previousFolders[index]?.sortOrder,
+    );
+
+    if (!hasChanged) {
+      return;
+    }
+
+    const token = treeOrderSaveTokenRef.current + 1;
+    treeOrderSaveTokenRef.current = token;
+    setErrorMessage(null);
+    setIsTreeOrderSaving(true);
+    setFolders(nextFolders);
+
+    try {
+      await reorderFolders(selectedNotebookId, orderedFolderIds);
+    } catch (error) {
+      if (treeOrderSaveTokenRef.current === token) {
+        setFolders(previousFolders);
+        setErrorMessage(getErrorMessage(error));
+      }
+      throw error;
+    } finally {
+      if (treeOrderSaveTokenRef.current === token) {
+        setIsTreeOrderSaving(false);
+      }
+    }
+  }
+
+  async function handleMoveNote(
+    noteId: number,
+    targetFolderId: number,
+    targetIndex: number,
+  ) {
+    const previousNotes = notes;
+    const nextNotes = applyLocalNoteMove(previousNotes, noteId, targetFolderId, targetIndex);
+
+    const token = treeOrderSaveTokenRef.current + 1;
+    treeOrderSaveTokenRef.current = token;
+    setErrorMessage(null);
+    setIsTreeOrderSaving(true);
+    setNotes(nextNotes);
+
+    try {
+      return await moveNote(noteId, targetFolderId, targetIndex);
+    } catch (error) {
+      if (treeOrderSaveTokenRef.current === token) {
+        setNotes(previousNotes);
+        setErrorMessage(getErrorMessage(error));
+      }
+      throw error;
+    } finally {
+      if (treeOrderSaveTokenRef.current === token) {
+        setIsTreeOrderSaving(false);
+      }
     }
   }
 
@@ -970,6 +1210,7 @@ export const NotebookWorkspace = forwardRef<
           notebooks={sortedNotebooks}
           selectedNotebookId={homeSelectedNotebookId}
           disabled={isBusy}
+          dragBusy={isNotebookOrderSaving}
           sort={homeSort}
           onSortChange={setHomeSort}
           onSelectNotebook={setHomeSelectedNotebookId}
@@ -992,6 +1233,7 @@ export const NotebookWorkspace = forwardRef<
           }
           onSetNotebookCoverImage={handleSetNotebookCoverImage}
           onClearNotebookCoverImage={handleClearNotebookCoverImage}
+          onReorderNotebooks={handleReorderNotebooks}
         />
       ) : (
         <NotebookDetailWorkspace
@@ -1002,6 +1244,7 @@ export const NotebookWorkspace = forwardRef<
           selectedNote={selectedNote}
           activeFolderId={activeFolderId}
           disabled={isBusy}
+          treeDisabled={isBusy || isTreeOrderSaving}
           rightPanelCollapsed={isRightPanelCollapsed}
           highlightRequest={highlightRequest}
           noteEditorRef={noteEditorRef}
@@ -1030,6 +1273,8 @@ export const NotebookWorkspace = forwardRef<
               title: "确定删除这个文件吗",
             })
           }
+          onReorderFolders={handleReorderFolders}
+          onMoveNote={handleMoveNote}
           onToggleRightPanel={() =>
             setIsRightPanelCollapsed((current) => !current)
           }

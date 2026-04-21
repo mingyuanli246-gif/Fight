@@ -20,6 +20,7 @@ interface NotebookDetailWorkspaceProps {
   selectedNote: Note | null;
   activeFolderId: number | null;
   disabled: boolean;
+  treeDisabled: boolean;
   rightPanelCollapsed: boolean;
   highlightRequest: NotebookHighlightRequest | null;
   noteEditorRef: RefObject<NoteEditorPaneRef | null>;
@@ -32,6 +33,12 @@ interface NotebookDetailWorkspaceProps {
   onRenameNote: (id: number, title: string) => Promise<void>;
   onRequestDeleteFolder: (folder: Folder) => void;
   onRequestDeleteNote: (note: Note) => void;
+  onReorderFolders: (orderedFolderIds: number[]) => Promise<void>;
+  onMoveNote: (
+    noteId: number,
+    targetFolderId: number,
+    targetIndex: number,
+  ) => Promise<Note>;
   onToggleRightPanel: () => void;
   onNoteUpdated: (note: Note) => void;
   onError: (message: string) => void;
@@ -45,6 +52,7 @@ export function NotebookDetailWorkspace({
   selectedNote,
   activeFolderId,
   disabled,
+  treeDisabled,
   rightPanelCollapsed,
   highlightRequest,
   noteEditorRef,
@@ -57,6 +65,8 @@ export function NotebookDetailWorkspace({
   onRenameNote,
   onRequestDeleteFolder,
   onRequestDeleteNote,
+  onReorderFolders,
+  onMoveNote,
   onToggleRightPanel,
   onNoteUpdated,
   onError,
@@ -74,7 +84,8 @@ export function NotebookDetailWorkspace({
           notes={notes}
           selectedEntity={selectedEntity}
           activeFolderId={activeFolderId}
-          disabled={disabled}
+          disabled={treeDisabled}
+          onError={onError}
           onReturnHome={onReturnHome}
           onSelectEntity={onSelectEntity}
           onCreateFolder={onCreateFolder}
@@ -83,6 +94,8 @@ export function NotebookDetailWorkspace({
           onRenameNote={onRenameNote}
           onRequestDeleteFolder={onRequestDeleteFolder}
           onRequestDeleteNote={onRequestDeleteNote}
+          onReorderFolders={onReorderFolders}
+          onMoveNote={onMoveNote}
         />
 
         <section className={styles.detailMain}>

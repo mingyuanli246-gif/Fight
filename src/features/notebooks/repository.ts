@@ -108,7 +108,12 @@ function isRepositoryValidationMessage(message: string) {
     "目标文件夹不存在。",
     "目标文件夹不属于当前笔记本。",
     "目标文件不存在。",
+    "目标插入位置无效。",
     "目标标签不存在。",
+    "笔记本顺序数据不完整。",
+    "笔记本顺序数据无效。",
+    "文件夹顺序数据不完整。",
+    "文件夹顺序数据无效。",
     "创建标签失败，请稍后重试。",
   ].includes(message);
 }
@@ -165,11 +170,19 @@ async function createNoteCommand(
   });
 }
 
+async function createNotebookCommand(name: string) {
+  return invoke<Notebook>("create_notebook_tx", { name });
+}
+
 async function createFolderCommand(notebookId: number, name: string) {
   return invoke<Folder>("create_folder_tx", {
     notebookId,
     name,
   });
+}
+
+async function ensureNotebookTreeConstraintsCommand() {
+  return invoke<void>("ensure_notebook_tree_constraints_tx");
 }
 
 async function deleteNotebookCommand(notebookId: number) {
@@ -204,6 +217,32 @@ async function updateNoteContentCommand(noteId: number, content: string) {
 
 async function deleteNoteCommand(noteId: number) {
   return invoke<void>("delete_note_tx", { noteId });
+}
+
+async function reorderNotebooksCommand(orderedNotebookIds: number[]) {
+  return invoke<void>("reorder_notebooks_tx", { orderedNotebookIds });
+}
+
+async function reorderFoldersCommand(
+  notebookId: number,
+  orderedFolderIds: number[],
+) {
+  return invoke<void>("reorder_folders_tx", {
+    notebookId,
+    orderedFolderIds,
+  });
+}
+
+async function moveNoteCommand(
+  noteId: number,
+  targetFolderId: number,
+  targetIndex: number,
+) {
+  return invoke<Note>("move_note_tx", {
+    noteId,
+    targetFolderId,
+    targetIndex,
+  });
 }
 
 async function addTagToNoteByNameCommand(noteId: number, name: string) {
@@ -313,6 +352,7 @@ async function fetchNotebookById(database: Database, id: number) {
         id,
         name,
         cover_image_path AS coverImagePath,
+        custom_sort_order AS customSortOrder,
         created_at AS createdAt,
         updated_at AS updatedAt
       FROM notebooks
@@ -351,6 +391,7 @@ async function fetchNoteById(database: Database, id: number) {
         id,
         notebook_id AS notebookId,
         folder_id AS folderId,
+        sort_order AS sortOrder,
         title,
         content_plaintext AS contentPlaintext,
         created_at AS createdAt,
@@ -472,6 +513,7 @@ export async function initializeNotebookDatabase() {
   return withRepositoryError("数据库初始化", async () => {
     const database = await getNotebookDatabase();
     await ensureNoteSearchReady(database);
+    await ensureNotebookTreeConstraintsCommand();
   });
 }
 
@@ -493,6 +535,7 @@ export async function listNotebooks() {
           id,
           name,
           cover_image_path AS coverImagePath,
+          custom_sort_order AS customSortOrder,
           created_at AS createdAt,
           updated_at AS updatedAt
         FROM notebooks
@@ -504,21 +547,9 @@ export async function listNotebooks() {
 
 export async function createNotebook(name: string) {
   return withRepositoryError("创建笔记本", async () => {
-    const database = await getNotebookDatabase();
     const normalizedName = requireName(name, "笔记本");
-    const result = await database.execute(
-      `
-        INSERT INTO notebooks (name, cover_image_path)
-        VALUES ($1, NULL)
-      `,
-      [normalizedName],
-    );
-
-    if (typeof result.lastInsertId !== "number") {
-      throw new RepositoryValidationError("创建笔记本失败，请稍后重试。");
-    }
-
-    return fetchNotebookById(database, result.lastInsertId);
+    await getNotebookDatabase();
+    return createNotebookCommand(normalizedName);
   });
 }
 
@@ -656,6 +687,7 @@ export async function listNotesByNotebook(notebookId: number) {
           id,
           notebook_id AS notebookId,
           folder_id AS folderId,
+          sort_order AS sortOrder,
           title,
           content_plaintext AS contentPlaintext,
           created_at AS createdAt,
@@ -683,6 +715,34 @@ export async function createNote(
     }
 
     return createNoteCommand(notebookId, folderId, normalizedTitle);
+  });
+}
+
+export async function reorderNotebooks(orderedNotebookIds: number[]) {
+  return withRepositoryError("保存笔记本排序", async () => {
+    await getNotebookDatabase();
+    await reorderNotebooksCommand(orderedNotebookIds);
+  });
+}
+
+export async function reorderFolders(
+  notebookId: number,
+  orderedFolderIds: number[],
+) {
+  return withRepositoryError("保存文件夹排序", async () => {
+    await getNotebookDatabase();
+    await reorderFoldersCommand(notebookId, orderedFolderIds);
+  });
+}
+
+export async function moveNote(
+  noteId: number,
+  targetFolderId: number,
+  targetIndex: number,
+) {
+  return withRepositoryError("保存文件排序", async () => {
+    await getNotebookDatabase();
+    return moveNoteCommand(noteId, targetFolderId, targetIndex);
   });
 }
 

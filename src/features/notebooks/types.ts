@@ -2,6 +2,7 @@ export interface Notebook {
   id: number;
   name: string;
   coverImagePath: string | null;
+  customSortOrder: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -20,6 +21,7 @@ export interface Note {
   id: number;
   notebookId: number;
   folderId: number | null;
+  sortOrder: number;
   title: string;
   // 第四阶段起，该字段会继续沿用现有 schema，但实际允许存储富文本 HTML。
   // 这是已知命名债：字段名仍叫 contentPlaintext，本阶段不做 schema 变更。
@@ -83,6 +85,7 @@ export type NotebookShellMode = "home" | "detail";
 export type NotebookHomeSort =
   | "updated-desc"
   | "created-desc"
+  | "custom"
   | "name-asc"
   | "name-desc";
 

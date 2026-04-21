@@ -6,10 +6,12 @@ use database_ops::{
     activate_note_review_schedule_tx, add_tag_to_note_by_name_tx,
     clear_note_review_schedule_tx, clear_notebook_cover_image_tx,
     cleanup_unreferenced_managed_resources, create_folder_tx, create_note_tx,
-    delete_folder_tx, delete_note_tx, delete_notebook_tx, ensure_note_search_ready,
-    ensure_review_feature_ready_tx, rebuild_note_search_index, remove_tag_from_note_tx,
-    rename_note_tx, save_note_review_schedule_tx, set_note_review_schedule_dirty_tx,
-    update_note_content_tx, update_notebook_cover_image_tx,
+    create_notebook_tx, delete_folder_tx, delete_note_tx, delete_notebook_tx,
+    ensure_note_search_ready, ensure_notebook_tree_constraints_tx,
+    ensure_review_feature_ready_tx, move_note_tx, rebuild_note_search_index,
+    remove_tag_from_note_tx, rename_note_tx, reorder_folders_tx, reorder_notebooks_tx,
+    save_note_review_schedule_tx, set_note_review_schedule_dirty_tx, update_note_content_tx,
+    update_notebook_cover_image_tx,
 };
 use resource_ops::{
     delete_managed_resource, ensure_resource_directories, resolve_managed_resource,
@@ -54,6 +56,12 @@ pub fn run() {
             sql: include_str!("../migrations/0005_app_meta.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 6,
+            description: "add_custom_ordering_columns",
+            sql: include_str!("../migrations/0006_custom_ordering.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
@@ -64,13 +72,18 @@ pub fn run() {
             get_data_environment_info,
             ensure_note_search_ready,
             rebuild_note_search_index,
+            ensure_notebook_tree_constraints_tx,
             create_note_tx,
             create_folder_tx,
+            create_notebook_tx,
             ensure_review_feature_ready_tx,
             activate_note_review_schedule_tx,
             save_note_review_schedule_tx,
             clear_note_review_schedule_tx,
             set_note_review_schedule_dirty_tx,
+            reorder_notebooks_tx,
+            reorder_folders_tx,
+            move_note_tx,
             delete_notebook_tx,
             delete_folder_tx,
             update_notebook_cover_image_tx,

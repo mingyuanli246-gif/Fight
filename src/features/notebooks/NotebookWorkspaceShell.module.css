@@ -268,19 +268,59 @@
   transition: transform 180ms ease;
 }
 
-.notebookCard:not(.notebookCardSelected):hover {
+.notebookCard:hover {
   transform: scale(1.05);
   z-index: 1;
 }
 
-.notebookCardSelected:hover {
-  transform: none;
+.notebookCardSelected .notebookCover {
+  box-shadow: none;
 }
 
-.notebookCardSelected .notebookCover {
+.notebookCard:hover .notebookCover {
   box-shadow:
     0 18px 34px rgba(15, 23, 42, 0.08),
     0 6px 12px rgba(15, 23, 42, 0.06);
+}
+
+.notebookCardDragging {
+  opacity: 0.32;
+}
+
+.notebookCardOverlay {
+  width: 188px;
+  padding: 0;
+  pointer-events: none;
+  cursor: grabbing;
+  transform: rotate(1.5deg);
+  opacity: 0.98;
+}
+
+.notebookCardDropBefore::before,
+.notebookCardDropAfter::after {
+  content: "";
+  position: absolute;
+  top: 8px;
+  bottom: 44px;
+  width: 3px;
+  border-radius: 999px;
+  background: rgba(37, 99, 235, 0.92);
+  box-shadow: 0 0 0 2px rgba(219, 234, 254, 0.94);
+  pointer-events: none;
+}
+
+.notebookCardDropBefore::before {
+  left: -9px;
+}
+
+.notebookCardDropAfter::after {
+  right: -9px;
+}
+
+.notebookCardSelected:hover .notebookCover {
+  box-shadow:
+    0 20px 40px rgba(15, 23, 42, 0.1),
+    0 8px 16px rgba(15, 23, 42, 0.07);
 }
 
 .notebookCover {
@@ -296,10 +336,19 @@
     transform 180ms ease,
     box-shadow 180ms ease;
   background: linear-gradient(135deg, rgba(15, 23, 42, 0.06), rgba(96, 165, 250, 0.12));
+  outline: none;
 }
 
 .notebookCover:disabled {
   cursor: not-allowed;
+}
+
+.notebookCover:focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 3px rgba(96, 165, 250, 0.18),
+    0 18px 34px rgba(15, 23, 42, 0.08),
+    0 6px 12px rgba(15, 23, 42, 0.06);
 }
 
 .notebookCoverMedia,
@@ -365,10 +414,16 @@
   background: transparent;
   border: 0;
   cursor: pointer;
+  outline: none;
 }
 
-.inlineInput,
-.inlineNameInput {
+.ghostTitleButton:focus-visible {
+  outline: none;
+  border-radius: 10px;
+  box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.16);
+}
+
+.inlineInput {
   width: 100%;
   min-height: 38px;
   padding: 0 12px;
@@ -379,8 +434,7 @@
   outline: none;
 }
 
-.inlineInput:focus,
-.inlineNameInput:focus {
+.inlineInput:focus {
   border-color: var(--color-accent);
   box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.16);
 }
@@ -397,22 +451,39 @@
 }
 
 .inlineNameInput {
+  width: 100%;
   min-height: 26px;
-  padding: 0 6px;
+  padding: 0;
+  color: inherit;
+  caret-color: var(--color-text-primary);
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  outline: none;
   font: inherit;
   line-height: inherit;
   font-weight: inherit;
-  border-radius: 10px;
+  appearance: none;
+}
+
+.inlineNameInput:focus {
+  border: 0;
+  box-shadow: none;
 }
 
 .inlineNameInputCompact {
   min-height: 24px;
-  padding: 0 6px;
   font-size: 13px;
+  line-height: 1.5;
+  font-weight: 700;
 }
 
 .inlineNameInputCentered {
   text-align: center;
+  font-size: 15px;
+  line-height: 1.4;
+  font-weight: 700;
 }
 
 .inlineConfirmPopover {
@@ -681,6 +752,12 @@
     color 140ms ease;
 }
 
+.treeRowShell {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+
 .treeRow::after,
 .treeNoteRow::after {
   content: "";
@@ -728,6 +805,41 @@
   opacity: 0;
 }
 
+.treeDragSource {
+  opacity: 0.34;
+}
+
+.treeDragOverlay {
+  width: 240px;
+  pointer-events: none;
+  cursor: grabbing;
+  transform: rotate(1.5deg);
+  box-shadow:
+    0 18px 34px rgba(15, 23, 42, 0.12),
+    0 8px 18px rgba(15, 23, 42, 0.08);
+}
+
+.treeDropBefore::before,
+.treeDropAfter::after {
+  content: "";
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  height: 3px;
+  border-radius: 999px;
+  background: rgba(37, 99, 235, 0.92);
+  box-shadow: 0 0 0 2px rgba(219, 234, 254, 0.94);
+  pointer-events: none;
+}
+
+.treeDropBefore::before {
+  top: -4px;
+}
+
+.treeDropAfter::after {
+  bottom: -4px;
+}
+
 .treeDisclosure {
   display: inline-flex;
   align-items: center;
@@ -736,6 +848,28 @@
   height: 18px;
   color: var(--color-text-tertiary);
   flex-shrink: 0;
+}
+
+.treeDisclosureButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  padding: 0;
+  color: var(--color-text-tertiary);
+  background: transparent;
+  border: 0;
+  border-radius: 12px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition:
+    background-color 140ms ease,
+    color 140ms ease;
+}
+
+.treeDisclosureButton:hover:enabled {
+  background: rgba(148, 163, 184, 0.1);
+  color: var(--color-text-primary);
 }
 
 .treeRowIcon {
@@ -795,6 +929,27 @@
   font-size: 13px;
   line-height: 1.7;
   color: var(--color-text-secondary);
+}
+
+.treeEmptyDropZone {
+  margin-left: 36px;
+  padding: 14px 12px;
+  border: 1px dashed rgba(96, 165, 250, 0.38);
+  border-radius: 14px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+  background: rgba(248, 250, 252, 0.96);
+  transition:
+    border-color 140ms ease,
+    background-color 140ms ease,
+    color 140ms ease;
+}
+
+.treeEmptyDropZoneActive {
+  border-color: rgba(37, 99, 235, 0.9);
+  background: rgba(219, 234, 254, 0.54);
+  color: var(--color-text-primary);
 }
 
 .detailMain {
