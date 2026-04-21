@@ -5,6 +5,7 @@ import StarterKit from "@tiptap/starter-kit";
 import { MarkdownShortcuts } from "./editorInputRules";
 import { NoteImage } from "./imageNodes";
 import { BlockMath, InlineMath, type EditorMathBridge } from "./mathNodes";
+import { createTextTagExtensions } from "./textTags";
 
 // 仅对白名单扩展启用输入规则，避免 StarterKit 默认更宽的 Markdown 规则进入 MVP。
 export const NOTE_EDITOR_ENABLED_INPUT_RULES = ["markdownShortcuts"];
@@ -22,6 +23,7 @@ export function createNotebookEditorExtensions(
         levels: [1, 2],
       },
     }),
+    ...createTextTagExtensions(),
     Underline,
     TextAlign.configure({
       types: ["heading", "paragraph"],

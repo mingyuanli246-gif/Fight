@@ -53,8 +53,10 @@ import type {
   NotebookHomeSort,
   NotebookShellMode,
   SelectedEntity,
+  TextTagPanelState,
 } from "./types";
 import styles from "./NotebookWorkspaceShell.module.css";
+import { createEmptyTextTagPanelState } from "./textTags";
 
 const SECTION_LEAVE_BLOCKED_MESSAGE =
   "当前笔记保存失败，已阻止切换。请先重试保存或复制内容后再操作。";
@@ -383,6 +385,8 @@ export const NotebookWorkspace = forwardRef<
   );
   const [highlightRequest, setHighlightRequest] =
     useState<NotebookHighlightRequest | null>(null);
+  const [textTagPanelState, setTextTagPanelState] =
+    useState<TextTagPanelState>(() => createEmptyTextTagPanelState());
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const [initializationError, setInitializationError] = useState<string | null>(
     null,
@@ -426,6 +430,10 @@ export const NotebookWorkspace = forwardRef<
 
   const activeFolderId =
     selectedFolder?.id ?? (selectedNote?.folderId ?? null);
+
+  useEffect(() => {
+    setTextTagPanelState(createEmptyTextTagPanelState());
+  }, [selectedNote?.id]);
 
   useEffect(() => {
     onChromeModeChange?.(shellMode);
@@ -1261,6 +1269,7 @@ export const NotebookWorkspace = forwardRef<
           treeDisabled={isBusy || isTreeOrderSaving}
           rightPanelCollapsed={isRightPanelCollapsed}
           highlightRequest={highlightRequest}
+          textTagPanelState={textTagPanelState}
           noteEditorRef={noteEditorRef}
           reviewManagerRef={reviewManagerRef}
           onReturnHome={() => {
@@ -1306,6 +1315,7 @@ export const NotebookWorkspace = forwardRef<
               ),
             );
           }}
+          onTextTagPanelStateChange={setTextTagPanelState}
           onError={setErrorMessage}
         />
       )}

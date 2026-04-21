@@ -9,6 +9,7 @@ import type {
   Notebook,
   NotebookHighlightRequest,
   SelectedEntity,
+  TextTagPanelState,
 } from "./types";
 import styles from "./NotebookWorkspaceShell.module.css";
 
@@ -23,6 +24,7 @@ interface NotebookDetailWorkspaceProps {
   treeDisabled: boolean;
   rightPanelCollapsed: boolean;
   highlightRequest: NotebookHighlightRequest | null;
+  textTagPanelState: TextTagPanelState;
   noteEditorRef: RefObject<NoteEditorPaneRef | null>;
   reviewManagerRef: RefObject<NoteReviewPlanManagerRef | null>;
   onReturnHome: () => void;
@@ -41,6 +43,7 @@ interface NotebookDetailWorkspaceProps {
   ) => Promise<Note>;
   onToggleRightPanel: () => void;
   onNoteUpdated: (note: Note) => void;
+  onTextTagPanelStateChange: (state: TextTagPanelState) => void;
   onError: (message: string) => void;
 }
 
@@ -55,6 +58,7 @@ export function NotebookDetailWorkspace({
   treeDisabled,
   rightPanelCollapsed,
   highlightRequest,
+  textTagPanelState,
   noteEditorRef,
   reviewManagerRef,
   onReturnHome,
@@ -69,6 +73,7 @@ export function NotebookDetailWorkspace({
   onMoveNote,
   onToggleRightPanel,
   onNoteUpdated,
+  onTextTagPanelStateChange,
   onError,
 }: NotebookDetailWorkspaceProps) {
   return (
@@ -108,6 +113,7 @@ export function NotebookDetailWorkspace({
               disabled={disabled}
               highlightRequest={highlightRequest}
               onNoteUpdated={onNoteUpdated}
+              onTextTagPanelStateChange={onTextTagPanelStateChange}
               onError={onError}
             />
           ) : (
@@ -133,6 +139,8 @@ export function NotebookDetailWorkspace({
           note={selectedNote}
           collapsed={rightPanelCollapsed}
           disabled={disabled}
+          noteEditorRef={noteEditorRef}
+          textTagPanelState={textTagPanelState}
           reviewManagerRef={reviewManagerRef}
           onToggleCollapsed={onToggleRightPanel}
           onError={onError}

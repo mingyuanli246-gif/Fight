@@ -9,7 +9,9 @@ import {
   TAG_ORDER,
 } from "./constants";
 import { getNotebookDatabase } from "./db";
+import { extractIndexablePlainText } from "./richTextContent";
 import { findFirstExactSearchMatch } from "./searchQuery";
+import { DEFAULT_TAG_COLOR, normalizeTagColor } from "./tagColors";
 import type {
   Folder,
   Note,
@@ -17,22 +19,13 @@ import type {
   Notebook,
   Tag,
   TaggedNoteResult,
+  TextTagOccurrenceDraft,
   TagWithCount,
 } from "./types";
 
 class RepositoryValidationError extends Error {}
 
 const MAX_TAG_NAME_LENGTH = 40;
-const TAG_COLOR_PALETTE = [
-  "#2563EB",
-  "#DC2626",
-  "#CA8A04",
-  "#059669",
-  "#7C3AED",
-  "#DB2777",
-  "#0891B2",
-  "#EA580C",
-];
 
 type NoteSearchRow = {
   noteId: number;
@@ -41,12 +34,16 @@ type NoteSearchRow = {
   title: string;
   notebookName: string;
   folderName: string | null;
+  storedContent: string | null;
   bodyPlaintext: string;
   updatedAt: string;
 };
 
 type TagWithCountRow = TagWithCount;
 type TaggedNoteRow = TaggedNoteResult;
+type CountRow = {
+  count: number;
+};
 
 let noteSearchReadyPromise: Promise<void> | null = null;
 let hasInitializedNoteSearch = false;
@@ -116,6 +113,8 @@ function isRepositoryValidationMessage(message: string) {
     "文件夹顺序数据不完整。",
     "文件夹顺序数据无效。",
     "创建标签失败，请稍后重试。",
+    "该标签仍被正文标注引用，请先移除相关内容标注后再删除。",
+    "标注数据无效，请重新应用标签后再保存。",
   ].includes(message);
 }
 
@@ -214,6 +213,18 @@ async function renameNoteCommand(noteId: number, title: string) {
 
 async function updateNoteContentCommand(noteId: number, content: string) {
   return invoke<Note>("update_note_content_tx", { noteId, content });
+}
+
+async function saveNoteContentWithTagsCommand(
+  noteId: number,
+  content: string,
+  occurrences: TextTagOccurrenceDraft[],
+) {
+  return invoke<Note>("save_note_content_with_tags_tx", {
+    noteId,
+    content,
+    occurrences,
+  });
 }
 
 async function deleteNoteCommand(noteId: number) {
@@ -319,6 +330,9 @@ function shouldUseLikeSearch(query: string) {
   return normalized.length < 3 || tokens.some((token) => token.length < 3);
 }
 
+const DISPLAY_EXCERPT_MAX_LENGTH = 120;
+const HIGHLIGHT_EXCERPT_MAX_LENGTH = 48;
+
 function buildExcerpt(value: string) {
   const normalized = value.trim();
 
@@ -326,23 +340,16 @@ function buildExcerpt(value: string) {
     return "正文暂无内容";
   }
 
-  return normalized.length > 120 ? `${normalized.slice(0, 120)}…` : normalized;
+  return normalized.length > DISPLAY_EXCERPT_MAX_LENGTH
+    ? `${normalized.slice(0, DISPLAY_EXCERPT_MAX_LENGTH)}…`
+    : normalized;
 }
 
-function buildMatchedExcerptPair(
+function sliceAroundMatch(
   value: string,
   match: { start: number; end: number },
+  maxLength: number,
 ) {
-  const normalized = value.trim();
-
-  if (!normalized) {
-    return {
-      excerpt: "正文暂无内容",
-      highlightExcerpt: undefined,
-    };
-  }
-
-  const maxLength = 120;
   const anchorLength = Math.max(match.end - match.start, 1);
   const beforeLength = Math.max(Math.floor((maxLength - anchorLength) / 3), 0);
   const afterLength = Math.max(maxLength - anchorLength - beforeLength, 0);
@@ -358,9 +365,54 @@ function buildMatchedExcerptPair(
     }
   }
 
-  const rawExcerpt = value.slice(start, end).trim();
+  const excerpt = value.slice(start, end).trim();
 
-  if (!rawExcerpt) {
+  if (!excerpt) {
+    return null;
+  }
+
+  return {
+    start,
+    end,
+    excerpt,
+  };
+}
+
+function extractSearchableBodyText(row: NoteSearchRow) {
+  const visibleText = extractIndexablePlainText(row.storedContent);
+
+  if (visibleText) {
+    return visibleText;
+  }
+
+  return extractIndexablePlainText(row.bodyPlaintext);
+}
+
+function buildMatchedExcerptPair(
+  value: string,
+  match: { start: number; end: number },
+) {
+  const normalized = value.trim();
+
+  if (!normalized) {
+    return {
+      excerpt: "正文暂无内容",
+      highlightExcerpt: undefined,
+    };
+  }
+
+  const displayExcerpt = sliceAroundMatch(
+    value,
+    match,
+    DISPLAY_EXCERPT_MAX_LENGTH,
+  );
+  const highlightExcerpt = sliceAroundMatch(
+    value,
+    match,
+    HIGHLIGHT_EXCERPT_MAX_LENGTH,
+  );
+
+  if (!displayExcerpt) {
     return {
       excerpt: buildExcerpt(value),
       highlightExcerpt: undefined,
@@ -368,8 +420,10 @@ function buildMatchedExcerptPair(
   }
 
   return {
-    excerpt: `${start > 0 ? "…" : ""}${rawExcerpt}${end < value.length ? "…" : ""}`,
-    highlightExcerpt: rawExcerpt,
+    excerpt: `${displayExcerpt.start > 0 ? "…" : ""}${displayExcerpt.excerpt}${
+      displayExcerpt.end < value.length ? "…" : ""
+    }`,
+    highlightExcerpt: highlightExcerpt?.excerpt,
   };
 }
 
@@ -467,22 +521,18 @@ async function fetchTagById(database: Database, id: number) {
   );
 }
 
-async function getNextTagColor(database: Database) {
-  const rows = await database.select<{ count: number }[]>(
-    "SELECT COUNT(*) AS count FROM tags",
-  );
-  const count = rows[0]?.count ?? 0;
-  return TAG_COLOR_PALETTE[count % TAG_COLOR_PALETTE.length];
-}
-
-async function createTagRecord(database: Database, normalizedName: string) {
-  const color = await getNextTagColor(database);
+async function createTagRecord(
+  database: Database,
+  normalizedName: string,
+  color: string,
+) {
+  const normalizedColor = normalizeTagColor(color);
   const result = await database.execute(
     `
       INSERT INTO tags (name, color)
       VALUES ($1, $2)
     `,
-    [normalizedName, color],
+    [normalizedName, normalizedColor],
   );
 
   if (typeof result.lastInsertId !== "number") {
@@ -535,7 +585,7 @@ async function ensureNoteSearchReady(database: Database) {
 }
 
 function toNoteSearchResult(row: NoteSearchRow, query: string): NoteSearchResult {
-  const bodyText = row.bodyPlaintext ?? "";
+  const bodyText = extractSearchableBodyText(row);
   const firstMatch = findFirstExactSearchMatch(bodyText, query);
   const excerptResult = firstMatch
     ? buildMatchedExcerptPair(bodyText, firstMatch)
@@ -817,6 +867,17 @@ export async function updateNoteContent(id: number, content: string) {
   });
 }
 
+export async function saveNoteContentWithTags(
+  id: number,
+  content: string,
+  occurrences: TextTagOccurrenceDraft[],
+) {
+  return withRepositoryError("保存正文", async () => {
+    await getNotebookDatabase();
+    return saveNoteContentWithTagsCommand(id, content, occurrences);
+  });
+}
+
 export async function deleteNote(id: number) {
   return withRepositoryError("删除文件", async () => {
     await getNotebookDatabase();
@@ -845,6 +906,7 @@ export async function searchNotes(query: string, limit = 20) {
         notes.title AS title,
         notebooks.name AS notebookName,
         folders.name AS folderName,
+        notes.content_plaintext AS storedContent,
         note_search.body_plaintext AS bodyPlaintext,
         notes.updated_at AS updatedAt
       FROM note_search
@@ -946,25 +1008,30 @@ export async function listNotesByTag(tagId: number) {
   });
 }
 
-export async function createTag(name: string) {
+export async function createTag(name: string, color = DEFAULT_TAG_COLOR) {
   return withRepositoryError("创建标签", async () => {
     const database = await getNotebookDatabase();
     const normalizedName = normalizeTagName(name);
-    return createTagRecord(database, normalizedName);
+    return createTagRecord(database, normalizedName, color);
   });
 }
 
-export async function renameTag(id: number, name: string) {
+export async function renameTag(
+  id: number,
+  name: string,
+  color = DEFAULT_TAG_COLOR,
+) {
   return withRepositoryError("重命名标签", async () => {
     const database = await getNotebookDatabase();
     const normalizedName = normalizeTagName(name);
+    const normalizedColor = normalizeTagColor(color);
     const result = await database.execute(
       `
         UPDATE tags
-        SET name = $1, updated_at = CURRENT_TIMESTAMP
-        WHERE id = $2
+        SET name = $1, color = $2, updated_at = CURRENT_TIMESTAMP
+        WHERE id = $3
       `,
-      [normalizedName, id],
+      [normalizedName, normalizedColor, id],
     );
 
     if (result.rowsAffected === 0) {
@@ -978,6 +1045,34 @@ export async function renameTag(id: number, name: string) {
 export async function deleteTag(id: number) {
   return withRepositoryError("删除标签", async () => {
     const database = await getNotebookDatabase();
+    const [occurrenceReference, legacyReference] = await Promise.all([
+      database.select<CountRow[]>(
+        `
+          SELECT COUNT(*) AS count
+          FROM note_tag_occurrences
+          WHERE tag_id = $1
+        `,
+        [id],
+      ),
+      database.select<CountRow[]>(
+        `
+          SELECT COUNT(*) AS count
+          FROM note_tags
+          WHERE tag_id = $1
+        `,
+        [id],
+      ),
+    ]);
+
+    const occurrenceCount = occurrenceReference[0]?.count ?? 0;
+    const legacyCount = legacyReference[0]?.count ?? 0;
+
+    if (occurrenceCount > 0 || legacyCount > 0) {
+      throw new RepositoryValidationError(
+        "该标签仍被正文标注引用，请先移除相关内容标注后再删除。",
+      );
+    }
+
     const result = await database.execute("DELETE FROM tags WHERE id = $1", [id]);
 
     if (result.rowsAffected === 0) {

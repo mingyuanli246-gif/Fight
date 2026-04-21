@@ -3,7 +3,7 @@ use crate::resource_ops::{
 };
 use chrono::{Local, NaiveDate, Utc};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
@@ -31,8 +31,10 @@ const APP_META_KEY_REVIEW_SCHEDULE_DIRTY_NOTE_IDS: &str = "review_schedule_dirty
 const DEFAULT_REVIEW_PLAN_NAME: &str = "系统默认计划";
 const DEFAULT_REVIEW_STEP_OFFSETS: [i64; 4] = [2, 5, 10, 18];
 const LEGACY_RECOVERY_FOLDER_NAME: &str = "未归档迁移";
-const TAG_COLOR_PALETTE: [&str; 8] = [
-    "#2563EB", "#DC2626", "#CA8A04", "#059669", "#7C3AED", "#DB2777", "#0891B2", "#EA580C",
+const DEFAULT_TAG_COLOR: &str = "#FF3B30";
+const TAG_COLOR_PALETTE: [&str; 12] = [
+    "#FF3B30", "#FF9500", "#FFCC00", "#34C759", "#00C7BE", "#5AC8FA", "#007AFF", "#5856D6",
+    "#AF52DE", "#FF2D55", "#A2845E", "#8E8E93",
 ];
 
 #[derive(Debug, Serialize)]
@@ -163,6 +165,18 @@ pub struct ManagedResourceCleanupFailure {
 pub struct ManagedResourceCleanupResult {
     pub deleted_count: usize,
     pub failed: Vec<ManagedResourceCleanupFailure>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteTagOccurrenceInput {
+    pub tag_id: i64,
+    pub block_id: String,
+    pub start_offset: i64,
+    pub end_offset: i64,
+    pub node_type: String,
+    pub snippet_text: String,
+    pub sort_order: i64,
 }
 
 fn classify_database_error(message: &str) -> &'static str {
@@ -1108,15 +1122,26 @@ fn fetch_tags_by_note(connection: &Connection, note_id: i64) -> Result<Vec<TagRe
     Ok(tags)
 }
 
-fn get_next_tag_color(connection: &Connection) -> Result<String, String> {
-    let count: i64 = connection
-        .query_row("SELECT COUNT(*) FROM tags", [], |row| row.get(0))
-        .map_err(|error| to_command_error("统计标签数量", error))?;
-    Ok(TAG_COLOR_PALETTE[(count as usize) % TAG_COLOR_PALETTE.len()].to_string())
+fn normalize_tag_color(color: &str) -> String {
+    let normalized = color.trim().to_ascii_uppercase();
+
+    if normalized.len() == 7
+        && normalized.starts_with('#')
+        && normalized
+            .as_bytes()
+            .iter()
+            .skip(1)
+            .all(|byte| byte.is_ascii_hexdigit())
+        && TAG_COLOR_PALETTE.contains(&normalized.as_str())
+    {
+        normalized
+    } else {
+        DEFAULT_TAG_COLOR.to_string()
+    }
 }
 
 fn create_tag_record(connection: &Connection, normalized_name: &str) -> Result<TagRecord, String> {
-    let color = get_next_tag_color(connection)?;
+    let color = normalize_tag_color(DEFAULT_TAG_COLOR);
     connection
         .execute(
             "
@@ -1138,6 +1163,42 @@ fn normalize_tag_name(name: &str) -> Result<String, String> {
     }
 
     Ok(normalized)
+}
+
+fn tag_exists(connection: &Connection, tag_id: i64) -> Result<bool, String> {
+    connection
+        .query_row("SELECT 1 FROM tags WHERE id = ?1 LIMIT 1", [tag_id], |_| Ok(()))
+        .optional()
+        .map_err(|error| to_command_error("校验标签是否存在", error))
+        .map(|value| value.is_some())
+}
+
+fn validate_note_tag_occurrences(
+    connection: &Connection,
+    occurrences: &[NoteTagOccurrenceInput],
+) -> Result<BTreeSet<i64>, String> {
+    let mut distinct_tag_ids = BTreeSet::new();
+
+    for occurrence in occurrences {
+        if occurrence.tag_id <= 0 || !tag_exists(connection, occurrence.tag_id)? {
+            return Err("目标标签不存在。".to_string());
+        }
+
+        if occurrence.block_id.trim().is_empty()
+            || occurrence.node_type.trim().is_empty()
+            || occurrence.snippet_text.trim().is_empty()
+            || occurrence.start_offset < 0
+            || occurrence.end_offset < 0
+            || occurrence.start_offset >= occurrence.end_offset
+            || occurrence.sort_order < 0
+        {
+            return Err("标注数据无效，请重新应用标签后再保存。".to_string());
+        }
+
+        distinct_tag_ids.insert(occurrence.tag_id);
+    }
+
+    Ok(distinct_tag_ids)
 }
 
 fn fetch_review_plan_by_id(
@@ -1273,9 +1334,11 @@ fn collect_review_note_ids(connection: &Connection) -> Result<BTreeSet<i64>, Str
 
 fn note_exists(connection: &Connection, note_id: i64) -> Result<bool, String> {
     let count: i64 = connection
-        .query_row("SELECT COUNT(*) FROM notes WHERE id = ?1", [note_id], |row| {
-            row.get(0)
-        })
+        .query_row(
+            "SELECT COUNT(*) FROM notes WHERE id = ?1",
+            [note_id],
+            |row| row.get(0),
+        )
         .map_err(|error| to_command_error("读取文件", error))?;
 
     Ok(count > 0)
@@ -1297,7 +1360,9 @@ fn clear_all_review_tables(transaction: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-fn create_default_review_plan(transaction: &Connection) -> Result<ReviewPlanWithStepsRecord, String> {
+fn create_default_review_plan(
+    transaction: &Connection,
+) -> Result<ReviewPlanWithStepsRecord, String> {
     transaction
         .execute(
             "
@@ -1363,15 +1428,15 @@ fn default_review_plan_is_valid(connection: &Connection) -> Result<bool, String>
         .all(|(step, expected_offset)| step.offset_days == *expected_offset))
 }
 
-fn clear_review_schedule_for_note(
-    transaction: &Connection,
-    note_id: i64,
-) -> Result<(), String> {
+fn clear_review_schedule_for_note(transaction: &Connection, note_id: i64) -> Result<(), String> {
     transaction
         .execute("DELETE FROM review_tasks WHERE note_id = ?1", [note_id])
         .map_err(|error| to_command_error("删除复习任务", error))?;
     transaction
-        .execute("DELETE FROM note_review_bindings WHERE note_id = ?1", [note_id])
+        .execute(
+            "DELETE FROM note_review_bindings WHERE note_id = ?1",
+            [note_id],
+        )
         .map_err(|error| to_command_error("删除复习绑定", error))?;
     update_review_schedule_dirty_note_id(transaction, note_id, false)?;
     Ok(())
@@ -1416,13 +1481,14 @@ fn write_note_review_schedule(
             .map_err(|error| to_command_error("写入复习任务", error))?;
     }
 
-    fetch_note_review_schedule(transaction, note_id)
-        .map(|schedule| schedule.unwrap_or(NoteReviewScheduleRecord {
+    fetch_note_review_schedule(transaction, note_id).map(|schedule| {
+        schedule.unwrap_or(NoteReviewScheduleRecord {
             note_id,
             dates: dates.to_vec(),
             updated_at: None,
             activated_at: Some(activated_at.to_string()),
-        }))
+        })
+    })
 }
 
 fn build_default_review_dates(base_date: &str) -> Result<Vec<String>, String> {
@@ -1445,13 +1511,8 @@ fn reset_note_review_schedule_to_default(
     let default_plan = fetch_default_review_plan(transaction)?
         .ok_or_else(|| "系统默认复习计划不存在。".to_string())?;
     let dates = build_default_review_dates(base_date)?;
-    let schedule = write_note_review_schedule(
-        transaction,
-        note_id,
-        default_plan.id,
-        base_date,
-        &dates,
-    )?;
+    let schedule =
+        write_note_review_schedule(transaction, note_id, default_plan.id, base_date, &dates)?;
 
     Ok(Some(schedule))
 }
@@ -1596,7 +1657,8 @@ fn activate_note_review_schedule_tx_internal(
     let transaction = connection
         .transaction()
         .map_err(|error| to_command_error("开启执行复习计划事务", error))?;
-    let schedule = write_note_review_schedule(&transaction, note_id, default_plan.id, &today, &dates)?;
+    let schedule =
+        write_note_review_schedule(&transaction, note_id, default_plan.id, &today, &dates)?;
     transaction
         .commit()
         .map_err(|error| to_command_error("提交执行复习计划事务", error))?;
@@ -1753,7 +1815,11 @@ fn ensure_notebook_tree_constraints_tx_internal(connection: &mut Connection) -> 
                       INSERT INTO folders (notebook_id, parent_folder_id, name, sort_order)
                       VALUES (?1, NULL, ?2, ?3)
                     ",
-                    params![notebook_id, recovery_folder_name, ordered_folder_ids.len() as i64],
+                    params![
+                        notebook_id,
+                        recovery_folder_name,
+                        ordered_folder_ids.len() as i64
+                    ],
                 )
                 .map_err(|error| to_command_error("创建恢复文件夹", error))?;
 
@@ -2336,6 +2402,105 @@ fn update_note_content_tx_internal(
     fetch_note_by_id(connection, note_id)
 }
 
+fn save_note_content_with_tags_tx_internal(
+    connection: &mut Connection,
+    note_id: i64,
+    content: &str,
+    occurrences: &[NoteTagOccurrenceInput],
+) -> Result<NoteRecord, String> {
+    ensure_note_search_ready_internal(connection)?;
+
+    let transaction = connection
+        .transaction()
+        .map_err(|error| to_command_error("开启保存正文事务", error))?;
+    let distinct_tag_ids = validate_note_tag_occurrences(&transaction, occurrences)?;
+    let updated = transaction
+        .execute(
+            "
+              UPDATE notes
+              SET content_plaintext = ?1, updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+              WHERE id = ?2
+            ",
+            params![content, note_id],
+        )
+        .map_err(|error| to_command_error("保存正文", error))?;
+
+    if updated == 0 {
+        return Err("目标文件不存在。".to_string());
+    }
+
+    transaction
+        .execute(
+            "DELETE FROM note_tag_occurrences WHERE note_id = ?1",
+            [note_id],
+        )
+        .map_err(|error| to_command_error("清理旧标注索引", error))?;
+
+    if !occurrences.is_empty() {
+        let mut insert_occurrence = transaction
+            .prepare(
+                "
+                  INSERT INTO note_tag_occurrences (
+                    note_id,
+                    tag_id,
+                    block_id,
+                    start_offset,
+                    end_offset,
+                    node_type,
+                    snippet_text,
+                    sort_order
+                  )
+                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                ",
+            )
+            .map_err(|error| to_command_error("准备写入标注索引", error))?;
+
+        for occurrence in occurrences {
+            insert_occurrence
+                .execute(params![
+                    note_id,
+                    occurrence.tag_id,
+                    occurrence.block_id.trim(),
+                    occurrence.start_offset,
+                    occurrence.end_offset,
+                    occurrence.node_type.trim(),
+                    occurrence.snippet_text.trim(),
+                    occurrence.sort_order,
+                ])
+                .map_err(|error| to_command_error("写入标注索引", error))?;
+        }
+    }
+
+    transaction
+        .execute("DELETE FROM note_tags WHERE note_id = ?1", [note_id])
+        .map_err(|error| to_command_error("清理旧标签兼容层", error))?;
+
+    if !distinct_tag_ids.is_empty() {
+        let mut insert_note_tag = transaction
+            .prepare(
+                "
+                  INSERT INTO note_tags (note_id, tag_id)
+                  VALUES (?1, ?2)
+                ",
+            )
+            .map_err(|error| to_command_error("准备写入标签兼容层", error))?;
+
+        for tag_id in distinct_tag_ids {
+            insert_note_tag
+                .execute(params![note_id, tag_id])
+                .map_err(|error| to_command_error("写入标签兼容层", error))?;
+        }
+    }
+
+    let (title, content_plaintext) = fetch_note_index_payload(&transaction, note_id)?;
+    upsert_note_search_entry(&transaction, note_id, &title, &content_plaintext)?;
+    transaction
+        .commit()
+        .map_err(|error| to_command_error("提交保存正文事务", error))?;
+
+    fetch_note_by_id(connection, note_id)
+}
+
 fn delete_note_tx_internal(connection: &mut Connection, note_id: i64) -> Result<(), String> {
     ensure_note_search_ready_internal(connection)?;
 
@@ -2844,7 +3009,10 @@ fn insert_normalized_resource_path(paths: &mut BTreeSet<String>, resource_path: 
     }
 }
 
-fn to_cleanup_failure(resource_path: impl Into<String>, message: impl Into<String>) -> ManagedResourceCleanupFailure {
+fn to_cleanup_failure(
+    resource_path: impl Into<String>,
+    message: impl Into<String>,
+) -> ManagedResourceCleanupFailure {
     ManagedResourceCleanupFailure {
         resource_path: resource_path.into(),
         message: message.into(),
@@ -3053,9 +3221,7 @@ fn cleanup_candidate_unreferenced_managed_resources(
                 result.deleted_count += 1;
             }
             Err(error) => {
-                result
-                    .failed
-                    .push(to_cleanup_failure(resource_path, error));
+                result.failed.push(to_cleanup_failure(resource_path, error));
             }
         }
     }
@@ -3120,7 +3286,10 @@ fn collect_managed_resource_file_candidates(
                 }
             }
             Err(error) => {
-                failures.push(to_cleanup_failure(directory_name.to_string(), error.to_string()));
+                failures.push(to_cleanup_failure(
+                    directory_name.to_string(),
+                    error.to_string(),
+                ));
             }
         }
     }
@@ -3237,10 +3406,7 @@ pub fn ensure_notebook_tree_constraints_tx(app: AppHandle) -> Result<(), String>
 }
 
 #[tauri::command]
-pub fn reorder_notebooks_tx(
-    app: AppHandle,
-    ordered_notebook_ids: Vec<i64>,
-) -> Result<(), String> {
+pub fn reorder_notebooks_tx(app: AppHandle, ordered_notebook_ids: Vec<i64>) -> Result<(), String> {
     let mut connection = open_database_connection(&app)?;
     reorder_notebooks_tx_internal(&mut connection, &ordered_notebook_ids)
 }
@@ -3413,6 +3579,17 @@ pub fn update_note_content_tx(
 }
 
 #[tauri::command]
+pub fn save_note_content_with_tags_tx(
+    app: AppHandle,
+    note_id: i64,
+    content: String,
+    occurrences: Vec<NoteTagOccurrenceInput>,
+) -> Result<NoteRecord, String> {
+    let mut connection = open_database_connection(&app)?;
+    save_note_content_with_tags_tx_internal(&mut connection, note_id, &content, &occurrences)
+}
+
+#[tauri::command]
 pub fn delete_note_tx(app: AppHandle, note_id: i64) -> Result<(), String> {
     let mut connection = open_database_connection(&app)?;
     let candidate_paths = collect_managed_resource_paths_for_note(&connection, note_id)?;
@@ -3480,26 +3657,25 @@ pub fn set_review_task_completed_tx(
 #[cfg(test)]
 mod tests {
     use super::{
-        add_days, add_tag_to_note_by_name_tx_internal, bind_review_plan_to_note_tx_internal,
-        activate_note_review_schedule_tx_internal, clear_note_review_schedule_tx_internal,
-        cleanup_candidate_unreferenced_managed_resources,
-        cleanup_unreferenced_managed_resources_internal, clear_notebook_cover_image_tx_internal,
-        collect_managed_resource_paths_for_folder_subtree, collect_managed_resource_paths_for_notebook,
-        create_folder_tx_internal, create_note_tx_internal, create_notebook_tx_internal,
-        create_review_plan_tx_internal,
+        activate_note_review_schedule_tx_internal, add_days, add_tag_to_note_by_name_tx_internal,
+        bind_review_plan_to_note_tx_internal, cleanup_candidate_unreferenced_managed_resources,
+        cleanup_unreferenced_managed_resources_internal, clear_note_review_schedule_tx_internal,
+        clear_notebook_cover_image_tx_internal, collect_managed_resource_paths_for_folder_subtree,
+        collect_managed_resource_paths_for_notebook, create_folder_tx_internal,
+        create_note_tx_internal, create_notebook_tx_internal, create_review_plan_tx_internal,
         delete_folder_tx_internal, delete_note_tx_internal, delete_notebook_tx_internal,
-        delete_review_plan_tx_internal,
-        ensure_app_meta_table, ensure_note_search_ready_internal, ensure_note_search_table,
-        ensure_notebook_tree_constraints_tx_internal,
-        ensure_review_feature_ready_internal,
-        extract_indexable_plain_text, extract_note_image_resource_paths, rebuild_note_search_index_internal,
-        move_note_tx_internal,
-        rename_review_plan_tx_internal, set_review_task_completed_tx_internal,
+        delete_review_plan_tx_internal, ensure_app_meta_table, ensure_note_search_ready_internal,
+        ensure_note_search_table, ensure_notebook_tree_constraints_tx_internal,
+        ensure_review_feature_ready_internal, extract_indexable_plain_text,
+        extract_note_image_resource_paths, move_note_tx_internal, normalize_tag_color,
+        save_note_content_with_tags_tx_internal,
+        rebuild_note_search_index_internal, rename_review_plan_tx_internal,
         reorder_folders_tx_internal, reorder_notebooks_tx_internal,
         save_note_review_schedule_tx_internal, set_note_review_schedule_dirty_tx_internal,
-        today_local_date_key, update_notebook_cover_image_tx_internal,
-        APP_META_KEY_REVIEW_FEATURE_REBUILD_V1_DONE, APP_META_KEY_REVIEW_SCHEDULE_DIRTY_NOTE_IDS,
-        DEFAULT_REVIEW_PLAN_NAME,
+        set_review_task_completed_tx_internal, today_local_date_key,
+        update_notebook_cover_image_tx_internal, APP_META_KEY_REVIEW_FEATURE_REBUILD_V1_DONE,
+        APP_META_KEY_REVIEW_SCHEDULE_DIRTY_NOTE_IDS, DEFAULT_REVIEW_PLAN_NAME, DEFAULT_TAG_COLOR,
+        NoteTagOccurrenceInput,
     };
     use chrono::Local;
     use rusqlite::Connection;
@@ -3571,6 +3747,21 @@ mod tests {
                   tag_id INTEGER NOT NULL,
                   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                   PRIMARY KEY (note_id, tag_id),
+                  FOREIGN KEY (note_id) REFERENCES notes(id) ON DELETE CASCADE,
+                  FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
+                );
+                CREATE TABLE note_tag_occurrences (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  note_id INTEGER NOT NULL,
+                  tag_id INTEGER NOT NULL,
+                  block_id TEXT NOT NULL,
+                  start_offset INTEGER NOT NULL CHECK (start_offset >= 0),
+                  end_offset INTEGER NOT NULL CHECK (end_offset >= 0),
+                  node_type TEXT NOT NULL,
+                  snippet_text TEXT NOT NULL,
+                  sort_order INTEGER NOT NULL CHECK (sort_order >= 0),
+                  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                   FOREIGN KEY (note_id) REFERENCES notes(id) ON DELETE CASCADE,
                   FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
                 );
@@ -3867,10 +4058,19 @@ mod tests {
 
         assert_eq!(result.deleted_count, 2);
         assert!(result.failed.is_empty());
-        assert!(temp_dir.path().join("resources/images/shared.png").is_file());
+        assert!(temp_dir
+            .path()
+            .join("resources/images/shared.png")
+            .is_file());
         assert!(!temp_dir.path().join("resources/images/orphan.png").exists());
-        assert!(temp_dir.path().join("resources/covers/live-cover.png").is_file());
-        assert!(!temp_dir.path().join("resources/covers/orphan-cover.png").exists());
+        assert!(temp_dir
+            .path()
+            .join("resources/covers/live-cover.png")
+            .is_file());
+        assert!(!temp_dir
+            .path()
+            .join("resources/covers/orphan-cover.png")
+            .exists());
     }
 
     #[test]
@@ -3883,7 +4083,10 @@ mod tests {
         let result = cleanup_candidate_unreferenced_managed_resources(
             temp_dir.path(),
             &connection,
-            &["../outside.png".to_string(), "resources/./images/kept.png".to_string()],
+            &[
+                "../outside.png".to_string(),
+                "resources/./images/kept.png".to_string(),
+            ],
         )
         .expect("cleanup candidate resources");
 
@@ -3926,10 +4129,19 @@ mod tests {
 
         assert_eq!(result.deleted_count, 2);
         assert!(result.failed.is_empty());
-        assert!(temp_dir.path().join("resources/images/referenced.png").is_file());
+        assert!(temp_dir
+            .path()
+            .join("resources/images/referenced.png")
+            .is_file());
         assert!(!temp_dir.path().join("resources/images/orphan.png").exists());
-        assert!(temp_dir.path().join("resources/covers/live-cover.png").is_file());
-        assert!(!temp_dir.path().join("resources/covers/orphan-cover.png").exists());
+        assert!(temp_dir
+            .path()
+            .join("resources/covers/live-cover.png")
+            .is_file());
+        assert!(!temp_dir
+            .path()
+            .join("resources/covers/orphan-cover.png")
+            .exists());
     }
 
     #[test]
@@ -3972,9 +4184,7 @@ mod tests {
         assert_eq!(count, 3);
 
         let ordered_titles = connection
-            .prepare(
-                "SELECT title FROM notes WHERE folder_id = 1 ORDER BY sort_order ASC, id ASC",
-            )
+            .prepare("SELECT title FROM notes WHERE folder_id = 1 ORDER BY sort_order ASC, id ASC")
             .expect("prepare ordered notes")
             .query_map([], |row| row.get::<_, String>(0))
             .expect("query ordered notes")
@@ -4011,8 +4221,7 @@ mod tests {
             )
             .expect("insert notebooks");
 
-        reorder_notebooks_tx_internal(&mut connection, &[3, 1, 2])
-            .expect("reorder notebooks");
+        reorder_notebooks_tx_internal(&mut connection, &[3, 1, 2]).expect("reorder notebooks");
 
         let ordered_ids = connection
             .prepare("SELECT id FROM notebooks ORDER BY custom_sort_order ASC, id ASC")
@@ -4157,8 +4366,14 @@ mod tests {
 
         assert_eq!(result.deleted_count, 1);
         assert!(result.failed.is_empty());
-        assert!(!temp_dir.path().join("resources/images/folder-unique.png").exists());
-        assert!(temp_dir.path().join("resources/images/shared.png").is_file());
+        assert!(!temp_dir
+            .path()
+            .join("resources/images/folder-unique.png")
+            .exists());
+        assert!(temp_dir
+            .path()
+            .join("resources/images/shared.png")
+            .is_file());
     }
 
     #[test]
@@ -4204,7 +4419,10 @@ mod tests {
 
         assert_eq!(result.deleted_count, 1);
         assert!(result.failed.is_empty());
-        assert!(!temp_dir.path().join("resources/images/note-only.png").exists());
+        assert!(!temp_dir
+            .path()
+            .join("resources/images/note-only.png")
+            .exists());
     }
 
     #[test]
@@ -4246,7 +4464,10 @@ mod tests {
 
         assert_eq!(result.deleted_count, 0);
         assert!(result.failed.is_empty());
-        assert!(temp_dir.path().join("resources/images/shared-note.png").is_file());
+        assert!(temp_dir
+            .path()
+            .join("resources/images/shared-note.png")
+            .is_file());
     }
 
     #[test]
@@ -4274,7 +4495,10 @@ mod tests {
             .map(|row| row.expect("map ordered folder"))
             .collect::<Vec<_>>();
 
-        assert_eq!(ordered_folder_names, vec!["文件夹三", "文件夹二", "文件夹一"]);
+        assert_eq!(
+            ordered_folder_names,
+            vec!["文件夹三", "文件夹二", "文件夹一"]
+        );
     }
 
     #[test]
@@ -4300,13 +4524,10 @@ mod tests {
             )
             .expect("insert folders");
 
-        reorder_folders_tx_internal(&mut connection, 1, &[3, 1, 2])
-            .expect("reorder folders");
+        reorder_folders_tx_internal(&mut connection, 1, &[3, 1, 2]).expect("reorder folders");
 
         let ordered_ids = connection
-            .prepare(
-                "SELECT id FROM folders WHERE notebook_id = 1 ORDER BY sort_order ASC, id ASC",
-            )
+            .prepare("SELECT id FROM folders WHERE notebook_id = 1 ORDER BY sort_order ASC, id ASC")
             .expect("prepare ordered folders")
             .query_map([], |row| row.get::<_, i64>(0))
             .expect("query ordered folders")
@@ -4438,7 +4659,10 @@ mod tests {
     fn ensure_notebook_tree_constraints_path_flattens_legacy_structure() {
         let mut connection = test_connection();
         connection
-            .execute("INSERT INTO notebooks (name, custom_sort_order) VALUES ('测试本', 0)", [])
+            .execute(
+                "INSERT INTO notebooks (name, custom_sort_order) VALUES ('测试本', 0)",
+                [],
+            )
             .expect("insert notebook");
         connection
             .execute(
@@ -4547,7 +4771,9 @@ mod tests {
         ensure_review_feature_ready_internal(&mut connection).expect("ensure review feature ready");
 
         let plan_name: String = connection
-            .query_row("SELECT name FROM review_plans LIMIT 1", [], |row| row.get(0))
+            .query_row("SELECT name FROM review_plans LIMIT 1", [], |row| {
+                row.get(0)
+            })
             .expect("read default plan name");
         let plan_count: i64 = connection
             .query_row("SELECT COUNT(*) FROM review_plans", [], |row| row.get(0))
@@ -4637,8 +4863,8 @@ mod tests {
             .expect("insert note");
 
         let today = today_local_date_key();
-        let schedule =
-            activate_note_review_schedule_tx_internal(&mut connection, 1).expect("activate schedule");
+        let schedule = activate_note_review_schedule_tx_internal(&mut connection, 1)
+            .expect("activate schedule");
 
         assert_eq!(schedule.note_id, 1);
         assert_eq!(schedule.activated_at.as_deref(), Some(today.as_str()));
@@ -4679,24 +4905,17 @@ mod tests {
             .expect("yesterday")
             .format("%Y-%m-%d")
             .to_string();
-        let past_error = save_note_review_schedule_tx_internal(
-            &mut connection,
-            1,
-            &[past_date],
-        )
-        .expect_err("past date should fail");
+        let past_error = save_note_review_schedule_tx_internal(&mut connection, 1, &[past_date])
+            .expect_err("past date should fail");
         let duplicate_error = save_note_review_schedule_tx_internal(
             &mut connection,
             1,
             &["2099-04-20".to_string(), "2099-04-20".to_string()],
         )
         .expect_err("duplicate date should fail");
-        let invalid_error = save_note_review_schedule_tx_internal(
-            &mut connection,
-            1,
-            &["2026-02-31".to_string()],
-        )
-        .expect_err("invalid date should fail");
+        let invalid_error =
+            save_note_review_schedule_tx_internal(&mut connection, 1, &["2026-02-31".to_string()])
+                .expect_err("invalid date should fail");
 
         assert_eq!(past_error, "复习日期不能早于今天。");
         assert_eq!(duplicate_error, "同一文件内的复习日期不能重复。");
@@ -4721,8 +4940,8 @@ mod tests {
                 [],
             )
             .expect("insert note");
-        let activated =
-            activate_note_review_schedule_tx_internal(&mut connection, 1).expect("activate schedule");
+        let activated = activate_note_review_schedule_tx_internal(&mut connection, 1)
+            .expect("activate schedule");
 
         let schedule = save_note_review_schedule_tx_internal(
             &mut connection,
@@ -4774,9 +4993,11 @@ mod tests {
         .expect("save reduced schedule");
 
         let task_count: i64 = connection
-            .query_row("SELECT COUNT(*) FROM review_tasks WHERE note_id = 1", [], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM review_tasks WHERE note_id = 1",
+                [],
+                |row| row.get(0),
+            )
             .expect("count tasks");
 
         assert_eq!(
@@ -4811,7 +5032,9 @@ mod tests {
         clear_note_review_schedule_tx_internal(&mut connection, 1).expect("clear schedule");
 
         let binding_count: i64 = connection
-            .query_row("SELECT COUNT(*) FROM note_review_bindings", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM note_review_bindings", [], |row| {
+                row.get(0)
+            })
             .expect("count bindings");
         let task_count: i64 = connection
             .query_row("SELECT COUNT(*) FROM review_tasks", [], |row| row.get(0))
@@ -4923,17 +5146,26 @@ mod tests {
             )
             .expect("insert second note");
         activate_note_review_schedule_tx_internal(&mut connection, 1).expect("activate first note");
-        activate_note_review_schedule_tx_internal(&mut connection, 2).expect("activate second note");
+        activate_note_review_schedule_tx_internal(&mut connection, 2)
+            .expect("activate second note");
 
         delete_note_tx_internal(&mut connection, 1).expect("delete first note");
         let after_note_delete: i64 = connection
-            .query_row("SELECT COUNT(*) FROM review_tasks WHERE note_id = 1", [], |row| row.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM review_tasks WHERE note_id = 1",
+                [],
+                |row| row.get(0),
+            )
             .expect("count first note review rows");
         assert_eq!(after_note_delete, 0);
 
         delete_folder_tx_internal(&mut connection, 2).expect("delete folder");
         let after_folder_delete: i64 = connection
-            .query_row("SELECT COUNT(*) FROM review_tasks WHERE note_id = 2", [], |row| row.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM review_tasks WHERE note_id = 2",
+                [],
+                |row| row.get(0),
+            )
             .expect("count second note review rows");
         assert_eq!(after_folder_delete, 0);
 
@@ -5106,6 +5338,257 @@ mod tests {
     }
 
     #[test]
+    fn normalize_tag_color_accepts_whitespace_and_lowercase_palette_values() {
+        assert_eq!(normalize_tag_color("  #ff3b30  "), "#FF3B30");
+        assert_eq!(normalize_tag_color("#5ac8fa"), "#5AC8FA");
+    }
+
+    #[test]
+    fn normalize_tag_color_falls_back_to_default_for_invalid_values() {
+        assert_eq!(normalize_tag_color(""), DEFAULT_TAG_COLOR);
+        assert_eq!(normalize_tag_color("#123456"), DEFAULT_TAG_COLOR);
+        assert_eq!(normalize_tag_color("not-a-color"), DEFAULT_TAG_COLOR);
+    }
+
+    #[test]
+    fn add_tag_to_note_path_creates_tags_with_default_red_color() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', NULL)",
+                [],
+            )
+            .expect("insert note");
+
+        let tags =
+            add_tag_to_note_by_name_tx_internal(&mut connection, 1, "默认颜色").expect("add tag");
+
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].color, DEFAULT_TAG_COLOR);
+    }
+
+    #[test]
+    fn save_note_content_with_tags_path_rebuilds_occurrences_and_note_tags() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', '<p>旧正文</p>')",
+                [],
+            )
+            .expect("insert note");
+        connection
+            .execute(
+                "INSERT INTO tags (name, color) VALUES ('重点', '#FF3B30'), ('定义', '#007AFF')",
+                [],
+            )
+            .expect("insert tags");
+        connection
+            .execute(
+                "INSERT INTO note_tags (note_id, tag_id) VALUES (1, 1)",
+                [],
+            )
+            .expect("insert legacy note_tags");
+        connection
+            .execute(
+                "INSERT INTO note_tag_occurrences (note_id, tag_id, block_id, start_offset, end_offset, node_type, snippet_text, sort_order) VALUES (1, 1, 'blk_oldlegacy0001', 0, 2, 'paragraph', '旧', 0)",
+                [],
+            )
+            .expect("insert legacy occurrence");
+
+        let saved_note = save_note_content_with_tags_tx_internal(
+            &mut connection,
+            1,
+            "<p data-block-id=\"blk_new_a\"><span data-note-tag=\"true\" data-note-tag-id=\"1\" data-note-tag-color=\"#FF3B30\">重点</span>文本</p>",
+            &[
+                NoteTagOccurrenceInput {
+                    tag_id: 1,
+                    block_id: "blk_new_a".to_string(),
+                    start_offset: 0,
+                    end_offset: 2,
+                    node_type: "paragraph".to_string(),
+                    snippet_text: "重点".to_string(),
+                    sort_order: 0,
+                },
+                NoteTagOccurrenceInput {
+                    tag_id: 2,
+                    block_id: "blk_new_a".to_string(),
+                    start_offset: 2,
+                    end_offset: 4,
+                    node_type: "paragraph".to_string(),
+                    snippet_text: "文本".to_string(),
+                    sort_order: 1,
+                },
+            ],
+        )
+        .expect("save note with tags");
+
+        let occurrence_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM note_tag_occurrences WHERE note_id = 1", [], |row| {
+                row.get(0)
+            })
+            .expect("count occurrences");
+        let note_tag_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM note_tags WHERE note_id = 1", [], |row| row.get(0))
+            .expect("count note_tags");
+        let stored_title_body: (String, String) = connection
+            .query_row(
+                "SELECT title, body_plaintext FROM note_search WHERE rowid = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read note_search");
+
+        assert_eq!(saved_note.content_plaintext.as_deref(), Some("<p data-block-id=\"blk_new_a\"><span data-note-tag=\"true\" data-note-tag-id=\"1\" data-note-tag-color=\"#FF3B30\">重点</span>文本</p>"));
+        assert_eq!(occurrence_count, 2);
+        assert_eq!(note_tag_count, 2);
+        assert_eq!(stored_title_body.0, "文件一");
+        assert!(stored_title_body.1.contains("重点文本"));
+    }
+
+    #[test]
+    fn save_note_content_with_tags_path_rejects_zero_length_occurrence() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', '<p>旧正文</p>')",
+                [],
+            )
+            .expect("insert note");
+        connection
+            .execute("INSERT INTO tags (name, color) VALUES ('重点', '#FF3B30')", [])
+            .expect("insert tag");
+
+        let error = save_note_content_with_tags_tx_internal(
+            &mut connection,
+            1,
+            "<p>新正文</p>",
+            &[NoteTagOccurrenceInput {
+                tag_id: 1,
+                block_id: "blk_zero_len_001".to_string(),
+                start_offset: 2,
+                end_offset: 2,
+                node_type: "paragraph".to_string(),
+                snippet_text: "重点".to_string(),
+                sort_order: 0,
+            }],
+        )
+        .expect_err("zero-length occurrence should fail");
+
+        let stored_content: String = connection
+            .query_row("SELECT content_plaintext FROM notes WHERE id = 1", [], |row| row.get(0))
+            .expect("read stored content");
+
+        assert_eq!(error, "标注数据无效，请重新应用标签后再保存。");
+        assert_eq!(stored_content, "<p>旧正文</p>");
+    }
+
+    #[test]
+    fn save_note_content_with_tags_path_rejects_empty_snippet() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', '<p>旧正文</p>')",
+                [],
+            )
+            .expect("insert note");
+        connection
+            .execute("INSERT INTO tags (name, color) VALUES ('重点', '#FF3B30')", [])
+            .expect("insert tag");
+
+        let error = save_note_content_with_tags_tx_internal(
+            &mut connection,
+            1,
+            "<p>新正文</p>",
+            &[NoteTagOccurrenceInput {
+                tag_id: 1,
+                block_id: "blk_empty_snippet_001".to_string(),
+                start_offset: 0,
+                end_offset: 2,
+                node_type: "paragraph".to_string(),
+                snippet_text: "   ".to_string(),
+                sort_order: 0,
+            }],
+        )
+        .expect_err("empty snippet should fail");
+
+        assert_eq!(error, "标注数据无效，请重新应用标签后再保存。");
+    }
+
+    #[test]
+    fn save_note_content_with_tags_path_rejects_missing_tag_reference() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', '<p>旧正文</p>')",
+                [],
+            )
+            .expect("insert note");
+
+        let error = save_note_content_with_tags_tx_internal(
+            &mut connection,
+            1,
+            "<p>新正文</p>",
+            &[NoteTagOccurrenceInput {
+                tag_id: 999,
+                block_id: "blk_missing_tag_001".to_string(),
+                start_offset: 0,
+                end_offset: 2,
+                node_type: "paragraph".to_string(),
+                snippet_text: "重点".to_string(),
+                sort_order: 0,
+            }],
+        )
+        .expect_err("missing tag should fail");
+
+        assert_eq!(error, "目标标签不存在。");
+    }
+
+    #[test]
     fn rename_review_plan_path_can_commit_three_times() {
         let mut connection = test_connection();
         create_review_plan_tx_internal(&mut connection, "方案一", &[0, 3]).expect("create plan");
@@ -5223,8 +5706,14 @@ mod tests {
 
         assert_eq!(result.deleted_count, 1);
         assert!(result.failed.is_empty());
-        assert!(!temp_dir.path().join("resources/covers/cover-a.png").exists());
-        assert!(temp_dir.path().join("resources/covers/cover-b.png").is_file());
+        assert!(!temp_dir
+            .path()
+            .join("resources/covers/cover-a.png")
+            .exists());
+        assert!(temp_dir
+            .path()
+            .join("resources/covers/cover-b.png")
+            .is_file());
     }
 
     #[test]
@@ -5265,7 +5754,10 @@ mod tests {
 
         assert_eq!(result.deleted_count, 0);
         assert!(result.failed.is_empty());
-        assert!(temp_dir.path().join("resources/covers/shared-cover.png").is_file());
+        assert!(temp_dir
+            .path()
+            .join("resources/covers/shared-cover.png")
+            .is_file());
     }
 
     #[test]
@@ -5288,12 +5780,9 @@ mod tests {
             .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
             .expect("insert notebook");
 
-        let error = update_notebook_cover_image_tx_internal(
-            &mut connection,
-            1,
-            "/Users/test/cover-a.png",
-        )
-        .expect_err("absolute cover path should fail");
+        let error =
+            update_notebook_cover_image_tx_internal(&mut connection, 1, "/Users/test/cover-a.png")
+                .expect_err("absolute cover path should fail");
 
         assert_eq!(error, "资源路径无效。");
     }
@@ -5374,7 +5863,10 @@ mod tests {
 
         assert_eq!(result.deleted_count, 0);
         assert!(result.failed.is_empty());
-        assert!(temp_dir.path().join("resources/covers/shared-cover.png").is_file());
+        assert!(temp_dir
+            .path()
+            .join("resources/covers/shared-cover.png")
+            .is_file());
     }
 
     #[test]
@@ -5413,7 +5905,10 @@ mod tests {
 
         assert_eq!(result.deleted_count, 0);
         assert!(result.failed.is_empty());
-        assert!(temp_dir.path().join("resources/covers/shared-cover.png").is_file());
+        assert!(temp_dir
+            .path()
+            .join("resources/covers/shared-cover.png")
+            .is_file());
     }
 
     #[test]
@@ -5450,7 +5945,10 @@ mod tests {
         )
         .expect("cleanup after note deletion");
         assert_eq!(after_note.deleted_count, 0);
-        assert!(temp_dir.path().join("resources/covers/shared-cover.png").is_file());
+        assert!(temp_dir
+            .path()
+            .join("resources/covers/shared-cover.png")
+            .is_file());
 
         clear_notebook_cover_image_tx_internal(&mut connection, 1).expect("clear cover");
         let after_cover = cleanup_candidate_unreferenced_managed_resources(
@@ -5461,7 +5959,10 @@ mod tests {
         .expect("cleanup after cover removal");
         assert_eq!(after_cover.deleted_count, 1);
         assert!(after_cover.failed.is_empty());
-        assert!(!temp_dir.path().join("resources/covers/shared-cover.png").exists());
+        assert!(!temp_dir
+            .path()
+            .join("resources/covers/shared-cover.png")
+            .exists());
     }
 
     #[test]

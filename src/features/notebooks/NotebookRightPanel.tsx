@@ -1,17 +1,20 @@
-import { NoteTagManager } from "./NoteTagManager";
+import { NoteTextTagManager } from "./NoteTextTagManager";
 import {
   NoteReviewPlanManager,
   type NoteReviewPlanManagerRef,
 } from "../review/NoteReviewPlanManager";
-import type { Note } from "./types";
+import type { RefObject } from "react";
+import type { Note, TextTagPanelState } from "./types";
 import { PanelCollapseIcon, PanelExpandIcon } from "./NotebookUiIcons";
 import styles from "./NotebookWorkspaceShell.module.css";
-import type { RefObject } from "react";
+import type { NoteEditorPaneRef } from "./NoteEditorPane";
 
 interface NotebookRightPanelProps {
   note: Note | null;
   collapsed: boolean;
   disabled: boolean;
+  noteEditorRef: RefObject<NoteEditorPaneRef | null>;
+  textTagPanelState: TextTagPanelState;
   reviewManagerRef: RefObject<NoteReviewPlanManagerRef | null>;
   onToggleCollapsed: () => void;
   onError: (message: string) => void;
@@ -21,6 +24,8 @@ export function NotebookRightPanel({
   note,
   collapsed,
   disabled,
+  noteEditorRef,
+  textTagPanelState,
   reviewManagerRef,
   onToggleCollapsed,
   onError,
@@ -59,8 +64,9 @@ export function NotebookRightPanel({
       <div className={styles.detailRightPanelBody}>
         {note ? (
           <>
-            <NoteTagManager
-              noteId={note.id}
+            <NoteTextTagManager
+              noteEditorRef={noteEditorRef}
+              panelState={textTagPanelState}
               disabled={disabled}
               onError={onError}
             />
@@ -73,7 +79,7 @@ export function NotebookRightPanel({
           </>
         ) : (
           <p className={styles.panelPlaceholder}>
-            选中文件后，这里会显示它的标签与复习计划。
+            选中文件后，这里会显示正文标签与复习计划。
           </p>
         )}
       </div>

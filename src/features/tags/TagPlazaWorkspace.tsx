@@ -4,6 +4,7 @@ import {
   useRef,
   useState,
   type MouseEvent as ReactMouseEvent,
+  type RefObject,
 } from "react";
 import {
   createTag,
@@ -12,6 +13,11 @@ import {
   listTagsWithCounts,
   renameTag,
 } from "../notebooks/repository";
+import {
+  DEFAULT_TAG_COLOR,
+  TAG_COLOR_PALETTE,
+  normalizeTagColor,
+} from "../notebooks/tagColors";
 import type {
   NoteOpenTarget,
   TaggedNoteResult,
@@ -32,6 +38,15 @@ interface ContextMenuState {
   tagId: number;
   x: number;
   y: number;
+}
+
+interface ColorPickerProps {
+  selectedColor: string;
+  isOpen: boolean;
+  label: string;
+  pickerRef: RefObject<HTMLDivElement | null>;
+  onToggle: () => void;
+  onSelect: (color: string) => void;
 }
 
 function getErrorMessage(error: unknown) {
@@ -89,6 +104,61 @@ function getClampedContextMenuPosition(x: number, y: number) {
   };
 }
 
+function handlePaletteControlMouseDown(event: ReactMouseEvent) {
+  event.preventDefault();
+}
+
+function ColorPicker({
+  selectedColor,
+  isOpen,
+  label,
+  pickerRef,
+  onToggle,
+  onSelect,
+}: ColorPickerProps) {
+  return (
+    <div ref={pickerRef} className={styles.colorPicker}>
+      <button
+        type="button"
+        className={styles.colorTrigger}
+        style={{ backgroundColor: selectedColor }}
+        onMouseDown={handlePaletteControlMouseDown}
+        onClick={onToggle}
+        aria-label={label}
+        aria-haspopup="menu"
+        aria-expanded={isOpen}
+      />
+
+      {isOpen ? (
+        <div className={styles.colorPalette} role="menu" aria-label="标签颜色">
+          {TAG_COLOR_PALETTE.map((color) => {
+            const isSelected = selectedColor === color;
+
+            return (
+              <button
+                key={color}
+                type="button"
+                className={`${styles.colorOption} ${
+                  isSelected ? styles.colorOptionSelected : ""
+                }`}
+                style={{ backgroundColor: color }}
+                onMouseDown={handlePaletteControlMouseDown}
+                onClick={() => onSelect(color)}
+                aria-label={`选择颜色 ${color}`}
+                aria-pressed={isSelected}
+              >
+                {isSelected ? (
+                  <span className={styles.colorOptionIndicator}>✓</span>
+                ) : null}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function TagPlazaWorkspace({ onOpenNote }: TagPlazaWorkspaceProps) {
   const [tags, setTags] = useState<TagWithCount[]>([]);
   const [selectedTagId, setSelectedTagId] = useState<number | null>(null);
@@ -99,13 +169,19 @@ export function TagPlazaWorkspace({ onOpenNote }: TagPlazaWorkspaceProps) {
   const [isLoadingNotes, setIsLoadingNotes] = useState(false);
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
   const [createValue, setCreateValue] = useState("");
+  const [createSelectedColor, setCreateSelectedColor] = useState(DEFAULT_TAG_COLOR);
+  const [isCreatePaletteOpen, setIsCreatePaletteOpen] = useState(false);
   const [createDialogError, setCreateDialogError] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [renamingTagId, setRenamingTagId] = useState<number | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  const [renameSelectedColor, setRenameSelectedColor] = useState(DEFAULT_TAG_COLOR);
+  const [isRenamePaletteOpen, setIsRenamePaletteOpen] = useState(false);
   const [deleteDialogTag, setDeleteDialogTag] = useState<TagWithCount | null>(null);
   const requestVersionRef = useRef(0);
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
+  const createColorPickerRef = useRef<HTMLDivElement | null>(null);
+  const renameColorPickerRef = useRef<HTMLDivElement | null>(null);
   const selectedTagIdRef = useRef<number | null>(null);
 
   const selectedTag =
@@ -138,12 +214,16 @@ export function TagPlazaWorkspace({ onOpenNote }: TagPlazaWorkspaceProps) {
   function closeCreateDialog() {
     setIsCreateDialogOpen(false);
     setCreateValue("");
+    setCreateSelectedColor(DEFAULT_TAG_COLOR);
+    setIsCreatePaletteOpen(false);
     setCreateDialogError(null);
   }
 
   function closeRenameEditor() {
     setRenamingTagId(null);
     setRenameValue("");
+    setRenameSelectedColor(DEFAULT_TAG_COLOR);
+    setIsRenamePaletteOpen(false);
   }
 
   function handleSelectTag(tagId: number) {
@@ -230,11 +310,37 @@ export function TagPlazaWorkspace({ onOpenNote }: TagPlazaWorkspaceProps) {
         return;
       }
 
+      if (
+        isCreatePaletteOpen &&
+        !createColorPickerRef.current?.contains(target)
+      ) {
+        setIsCreatePaletteOpen(false);
+      }
+
+      if (
+        isRenamePaletteOpen &&
+        !renameColorPickerRef.current?.contains(target)
+      ) {
+        setIsRenamePaletteOpen(false);
+      }
+
       setContextMenu(null);
     }
 
     function handleWindowKeyDown(event: KeyboardEvent) {
       if (event.key !== "Escape") {
+        return;
+      }
+
+      if (isCreatePaletteOpen) {
+        event.preventDefault();
+        setIsCreatePaletteOpen(false);
+        return;
+      }
+
+      if (isRenamePaletteOpen) {
+        event.preventDefault();
+        setIsRenamePaletteOpen(false);
         return;
       }
 
@@ -251,7 +357,7 @@ export function TagPlazaWorkspace({ onOpenNote }: TagPlazaWorkspaceProps) {
       window.removeEventListener("pointerdown", handleWindowPointerDown);
       window.removeEventListener("keydown", handleWindowKeyDown);
     };
-  }, []);
+  }, [isCreatePaletteOpen, isRenamePaletteOpen]);
 
   async function runMutation(operation: () => Promise<void>) {
     setErrorMessage(null);
@@ -276,7 +382,7 @@ export function TagPlazaWorkspace({ onOpenNote }: TagPlazaWorkspaceProps) {
     }
 
     await runMutation(async () => {
-      const tag = await createTag(name);
+      const tag = await createTag(name, createSelectedColor);
       closeCreateDialog();
       await refreshTags(tag.id);
     });
@@ -291,7 +397,7 @@ export function TagPlazaWorkspace({ onOpenNote }: TagPlazaWorkspaceProps) {
     }
 
     await runMutation(async () => {
-      await renameTag(tag.id, name);
+      await renameTag(tag.id, name, renameSelectedColor);
       closeRenameEditor();
       await refreshTags(tag.id);
     });
@@ -325,6 +431,8 @@ export function TagPlazaWorkspace({ onOpenNote }: TagPlazaWorkspaceProps) {
     setDeleteDialogTag(null);
     handleSelectTag(tag.id);
     setRenameValue(tag.name);
+    setRenameSelectedColor(normalizeTagColor(tag.color));
+    setIsRenamePaletteOpen(false);
     setRenamingTagId(tag.id);
   }
 
@@ -349,9 +457,18 @@ export function TagPlazaWorkspace({ onOpenNote }: TagPlazaWorkspaceProps) {
                 <div
                   className={`${styles.tagItem} ${styles.tagItemActive} ${styles.tagItemEditing}`}
                 >
-                  <span
-                    className={styles.tagDot}
-                    style={{ backgroundColor: tag.color }}
+                  <ColorPicker
+                    selectedColor={renameSelectedColor}
+                    isOpen={isRenamePaletteOpen}
+                    label={`修改标签 ${tag.name} 的颜色`}
+                    pickerRef={renameColorPickerRef}
+                    onToggle={() => {
+                      setIsRenamePaletteOpen((current) => !current);
+                    }}
+                    onSelect={(color) => {
+                      setRenameSelectedColor(color);
+                      setIsRenamePaletteOpen(false);
+                    }}
                   />
                   <span className={styles.tagItemText}>
                     <input
@@ -372,6 +489,10 @@ export function TagPlazaWorkspace({ onOpenNote }: TagPlazaWorkspaceProps) {
 
                         if (event.key === "Escape") {
                           event.preventDefault();
+                          if (isRenamePaletteOpen) {
+                            setIsRenamePaletteOpen(false);
+                            return;
+                          }
                           closeRenameEditor();
                         }
                       }}
@@ -459,6 +580,8 @@ export function TagPlazaWorkspace({ onOpenNote }: TagPlazaWorkspaceProps) {
                   closeRenameEditor();
                   setDeleteDialogTag(null);
                   setCreateDialogError(null);
+                  setCreateSelectedColor(DEFAULT_TAG_COLOR);
+                  setIsCreatePaletteOpen(false);
                   setIsCreateDialogOpen(true);
                 }}
                 disabled={isBusy}
@@ -539,29 +662,48 @@ export function TagPlazaWorkspace({ onOpenNote }: TagPlazaWorkspaceProps) {
           <div className={styles.dialogCard}>
             <h3 className={styles.dialogTitle}>创建标签</h3>
             <p className={styles.dialogText}>输入标签名称，最多 10 个字。</p>
-            <input
-              type="text"
-              className={styles.dialogInput}
-              value={createValue}
-              maxLength={20}
-              autoFocus
-              placeholder="输入标签名称"
-              onChange={(event) => {
-                setCreateDialogError(null);
-                setCreateValue(event.currentTarget.value);
-              }}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  void handleCreateTagSubmit().catch(() => undefined);
-                }
+            <div className={styles.dialogInputRow}>
+              <ColorPicker
+                selectedColor={createSelectedColor}
+                isOpen={isCreatePaletteOpen}
+                label="选择标签颜色"
+                pickerRef={createColorPickerRef}
+                onToggle={() => {
+                  setIsCreatePaletteOpen((current) => !current);
+                }}
+                onSelect={(color) => {
+                  setCreateSelectedColor(color);
+                  setIsCreatePaletteOpen(false);
+                }}
+              />
+              <input
+                type="text"
+                className={styles.dialogInput}
+                value={createValue}
+                maxLength={20}
+                autoFocus
+                placeholder="输入标签名称"
+                onChange={(event) => {
+                  setCreateDialogError(null);
+                  setCreateValue(event.currentTarget.value);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    void handleCreateTagSubmit().catch(() => undefined);
+                  }
 
-                if (event.key === "Escape") {
-                  event.preventDefault();
-                  closeCreateDialog();
-                }
-              }}
-            />
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    if (isCreatePaletteOpen) {
+                      setIsCreatePaletteOpen(false);
+                      return;
+                    }
+                    closeCreateDialog();
+                  }
+                }}
+              />
+            </div>
             {createDialogError ? (
               <p className={styles.fieldError}>{createDialogError}</p>
             ) : null}

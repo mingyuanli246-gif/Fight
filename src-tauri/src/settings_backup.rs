@@ -18,11 +18,10 @@ const RESOURCES_DIR_NAME: &str = "resources";
 const BACKUPS_DIR_NAME: &str = "backups";
 const BACKUP_FILE_PREFIX: &str = "fight-notes-backup";
 const BACKUP_FORMAT_VERSION: u32 = 1;
-const CURRENT_SCHEMA_VERSION: u32 = 5;
+const CURRENT_SCHEMA_VERSION: u32 = 6;
 const STORED_RESOURCE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif"];
 const VALID_THEMES: &[&str] = &["blue", "pink", "red", "yellow"];
-const VALID_EDITOR_FONT_FAMILIES: &[&str] =
-    &["modernSans", "elegantSerif", "systemDefault"];
+const VALID_EDITOR_FONT_FAMILIES: &[&str] = &["modernSans", "elegantSerif", "systemDefault"];
 const VALID_RETENTION_COUNTS: &[u32] = &[3, 5, 10];
 const SCHEMA_V1_REQUIRED_TABLES: &[&str] = &["notebooks", "folders", "notes"];
 const SCHEMA_V2_REQUIRED_TABLES: &[&str] = &["note_search"];
@@ -34,6 +33,7 @@ const SCHEMA_V4_REQUIRED_TABLES: &[&str] = &[
     "review_tasks",
 ];
 const SCHEMA_V5_REQUIRED_TABLES: &[&str] = &["app_meta"];
+const SCHEMA_V6_REQUIRED_TABLES: &[&str] = &["note_tag_occurrences"];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -778,6 +778,10 @@ fn required_tables_for_schema_version(schema_version: u32) -> Result<Vec<&'stati
         tables.extend(SCHEMA_V5_REQUIRED_TABLES.iter().copied());
     }
 
+    if schema_version >= 6 {
+        tables.extend(SCHEMA_V6_REQUIRED_TABLES.iter().copied());
+    }
+
     Ok(tables)
 }
 
@@ -800,6 +804,7 @@ fn infer_schema_version(connection: &Connection) -> Result<u32, String> {
     let has_note_review_bindings = table_exists(connection, "note_review_bindings")?;
     let has_review_tasks = table_exists(connection, "review_tasks")?;
     let has_app_meta = table_exists(connection, "app_meta")?;
+    let has_note_tag_occurrences = table_exists(connection, "note_tag_occurrences")?;
 
     let has_tag_group = has_tags || has_note_tags;
     let has_complete_tag_group = has_tags && has_note_tags;
@@ -828,6 +833,10 @@ fn infer_schema_version(connection: &Connection) -> Result<u32, String> {
         return Err("备份中的元数据结构不完整，无法恢复。".to_string());
     }
 
+    if has_note_tag_occurrences && !has_app_meta {
+        return Err("备份中的标签索引结构不完整，无法恢复。".to_string());
+    }
+
     let mut version = 1;
 
     if has_note_search {
@@ -844,6 +853,10 @@ fn infer_schema_version(connection: &Connection) -> Result<u32, String> {
 
     if has_app_meta {
         version = 5;
+    }
+
+    if has_note_tag_occurrences {
+        version = 6;
     }
 
     Ok(version)
@@ -1705,6 +1718,25 @@ mod tests {
         )
     }
 
+    fn create_v6_database() -> PathBuf {
+        create_temp_database(
+            "
+            CREATE TABLE notebooks (id INTEGER PRIMARY KEY);
+            CREATE TABLE folders (id INTEGER PRIMARY KEY);
+            CREATE TABLE notes (id INTEGER PRIMARY KEY);
+            CREATE VIRTUAL TABLE note_search USING fts5(title, body_plaintext);
+            CREATE TABLE tags (id INTEGER PRIMARY KEY);
+            CREATE TABLE note_tags (note_id INTEGER, tag_id INTEGER);
+            CREATE TABLE review_plans (id INTEGER PRIMARY KEY);
+            CREATE TABLE review_plan_steps (id INTEGER PRIMARY KEY);
+            CREATE TABLE note_review_bindings (note_id INTEGER PRIMARY KEY);
+            CREATE TABLE review_tasks (id INTEGER PRIMARY KEY);
+            CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE note_tag_occurrences (id INTEGER PRIMARY KEY, note_id INTEGER, tag_id INTEGER);
+            ",
+        )
+    }
+
     #[test]
     fn accepts_legacy_v4_backup_without_schema_version() {
         let path = create_temp_database(
@@ -1747,7 +1779,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_current_v5_schema_when_declared() {
+    fn accepts_current_v6_schema_when_declared() {
         let path = create_temp_database(
             "
             CREATE TABLE notebooks (id INTEGER PRIMARY KEY);
@@ -1761,8 +1793,19 @@ mod tests {
             CREATE TABLE note_review_bindings (note_id INTEGER PRIMARY KEY);
             CREATE TABLE review_tasks (id INTEGER PRIMARY KEY);
             CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE note_tag_occurrences (id INTEGER PRIMARY KEY, note_id INTEGER, tag_id INTEGER);
             ",
         );
+
+        let version =
+            validate_database_file_for_schema(&path, Some(6)).expect("validate v6 backup");
+
+        assert_eq!(version, 6);
+    }
+
+    #[test]
+    fn accepts_legacy_v5_schema_when_declared() {
+        let path = create_v5_database();
 
         let version =
             validate_database_file_for_schema(&path, Some(5)).expect("validate v5 backup");
@@ -1921,7 +1964,7 @@ mod tests {
         let paths = create_test_paths(temp_dir.path());
         let backup_path = paths.backups.join("valid.zip");
         let manifest = create_valid_manifest(Some(CURRENT_SCHEMA_VERSION));
-        let database_path = create_v5_database();
+        let database_path = create_v6_database();
         let settings_bytes =
             serde_json::to_vec(&AppSettings::default()).expect("serialize settings");
 
@@ -1980,7 +2023,7 @@ mod tests {
     fn validate_backup_file_returns_invalid_for_incompatible_schema_version() {
         let temp_dir = tempdir().expect("create temp dir");
         let paths = create_test_paths(temp_dir.path());
-        let database_path = create_v5_database();
+        let database_path = create_v6_database();
         let settings_bytes =
             serde_json::to_vec(&AppSettings::default()).expect("serialize settings");
         let manifest = create_valid_manifest(Some(CURRENT_SCHEMA_VERSION + 1));
@@ -2007,7 +2050,7 @@ mod tests {
     fn validate_backup_archive_classifies_invalid_settings() {
         let temp_dir = tempdir().expect("create temp dir");
         let backup_path = temp_dir.path().join("invalid-settings.zip");
-        let database_path = create_v5_database();
+        let database_path = create_v6_database();
         let manifest = create_valid_manifest(Some(CURRENT_SCHEMA_VERSION));
 
         write_backup_archive(
@@ -2029,7 +2072,7 @@ mod tests {
     fn validate_backup_archive_classifies_missing_resources_directory() {
         let temp_dir = tempdir().expect("create temp dir");
         let backup_path = temp_dir.path().join("missing-resources.zip");
-        let database_path = create_v5_database();
+        let database_path = create_v6_database();
         let manifest = create_valid_manifest(Some(CURRENT_SCHEMA_VERSION));
         let settings_bytes =
             serde_json::to_vec(&AppSettings::default()).expect("serialize settings");

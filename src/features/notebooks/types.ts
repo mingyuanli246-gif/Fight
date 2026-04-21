@@ -48,6 +48,55 @@ export interface NoteTag {
   createdAt: string;
 }
 
+export interface TextTagOccurrenceDraft {
+  tagId: number;
+  blockId: string;
+  startOffset: number;
+  endOffset: number;
+  nodeType: string;
+  snippetText: string;
+  sortOrder: number;
+}
+
+export interface TextTagSelectionState {
+  hasSelection: boolean;
+  isTaggableSelection: boolean;
+  activeTagId: number | null;
+  activeColorSnapshot: string | null;
+  hasMixedOrInvalidSelection: boolean;
+}
+
+export interface LiveTextTagOccurrence {
+  key: string;
+  tagId: number;
+  colorSnapshot: string;
+  blockId: string;
+  startOffset: number;
+  endOffset: number;
+  nodeType: string;
+  snippetText: string;
+  sortOrder: number;
+  from: number;
+  to: number;
+}
+
+export interface TextTagSummary {
+  totalCount: number;
+  distinctTagCount: number;
+  textCount: number;
+  formulaCount: number;
+}
+
+export type TextTagPanelMode = "apply" | "inspect" | "index";
+
+export interface TextTagPanelState {
+  mode: TextTagPanelMode;
+  selection: TextTagSelectionState;
+  activeOccurrence: LiveTextTagOccurrence | null;
+  occurrences: LiveTextTagOccurrence[];
+  summary: TextTagSummary;
+}
+
 export interface NoteSearchResult {
   noteId: number;
   notebookId: number;
