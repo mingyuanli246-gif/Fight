@@ -117,6 +117,11 @@ type PointerDropTarget =
       rect: DOMRect;
     };
 
+type TreeOverTarget =
+  DragOverEvent["over"]
+  | DragEndEvent["over"]
+  | null;
+
 interface TreeFolderRowProps {
   folder: Folder;
   noteCount: number;
@@ -211,7 +216,10 @@ function TreeDragPreview({
 }) {
   if (item.type === "folder") {
     return (
-      <div className={`${styles.treeRow} ${styles.treeDragOverlay}`}>
+      <div
+        className={`${styles.treeRow} ${styles.treeDragOverlay}`}
+        data-drag-overlay="true"
+      >
         <span className={styles.treeLabelWrap}>
           <span className={styles.treeLabel}>{folderName ?? "文件夹"}</span>
         </span>
@@ -220,7 +228,10 @@ function TreeDragPreview({
   }
 
   return (
-    <div className={`${styles.treeNoteRow} ${styles.treeDragOverlay}`}>
+    <div
+      className={`${styles.treeNoteRow} ${styles.treeDragOverlay}`}
+      data-drag-overlay="true"
+    >
       <span className={styles.treeLabelWrap}>
         <span className={styles.treeLabel}>{noteTitle ?? "文件"}</span>
       </span>
@@ -507,12 +518,14 @@ export function NotebookTreePane({
   const pendingExpandTimerRef = useRef<number | null>(null);
   const pendingExpandFolderIdRef = useRef<number | null>(null);
   const dragPointerCenterRef = useRef<{ x: number; y: number } | null>(null);
+  const dragCursorRef = useRef<{ x: number; y: number } | null>(null);
   const autoScrollRafRef = useRef<number | null>(null);
   const autoScrollDelayTimerRef = useRef<number | null>(null);
   const autoScrollDirectionRef = useRef<"up" | "down" | null>(null);
   const autoScrollLastFrameAtRef = useRef<number | null>(null);
   const preDragExpandedFolderIdsRef = useRef<Set<number>>(buildExpandedSet([]));
   const activeDragItemRef = useRef<TreeDragItem | null>(null);
+  const lastDragOverAtRef = useRef(0);
   const lastDragCompletedAtRef = useRef(0);
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -521,6 +534,31 @@ export function NotebookTreePane({
       },
     }),
   );
+
+  useEffect(() => {
+    function updateCursorPosition(event: PointerEvent) {
+      dragCursorRef.current = {
+        x: event.clientX,
+        y: event.clientY,
+      };
+    }
+
+    function handleWindowPointerMove(event: PointerEvent) {
+      updateCursorPosition(event);
+    }
+
+    function handleWindowPointerDown(event: PointerEvent) {
+      updateCursorPosition(event);
+    }
+
+    window.addEventListener("pointerdown", handleWindowPointerDown, true);
+    window.addEventListener("pointermove", handleWindowPointerMove, true);
+
+    return () => {
+      window.removeEventListener("pointerdown", handleWindowPointerDown, true);
+      window.removeEventListener("pointermove", handleWindowPointerMove, true);
+    };
+  }, []);
 
   useEffect(() => {
     activeDragItemRef.current = activeDragItem;
@@ -560,6 +598,7 @@ export function NotebookTreePane({
       setContextMenu(null);
       activeDragItemRef.current = null;
       dragPointerCenterRef.current = null;
+      dragCursorRef.current = null;
       setActiveDragItem(null);
       setDropIndicator(null);
       if (pendingExpandTimerRef.current !== null) {
@@ -574,6 +613,7 @@ export function NotebookTreePane({
       }
       autoScrollDirectionRef.current = null;
       autoScrollLastFrameAtRef.current = null;
+      lastDragOverAtRef.current = 0;
       lastNotebookIdRef.current = null;
       return;
     }
@@ -738,7 +778,7 @@ export function NotebookTreePane({
   }
 
   function getAutoScrollDirection() {
-    const pointerCenter = dragPointerCenterRef.current;
+    const pointerCenter = dragCursorRef.current ?? dragPointerCenterRef.current;
     const container = treeBodyRef.current;
 
     if (!pointerCenter || !container || isPointerInsideScrollbarGutter()) {
@@ -822,7 +862,7 @@ export function NotebookTreePane({
   }
 
   function updateDragPointer(active: DragMoveEvent["active"] | DragOverEvent["active"] | DragStartEvent["active"] | DragEndEvent["active"]) {
-    const pointerCenter = getActiveRectCenter(active);
+    const pointerCenter = dragCursorRef.current ?? getActiveRectCenter(active);
     dragPointerCenterRef.current = pointerCenter;
 
     if (pointerCenter === null) {
@@ -832,7 +872,6 @@ export function NotebookTreePane({
       return;
     }
 
-    refreshDragFeedback();
     syncAutoScroll();
   }
 
@@ -855,6 +894,8 @@ export function NotebookTreePane({
     clearPendingExpand();
     stopAutoScroll();
     dragPointerCenterRef.current = null;
+    dragCursorRef.current = null;
+    lastDragOverAtRef.current = 0;
     activeDragItemRef.current = null;
     setActiveDragItem(null);
     setDropIndicator(null);
@@ -945,7 +986,7 @@ export function NotebookTreePane({
   }
 
   function isPointerInsideScrollbarGutter() {
-    const pointerCenter = dragPointerCenterRef.current;
+    const pointerCenter = dragCursorRef.current ?? dragPointerCenterRef.current;
     const container = treeBodyRef.current;
 
     if (!pointerCenter || !container) {
@@ -961,18 +1002,23 @@ export function NotebookTreePane({
     return pointerCenter.x >= containerRect.right - scrollbarWidth;
   }
 
-  function resolvePointerDropTarget() {
-    const pointerCenter = dragPointerCenterRef.current;
+  function resolvePointerDropTarget(activeItem: TreeDragItem | null) {
+    const pointerCenter = dragCursorRef.current;
 
     if (!pointerCenter || isPointerInsideScrollbarGutter()) {
       return null;
     }
 
     const rawElement = document.elementFromPoint(pointerCenter.x, pointerCenter.y);
-    const targetElement =
-      rawElement instanceof HTMLElement
-        ? rawElement.closest<HTMLElement>("[data-tree-drop-type]")
-        : null;
+    if (!(rawElement instanceof HTMLElement)) {
+      return null;
+    }
+
+    if (rawElement.closest("[data-drag-overlay='true']")) {
+      return null;
+    }
+
+    const targetElement = rawElement.closest<HTMLElement>("[data-tree-drop-type]");
 
     if (!targetElement) {
       return null;
@@ -984,6 +1030,10 @@ export function NotebookTreePane({
     const rect = targetElement.getBoundingClientRect();
 
     if (dropType === "folder-row" && Number.isFinite(folderId)) {
+      if (activeItem?.type === "folder" && folderId === activeItem.folderId) {
+        return null;
+      }
+
       return {
         type: "folder-row",
         folderId,
@@ -996,6 +1046,10 @@ export function NotebookTreePane({
       Number.isFinite(folderId) &&
       Number.isFinite(noteId)
     ) {
+      if (activeItem?.type === "note" && noteId === activeItem.noteId) {
+        return null;
+      }
+
       return {
         type: "note-row",
         noteId,
@@ -1020,8 +1074,8 @@ export function NotebookTreePane({
       return null;
     }
 
-    const pointerCenter = dragPointerCenterRef.current;
-    const target = resolvePointerDropTarget();
+    const pointerCenter = dragCursorRef.current;
+    const target = resolvePointerDropTarget(activeItem);
 
     if (!pointerCenter || !target) {
       return null;
@@ -1068,9 +1122,116 @@ export function NotebookTreePane({
     } satisfies TreeDropIndicator;
   }
 
+  function resolveDropIndicatorFromOver(
+    activeItem: TreeDragItem | null,
+    over: TreeOverTarget,
+    active:
+      | DragStartEvent["active"]
+      | DragMoveEvent["active"]
+      | DragOverEvent["active"]
+      | DragEndEvent["active"],
+  ) {
+    if (!activeItem || !over) {
+      return null;
+    }
+
+    const pointerCenter =
+      dragCursorRef.current ?? dragPointerCenterRef.current ?? getActiveRectCenter(active);
+
+    if (!pointerCenter || isPointerInsideScrollbarGutter()) {
+      return null;
+    }
+
+    const overType = over.data.current?.type;
+
+    if (activeItem.type === "folder" && overType === "folder-row") {
+      const folderId = over.data.current?.folderId;
+
+      if (typeof folderId !== "number" || folderId === activeItem.folderId) {
+        return null;
+      }
+
+      return {
+        kind: "folder",
+        folderId,
+        side:
+          pointerCenter.y < over.rect.top + over.rect.height / 2
+            ? "before"
+            : "after",
+      } satisfies TreeDropIndicator;
+    }
+
+    if (activeItem.type !== "note") {
+      return null;
+    }
+
+    if (overType === "empty-folder") {
+      const folderId = over.data.current?.folderId;
+
+      if (typeof folderId !== "number") {
+        return null;
+      }
+
+      return {
+        kind: "folder-empty",
+        folderId,
+      } satisfies TreeDropIndicator;
+    }
+
+    if (overType !== "note-row") {
+      return null;
+    }
+
+    const noteId = over.data.current?.noteId;
+    const folderId = over.data.current?.folderId;
+
+    if (
+      typeof noteId !== "number" ||
+      typeof folderId !== "number" ||
+      noteId === activeItem.noteId
+    ) {
+      return null;
+    }
+
+    return {
+      kind: "note",
+      noteId,
+      folderId,
+      side:
+        pointerCenter.y < over.rect.top + over.rect.height / 2
+          ? "before"
+          : "after",
+    } satisfies TreeDropIndicator;
+  }
+
+  function syncFolderExpandFromOver(activeItem: TreeDragItem | null, over: TreeOverTarget) {
+    if (activeItem?.type !== "note") {
+      clearPendingExpand();
+      return;
+    }
+
+    if (over?.data.current?.type !== "folder-row") {
+      clearPendingExpand();
+      return;
+    }
+
+    const folderId = over.data.current?.folderId;
+
+    if (typeof folderId !== "number") {
+      clearPendingExpand();
+      return;
+    }
+
+    scheduleFolderExpand(folderId);
+  }
+
   function refreshDragFeedback() {
+    if (performance.now() - lastDragOverAtRef.current < 48) {
+      return;
+    }
+
     const activeItem = activeDragItemRef.current;
-    const target = resolvePointerDropTarget();
+    const target = resolvePointerDropTarget(activeItem);
 
     if (activeItem?.type === "note" && target?.type === "folder-row") {
       scheduleFolderExpand(target.folderId);
@@ -1174,6 +1335,8 @@ export function NotebookTreePane({
   function handleDragStart(event: DragStartEvent) {
     preDragExpandedFolderIdsRef.current = new Set(expandedFolderIds);
     setContextMenu(null);
+    setDropIndicator(null);
+    lastDragOverAtRef.current = 0;
 
     const dragItem = getDragItemFromActive(event.active);
 
@@ -1200,12 +1363,18 @@ export function NotebookTreePane({
 
   function handleDragOver(event: DragOverEvent) {
     updateDragPointer(event.active);
+    const activeItem = activeDragItemRef.current;
+    lastDragOverAtRef.current = performance.now();
+    syncFolderExpandFromOver(activeItem, event.over);
+    setDropIndicator(resolveDropIndicatorFromOver(activeItem, event.over, event.active));
   }
 
   async function handleDragEnd(event: DragEndEvent) {
     const dragItem = getDragItemFromActive(event.active);
     const indicator =
-      resolveDropIndicatorFromPointer(dragItem) ?? dropIndicator;
+      resolveDropIndicatorFromOver(dragItem, event.over, event.active) ??
+      resolveDropIndicatorFromPointer(dragItem) ??
+      dropIndicator;
     const preserveExpandedFolderIds = new Set<number>();
 
     try {

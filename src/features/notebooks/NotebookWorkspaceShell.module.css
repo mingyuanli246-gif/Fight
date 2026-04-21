@@ -292,12 +292,12 @@
   padding: 0;
   pointer-events: none;
   cursor: grabbing;
-  transform: rotate(1.5deg);
+  transform: none;
   opacity: 0.98;
 }
 
-.notebookCardDropBefore::before,
-.notebookCardDropAfter::after {
+.notebookCardDropBefore:not(.notebookCardDropAfter)::before,
+.notebookCardDropAfter:not(.notebookCardDropBefore)::after {
   content: "";
   position: absolute;
   top: 8px;
@@ -813,14 +813,14 @@
   width: 240px;
   pointer-events: none;
   cursor: grabbing;
-  transform: rotate(1.5deg);
+  transform: none;
   box-shadow:
     0 18px 34px rgba(15, 23, 42, 0.12),
     0 8px 18px rgba(15, 23, 42, 0.08);
 }
 
-.treeDropBefore::before,
-.treeDropAfter::after {
+.treeDropBefore:not(.treeDropAfter)::before,
+.treeDropAfter:not(.treeDropBefore)::after {
   content: "";
   position: absolute;
   left: 12px;

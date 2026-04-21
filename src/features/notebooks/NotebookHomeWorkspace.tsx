@@ -133,6 +133,7 @@ function NotebookDragPreview({
       className={`${styles.notebookCard} ${styles.notebookCardOverlay} ${
         isSelected ? styles.notebookCardSelected : ""
       }`}
+      data-drag-overlay="true"
     >
       <div className={styles.notebookCover}>
         <ManagedResourceImage
@@ -339,6 +340,7 @@ export function NotebookHomeWorkspace({
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
   const lastDragCompletedAtRef = useRef(0);
   const activeNotebookIdRef = useRef<number | null>(null);
+  const dragCursorRef = useRef<{ x: number; y: number } | null>(null);
   const sensors = useSensors(
     useSensor(PointerSensor, {
       activationConstraint: {
@@ -367,6 +369,31 @@ export function NotebookHomeWorkspace({
   useEffect(() => {
     activeNotebookIdRef.current = activeNotebookId;
   }, [activeNotebookId]);
+
+  useEffect(() => {
+    function updateCursorPosition(event: PointerEvent) {
+      dragCursorRef.current = {
+        x: event.clientX,
+        y: event.clientY,
+      };
+    }
+
+    function handleWindowPointerDown(event: PointerEvent) {
+      updateCursorPosition(event);
+    }
+
+    function handleWindowPointerMove(event: PointerEvent) {
+      updateCursorPosition(event);
+    }
+
+    window.addEventListener("pointerdown", handleWindowPointerDown, true);
+    window.addEventListener("pointermove", handleWindowPointerMove, true);
+
+    return () => {
+      window.removeEventListener("pointerdown", handleWindowPointerDown, true);
+      window.removeEventListener("pointermove", handleWindowPointerMove, true);
+    };
+  }, []);
 
   useEffect(() => {
     function handleWindowPointerDown(event: MouseEvent) {
@@ -488,7 +515,8 @@ export function NotebookHomeWorkspace({
       return null;
     }
 
-    const pointerCenterX = activeRect.left + activeRect.width / 2;
+    const pointerCenterX =
+      dragCursorRef.current?.x ?? activeRect.left + activeRect.width / 2;
     const side =
       pointerCenterX < event.over.rect.left + event.over.rect.width / 2
         ? "before"
@@ -511,10 +539,12 @@ export function NotebookHomeWorkspace({
     setContextMenu(null);
     setIsSortMenuOpen(false);
     setActiveNotebookId(notebookId);
+    setDropIndicator(null);
   }
 
   function handleDragOver(event: DragOverEvent) {
-    setDropIndicator(resolveDropIndicator(event));
+    const nextIndicator = resolveDropIndicator(event);
+    setDropIndicator(nextIndicator);
   }
 
   function finishDragState() {
@@ -522,6 +552,7 @@ export function NotebookHomeWorkspace({
       lastDragCompletedAtRef.current = performance.now();
     }
 
+    dragCursorRef.current = null;
     setActiveNotebookId(null);
     setDropIndicator(null);
   }
