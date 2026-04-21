@@ -10,6 +10,7 @@ import {
   useSensors,
   type CollisionDetection,
   type DragEndEvent,
+  type DragMoveEvent,
   type DragOverEvent,
   type DragStartEvent,
 } from "@dnd-kit/core";
@@ -64,6 +65,15 @@ interface NotebookDropIndicator {
   side: "before" | "after";
 }
 
+interface NotebookShellLayout {
+  notebookId: number;
+  rowIndex: number;
+  top: number;
+  bottom: number;
+  left: number;
+  right: number;
+}
+
 interface NotebookGridCardProps {
   notebook: Notebook;
   isSelected: boolean;
@@ -81,6 +91,7 @@ interface NotebookGridCardProps {
   onOpenNotebook: (notebookId: number) => void;
   onOpenContextMenu: (event: ReactMouseEvent<HTMLElement>) => void;
   shouldSuppressNotebookOpen: () => boolean;
+  onShellRefChange: (notebookId: number, node: HTMLDivElement | null) => void;
 }
 
 interface NotebookInsertionBandProps {
@@ -98,6 +109,10 @@ const SORT_OPTIONS: Array<{ value: NotebookHomeSort; label: string }> = [
   { value: "name-asc", label: "名称 A-Z / 拼音顺序" },
   { value: "name-desc", label: "名称 Z-A / 逆序" },
 ];
+
+const NOTEBOOK_ROW_GROUP_THRESHOLD = 18;
+const NOTEBOOK_VERTICAL_GAP_BUFFER = 34;
+const NOTEBOOK_EDGE_BUFFER = 12;
 
 function getNotebookFallbackBackground(notebook: Notebook) {
   const seed = (notebook.id + notebook.name.length) % COVER_FALLBACKS.length;
@@ -214,6 +229,7 @@ function NotebookGridCard({
   onOpenNotebook,
   onOpenContextMenu,
   shouldSuppressNotebookOpen,
+  onShellRefChange,
 }: NotebookGridCardProps) {
   const clickTimerRef = useRef<number | null>(null);
   const { attributes, listeners, setNodeRef: setDraggableNodeRef } = useDraggable({
@@ -250,7 +266,10 @@ function NotebookGridCard({
   );
 
   return (
-    <div className={styles.notebookCardShell}>
+    <div
+      ref={(node) => onShellRefChange(notebook.id, node)}
+      className={styles.notebookCardShell}
+    >
       <NotebookInsertionBand
         droppableId={`notebook-insert-before-${notebook.id}`}
         notebookId={notebook.id}
@@ -399,6 +418,7 @@ export function NotebookHomeWorkspace({
   const lastDragCompletedAtRef = useRef(0);
   const activeNotebookIdRef = useRef<number | null>(null);
   const dragCursorRef = useRef<{ x: number; y: number } | null>(null);
+  const notebookShellRefs = useRef(new Map<number, HTMLDivElement>());
   const sensors = useSensors(
     useSensor(PointerSensor, {
       activationConstraint: {
@@ -508,6 +528,134 @@ export function NotebookHomeWorkspace({
     }
   }, [isDragEnabled]);
 
+  const setNotebookShellRef = useCallback(
+    (notebookId: number, node: HTMLDivElement | null) => {
+      if (node) {
+        notebookShellRefs.current.set(notebookId, node);
+        return;
+      }
+
+      notebookShellRefs.current.delete(notebookId);
+    },
+    [],
+  );
+
+  function getNotebookShellLayouts(excludedNotebookId: number | null) {
+    const layouts: NotebookShellLayout[] = [];
+    let currentRowTop: number | null = null;
+    let currentRowIndex = -1;
+
+    for (const notebook of notebooks) {
+      if (notebook.id === excludedNotebookId) {
+        continue;
+      }
+
+      const shell = notebookShellRefs.current.get(notebook.id);
+      if (!shell) {
+        continue;
+      }
+
+      const rect = shell.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) {
+        continue;
+      }
+
+      if (
+        currentRowTop === null ||
+        Math.abs(rect.top - currentRowTop) > NOTEBOOK_ROW_GROUP_THRESHOLD
+      ) {
+        currentRowIndex += 1;
+        currentRowTop = rect.top;
+      }
+
+      layouts.push({
+        notebookId: notebook.id,
+        rowIndex: currentRowIndex,
+        top: rect.top,
+        bottom: rect.bottom,
+        left: rect.left,
+        right: rect.right,
+      });
+    }
+
+    return layouts;
+  }
+
+  function resolveVerticalGapIndicator(activeNotebookId: number) {
+    const pointer = dragCursorRef.current;
+    if (!pointer) {
+      return null;
+    }
+
+    const layouts = getNotebookShellLayouts(activeNotebookId);
+    if (layouts.length === 0) {
+      return null;
+    }
+
+    const firstLayout = layouts[0];
+    const lastLayout = layouts[layouts.length - 1];
+    const lastRowIndex = lastLayout?.rowIndex ?? 0;
+    const firstRowLayouts = layouts.filter((layout) => layout.rowIndex === 0);
+    const lastRowLayouts = layouts.filter((layout) => layout.rowIndex === lastRowIndex);
+    const pointerWithinColumn = (layout: NotebookShellLayout) =>
+      pointer.x >= layout.left && pointer.x <= layout.right;
+
+    const firstRowTop = Math.min(...firstRowLayouts.map((layout) => layout.top));
+    if (
+      pointer.y >= firstRowTop - NOTEBOOK_VERTICAL_GAP_BUFFER &&
+      pointer.y <= firstRowTop + NOTEBOOK_EDGE_BUFFER &&
+      firstRowLayouts.some(pointerWithinColumn)
+    ) {
+      return {
+        notebookId: firstLayout.notebookId,
+        side: "before",
+      } satisfies NotebookDropIndicator;
+    }
+
+    for (const layout of layouts) {
+      if (layout.rowIndex === 0 || !pointerWithinColumn(layout)) {
+        continue;
+      }
+
+      if (
+        pointer.y >= layout.top - NOTEBOOK_VERTICAL_GAP_BUFFER &&
+        pointer.y <= layout.top + NOTEBOOK_EDGE_BUFFER
+      ) {
+        return {
+          notebookId: layout.notebookId,
+          side: "before",
+        } satisfies NotebookDropIndicator;
+      }
+    }
+
+    const lastRowBottom = Math.max(...lastRowLayouts.map((layout) => layout.bottom));
+    if (
+      pointer.y >= lastRowBottom - NOTEBOOK_EDGE_BUFFER &&
+      pointer.y <= lastRowBottom + NOTEBOOK_VERTICAL_GAP_BUFFER &&
+      lastRowLayouts.some(pointerWithinColumn)
+    ) {
+      return {
+        notebookId: lastLayout.notebookId,
+        side: "after",
+      } satisfies NotebookDropIndicator;
+    }
+
+    return null;
+  }
+
+  const updateDropIndicator = useCallback((nextIndicator: NotebookDropIndicator | null) => {
+    setDropIndicator((currentIndicator) => {
+      if (
+        currentIndicator?.notebookId === nextIndicator?.notebookId &&
+        currentIndicator?.side === nextIndicator?.side
+      ) {
+        return currentIndicator;
+      }
+
+      return nextIndicator;
+    });
+  }, []);
+
   const collisionDetection = useMemo<CollisionDetection>(() => {
     return (args) =>
       pointerWithin(args).filter((entry) => {
@@ -565,18 +713,27 @@ export function NotebookHomeWorkspace({
   }
 
   function resolveDropIndicator(
-    event: Pick<DragOverEvent | DragEndEvent, "active" | "over">,
+    event: Pick<DragMoveEvent | DragOverEvent | DragEndEvent, "active" | "over">,
   ) {
+    const activeNotebookId = event.active.data.current?.notebookId;
+
+    if (typeof activeNotebookId !== "number") {
+      return null;
+    }
+
+    const gapIndicator = resolveVerticalGapIndicator(activeNotebookId);
+    if (gapIndicator) {
+      return gapIndicator;
+    }
+
     if (!event.over) {
       return null;
     }
 
-    const activeNotebookId = event.active.data.current?.notebookId;
     const overType = event.over.data.current?.type;
     const overNotebookId = event.over.data.current?.notebookId;
 
     if (
-      typeof activeNotebookId !== "number" ||
       typeof overNotebookId !== "number" ||
       activeNotebookId === overNotebookId
     ) {
@@ -633,9 +790,14 @@ export function NotebookHomeWorkspace({
     setDropIndicator(null);
   }
 
+  function handleDragMove(event: DragMoveEvent) {
+    const nextIndicator = resolveDropIndicator(event);
+    updateDropIndicator(nextIndicator);
+  }
+
   function handleDragOver(event: DragOverEvent) {
     const nextIndicator = resolveDropIndicator(event);
-    setDropIndicator(nextIndicator);
+    updateDropIndicator(nextIndicator);
   }
 
   function finishDragState() {
@@ -818,6 +980,7 @@ export function NotebookHomeWorkspace({
             },
           }}
           onDragStart={handleDragStart}
+          onDragMove={handleDragMove}
           onDragOver={handleDragOver}
           onDragCancel={finishDragState}
           onDragEnd={(event) => {
@@ -860,6 +1023,7 @@ export function NotebookHomeWorkspace({
                   setIsSortMenuOpen(false);
                 }}
                 shouldSuppressNotebookOpen={shouldSuppressNotebookOpen}
+                onShellRefChange={setNotebookShellRef}
               />
             ))}
           </section>
