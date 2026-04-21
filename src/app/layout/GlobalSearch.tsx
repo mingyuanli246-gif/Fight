@@ -181,6 +181,7 @@ export function GlobalSearch({
       noteId: result.noteId,
       notebookId: result.notebookId,
       highlightQuery: querySnapshot,
+      highlightExcerpt: result.highlightExcerpt,
       source: "global-search",
     });
   }

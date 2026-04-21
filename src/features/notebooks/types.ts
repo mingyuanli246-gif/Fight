@@ -56,6 +56,7 @@ export interface NoteSearchResult {
   notebookName: string;
   folderName: string | null;
   excerpt: string;
+  highlightExcerpt?: string;
   updatedAt: string;
 }
 

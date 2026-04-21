@@ -68,7 +68,7 @@ import styles from "./NotebookWorkspace.module.css";
 const AUTOSAVE_DELAY_MS = 800;
 const SAVED_STATUS_DURATION_MS = 1500;
 const SEARCH_HIGHLIGHT_DURATION_MS = 5000;
-const EDITOR_FONT_SIZE_STORAGE_KEY = "notebooks.editor.font-size";
+const EDITOR_FONT_SIZE_STORAGE_KEY_PREFIX = "notebooks.editor.font-size.note.";
 const MIN_EDITOR_FONT_SIZE = 12;
 const MAX_EDITOR_FONT_SIZE = 20;
 const DEFAULT_EDITOR_FONT_SIZE = 16;
@@ -100,6 +100,11 @@ interface FontSizeHistoryEntry {
   from: number;
   to: number;
   anchorUndoDepth: number;
+}
+
+interface EditorFontSizeState {
+  noteId: number;
+  fontSize: number;
 }
 
 function formatDate(value: string) {
@@ -146,13 +151,17 @@ function clampEditorFontSize(value: number) {
   return Math.min(MAX_EDITOR_FONT_SIZE, Math.max(MIN_EDITOR_FONT_SIZE, value));
 }
 
-function getInitialEditorFontSize() {
+function getEditorFontSizeStorageKey(noteId: number) {
+  return `${EDITOR_FONT_SIZE_STORAGE_KEY_PREFIX}${noteId}`;
+}
+
+function getStoredEditorFontSize(noteId: number) {
   if (typeof window === "undefined") {
     return DEFAULT_EDITOR_FONT_SIZE;
   }
 
   const storedValue = Number.parseInt(
-    window.localStorage.getItem(EDITOR_FONT_SIZE_STORAGE_KEY) ?? "",
+    window.localStorage.getItem(getEditorFontSizeStorageKey(noteId)) ?? "",
     10,
   );
 
@@ -189,7 +198,10 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
     const [editorSessionContent, setEditorSessionContent] = useState(() =>
       toEditorHtml(note.contentPlaintext),
     );
-    const [editorFontSize, setEditorFontSize] = useState(getInitialEditorFontSize);
+    const [editorFontState, setEditorFontState] = useState<EditorFontSizeState>(() => ({
+      noteId: note.id,
+      fontSize: getStoredEditorFontSize(note.id),
+    }));
     const [fontUndoStack, setFontUndoStack] = useState<FontSizeHistoryEntry[]>([]);
     const [fontRedoStack, setFontRedoStack] = useState<FontSizeHistoryEntry[]>([]);
     const [mathDialogState, setMathDialogState] = useState<MathDialogState | null>(
@@ -270,6 +282,10 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
       note.folderId === null
         ? null
         : folders.find((folder) => folder.id === note.folderId) ?? null;
+    const editorFontSize =
+      editorFontState.noteId === note.id
+        ? editorFontState.fontSize
+        : getStoredEditorFontSize(note.id);
 
     const notePath =
       note.folderId === null
@@ -311,7 +327,10 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
         },
       ]);
       setFontRedoStack([]);
-      setEditorFontSize(nextFontSize);
+      setEditorFontState({
+        noteId: note.id,
+        fontSize: nextFontSize,
+      });
     }
 
     function handleToolbarUndo() {
@@ -328,7 +347,10 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
       }
 
       if (latestFontChange) {
-        setEditorFontSize(latestFontChange.from);
+        setEditorFontState({
+          noteId: note.id,
+          fontSize: latestFontChange.from,
+        });
         setFontUndoStack((currentStack) => currentStack.slice(0, -1));
         setFontRedoStack((currentStack) => [...currentStack, latestFontChange]);
         return;
@@ -351,7 +373,10 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
       }
 
       if (latestFontChange) {
-        setEditorFontSize(latestFontChange.to);
+        setEditorFontState({
+          noteId: note.id,
+          fontSize: latestFontChange.to,
+        });
         setFontRedoStack((currentStack) => currentStack.slice(0, -1));
         setFontUndoStack((currentStack) => [...currentStack, latestFontChange]);
         return;
@@ -590,7 +615,11 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
       clearHighlightTimer();
       clearSearchHighlight(editor);
 
-      const ranges = findHighlightRanges(editor.state.doc, request.query ?? "");
+      const queryRanges = findHighlightRanges(editor.state.doc, request.query ?? "");
+      const ranges =
+        queryRanges.length > 0
+          ? queryRanges
+          : findHighlightRanges(editor.state.doc, request.excerpt ?? "");
 
       if (ranges.length === 0) {
         return;
@@ -640,13 +669,6 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
     }, [note.id, note.updatedAt]);
 
     useEffect(() => {
-      window.localStorage.setItem(
-        EDITOR_FONT_SIZE_STORAGE_KEY,
-        String(editorFontSize),
-      );
-    }, [editorFontSize]);
-
-    useEffect(() => {
       if (!editor) {
         return;
       }
@@ -655,9 +677,21 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
     }, [disabled, editor, isLoadingNote]);
 
     useEffect(() => {
+      if (editorFontState.noteId !== note.id || typeof window === "undefined") {
+        return;
+      }
+
+      window.localStorage.setItem(
+        getEditorFontSizeStorageKey(note.id),
+        String(editorFontState.fontSize),
+      );
+    }, [editorFontState, note.id]);
+
+    useEffect(() => {
       activeNoteIdRef.current = note.id;
       requestVersionRef.current += 1;
       const requestVersion = requestVersionRef.current;
+      const nextFontSize = getStoredEditorFontSize(note.id);
 
       clearPendingSaveTimer();
       clearSavedStatusTimer();
@@ -667,6 +701,10 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
       ongoingSaveContentRef.current = null;
       setFontUndoStack([]);
       setFontRedoStack([]);
+      setEditorFontState({
+        noteId: note.id,
+        fontSize: nextFontSize,
+      });
       setIsLoadingNote(true);
       setSaveStatus("unchanged");
       setMathDialogState(null);

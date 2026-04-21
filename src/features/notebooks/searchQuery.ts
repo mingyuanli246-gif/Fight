@@ -2,6 +2,12 @@ function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+export interface ExactSearchMatchRange {
+  start: number;
+  end: number;
+  text: string;
+}
+
 export function normalizeSearchQuery(value: string) {
   return value.trim().replace(/\s+/g, " ");
 }
@@ -49,4 +55,30 @@ export function buildExactSearchPattern(value: string | string[]) {
     .join("|");
 
   return new RegExp(pattern, "giu");
+}
+
+export function findFirstExactSearchMatch(
+  value: string,
+  query: string | string[],
+) {
+  const pattern = buildExactSearchPattern(query);
+
+  if (!pattern) {
+    return null;
+  }
+
+  pattern.lastIndex = 0;
+  const match = pattern.exec(value);
+  const text = match?.[0] ?? "";
+  const start = match?.index ?? -1;
+
+  if (start < 0 || text.length === 0) {
+    return null;
+  }
+
+  return {
+    start,
+    end: start + text.length,
+    text,
+  } satisfies ExactSearchMatchRange;
 }

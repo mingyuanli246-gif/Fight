@@ -9,6 +9,7 @@ import {
   TAG_ORDER,
 } from "./constants";
 import { getNotebookDatabase } from "./db";
+import { findFirstExactSearchMatch } from "./searchQuery";
 import type {
   Folder,
   Note,
@@ -328,6 +329,50 @@ function buildExcerpt(value: string) {
   return normalized.length > 120 ? `${normalized.slice(0, 120)}…` : normalized;
 }
 
+function buildMatchedExcerptPair(
+  value: string,
+  match: { start: number; end: number },
+) {
+  const normalized = value.trim();
+
+  if (!normalized) {
+    return {
+      excerpt: "正文暂无内容",
+      highlightExcerpt: undefined,
+    };
+  }
+
+  const maxLength = 120;
+  const anchorLength = Math.max(match.end - match.start, 1);
+  const beforeLength = Math.max(Math.floor((maxLength - anchorLength) / 3), 0);
+  const afterLength = Math.max(maxLength - anchorLength - beforeLength, 0);
+
+  let start = Math.max(0, match.start - beforeLength);
+  let end = Math.min(value.length, match.end + afterLength);
+
+  if (end - start < maxLength) {
+    if (start === 0) {
+      end = Math.min(value.length, maxLength);
+    } else if (end === value.length) {
+      start = Math.max(0, value.length - maxLength);
+    }
+  }
+
+  const rawExcerpt = value.slice(start, end).trim();
+
+  if (!rawExcerpt) {
+    return {
+      excerpt: buildExcerpt(value),
+      highlightExcerpt: undefined,
+    };
+  }
+
+  return {
+    excerpt: `${start > 0 ? "…" : ""}${rawExcerpt}${end < value.length ? "…" : ""}`,
+    highlightExcerpt: rawExcerpt,
+  };
+}
+
 async function selectOne<T>(
   database: Database,
   query: string,
@@ -489,7 +534,16 @@ async function ensureNoteSearchReady(database: Database) {
   return noteSearchReadyPromise;
 }
 
-function toNoteSearchResult(row: NoteSearchRow): NoteSearchResult {
+function toNoteSearchResult(row: NoteSearchRow, query: string): NoteSearchResult {
+  const bodyText = row.bodyPlaintext ?? "";
+  const firstMatch = findFirstExactSearchMatch(bodyText, query);
+  const excerptResult = firstMatch
+    ? buildMatchedExcerptPair(bodyText, firstMatch)
+    : {
+        excerpt: buildExcerpt(bodyText),
+        highlightExcerpt: undefined,
+      };
+
   return {
     noteId: row.noteId,
     notebookId: row.notebookId,
@@ -497,7 +551,8 @@ function toNoteSearchResult(row: NoteSearchRow): NoteSearchResult {
     title: row.title,
     notebookName: row.notebookName,
     folderName: row.folderName,
-    excerpt: buildExcerpt(row.bodyPlaintext),
+    excerpt: excerptResult.excerpt,
+    highlightExcerpt: excerptResult.highlightExcerpt,
     updatedAt: row.updatedAt,
   };
 }
@@ -811,7 +866,7 @@ export async function searchNotes(query: string, limit = 20) {
         [pattern, safeLimit],
       );
 
-      return rows.map(toNoteSearchResult);
+      return rows.map((row) => toNoteSearchResult(row, normalizedQuery));
     }
 
     const matchExpression = buildSafeFtsMatchExpression(normalizedQuery);
@@ -830,7 +885,7 @@ export async function searchNotes(query: string, limit = 20) {
       [matchExpression, safeLimit],
     );
 
-    return rows.map(toNoteSearchResult);
+    return rows.map((row) => toNoteSearchResult(row, normalizedQuery));
   });
 }
 
