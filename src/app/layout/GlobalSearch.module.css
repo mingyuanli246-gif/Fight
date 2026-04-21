@@ -1,6 +1,7 @@
 .searchRoot {
   position: relative;
   z-index: 20;
+  isolation: isolate;
   max-width: 540px;
 }
 
@@ -73,6 +74,7 @@
   border-radius: 18px;
   box-shadow: var(--shadow-surface);
   backdrop-filter: blur(10px);
+  pointer-events: auto;
 }
 
 .searchPanelHome {
@@ -145,4 +147,11 @@
   font-size: 12px;
   line-height: 1.6;
   color: var(--color-text-secondary);
+}
+
+.resultHighlight {
+  padding: 0 1px;
+  color: inherit;
+  background: rgba(250, 204, 21, 0.3);
+  border-radius: 4px;
 }

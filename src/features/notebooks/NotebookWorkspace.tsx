@@ -814,7 +814,7 @@ export const NotebookWorkspace = forwardRef<
     targetFolderId: number,
     targetIndex: number,
   ) {
-    const previousNotes = notes;
+    const previousNotes = notes.map((note) => ({ ...note }));
     const nextNotes = applyLocalNoteMove(previousNotes, noteId, targetFolderId, targetIndex);
 
     const token = treeOrderSaveTokenRef.current + 1;
@@ -824,7 +824,9 @@ export const NotebookWorkspace = forwardRef<
     setNotes(nextNotes);
 
     try {
-      return await moveNote(noteId, targetFolderId, targetIndex);
+      // 在 drop 合法确认后同一调用栈里立即发起后端事务，缩短拖拽后丢失窗口。
+      const persistencePromise = moveNote(noteId, targetFolderId, targetIndex);
+      return await persistencePromise;
     } catch (error) {
       if (treeOrderSaveTokenRef.current === token) {
         setNotes(previousNotes);

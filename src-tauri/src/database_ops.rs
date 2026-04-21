@@ -4393,6 +4393,48 @@ mod tests {
     }
 
     #[test]
+    fn move_note_path_can_move_into_empty_folder() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '文件夹 A', 0), (1, '空文件夹', 1)",
+                [],
+            )
+            .expect("insert folders");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, sort_order, title, content_plaintext) VALUES (1, 1, 0, '文件一', NULL), (1, 1, 1, '文件二', NULL)",
+                [],
+            )
+            .expect("insert notes");
+
+        let moved_note = move_note_tx_internal(&mut connection, 2, 2, 0).expect("move note");
+        assert_eq!(moved_note.folder_id, Some(2));
+        assert_eq!(moved_note.sort_order, 0);
+
+        let folder_a_rows = connection
+            .prepare("SELECT id, sort_order FROM notes WHERE folder_id = 1 ORDER BY sort_order ASC, id ASC")
+            .expect("prepare folder a notes")
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))
+            .expect("query folder a notes")
+            .map(|row| row.expect("map folder a note"))
+            .collect::<Vec<_>>();
+        let folder_b_rows = connection
+            .prepare("SELECT id, sort_order FROM notes WHERE folder_id = 2 ORDER BY sort_order ASC, id ASC")
+            .expect("prepare folder b notes")
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))
+            .expect("query folder b notes")
+            .map(|row| row.expect("map folder b note"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(folder_a_rows, vec![(1, 0)]);
+        assert_eq!(folder_b_rows, vec![(2, 0)]);
+    }
+
+    #[test]
     fn ensure_notebook_tree_constraints_path_flattens_legacy_structure() {
         let mut connection = test_connection();
         connection

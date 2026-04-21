@@ -1,6 +1,18 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+} from "react";
 import type { CSSProperties } from "react";
 import { searchNotes } from "../../features/notebooks/repository";
+import {
+  buildExactSearchPattern,
+  normalizeSearchQuery,
+} from "../../features/notebooks/searchQuery";
 import type {
   NoteOpenTarget,
   NoteSearchResult,
@@ -19,10 +31,6 @@ interface GlobalSearchProps {
   boxStyle?: CSSProperties;
 }
 
-function normalizeQuery(value: string) {
-  return value.trim().replace(/\s+/g, " ");
-}
-
 function formatDate(value: string) {
   return new Date(value.replace(" ", "T")).toLocaleString("zh-CN", {
     year: "numeric",
@@ -37,6 +45,55 @@ function buildPath(result: NoteSearchResult) {
   return `${result.notebookName} / ${result.folderName ?? "未归类"}`;
 }
 
+function renderHighlightedText(
+  value: string,
+  query: string,
+  highlightClassName: string,
+) {
+  const pattern = buildExactSearchPattern(query);
+
+  if (!pattern) {
+    return value;
+  }
+
+  const segments: ReactNode[] = [];
+  let lastIndex = 0;
+
+  pattern.lastIndex = 0;
+  for (const match of value.matchAll(pattern)) {
+    const start = match.index ?? -1;
+    const content = match[0] ?? "";
+
+    if (start < 0 || content.length === 0) {
+      continue;
+    }
+
+    if (start > lastIndex) {
+      segments.push(value.slice(lastIndex, start));
+    }
+
+    segments.push(
+      <mark
+        key={`${start}-${content}-${segments.length}`}
+        className={highlightClassName}
+      >
+        {value.slice(start, start + content.length)}
+      </mark>,
+    );
+    lastIndex = start + content.length;
+  }
+
+  if (segments.length === 0) {
+    return value;
+  }
+
+  if (lastIndex < value.length) {
+    segments.push(value.slice(lastIndex));
+  }
+
+  return segments;
+}
+
 export function GlobalSearch({
   onOpenResult,
   variant = "topbar",
@@ -45,20 +102,29 @@ export function GlobalSearch({
   rootStyle,
   boxStyle,
 }: GlobalSearchProps) {
-  const [query, setQuery] = useState("");
+  const [inputValue, setInputValue] = useState("");
+  const [committedQuery, setCommittedQuery] = useState("");
   const [results, setResults] = useState<NoteSearchResult[]>([]);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isSearching, setIsSearching] = useState(false);
+  const [isComposing, setIsComposing] = useState(false);
   const requestVersionRef = useRef(0);
 
-  const normalizedQuery = useMemo(() => normalizeQuery(query), [query]);
-  const shouldShowPanel = normalizedQuery.length > 0;
+  const normalizedInputValue = useMemo(
+    () => normalizeSearchQuery(inputValue),
+    [inputValue],
+  );
+  const normalizedCommittedQuery = useMemo(
+    () => normalizeSearchQuery(committedQuery),
+    [committedQuery],
+  );
+  const shouldShowPanel = normalizedInputValue.length > 0;
 
   useEffect(() => {
     requestVersionRef.current += 1;
     const requestVersion = requestVersionRef.current;
 
-    if (!normalizedQuery) {
+    if (!normalizedCommittedQuery) {
       setResults([]);
       setErrorMessage(null);
       setIsSearching(false);
@@ -71,7 +137,10 @@ export function GlobalSearch({
     const timer = window.setTimeout(() => {
       void (async () => {
         try {
-          const searchResult = await searchNotes(normalizedQuery, SEARCH_LIMIT);
+          const searchResult = await searchNotes(
+            normalizedCommittedQuery,
+            SEARCH_LIMIT,
+          );
 
           if (requestVersion !== requestVersionRef.current) {
             return;
@@ -98,20 +167,48 @@ export function GlobalSearch({
     return () => {
       window.clearTimeout(timer);
     };
-  }, [normalizedQuery]);
+  }, [normalizedCommittedQuery]);
 
-  function handleOpenResult(result: NoteSearchResult) {
-    setQuery("");
+  function handleOpenResult(result: NoteSearchResult, querySnapshot: string) {
+    requestVersionRef.current += 1;
+    setInputValue("");
+    setCommittedQuery("");
     setResults([]);
     setErrorMessage(null);
     setIsSearching(false);
+    setIsComposing(false);
     onOpenResult({
       noteId: result.noteId,
       notebookId: result.notebookId,
-      highlightQuery: normalizedQuery,
-      highlightExcerpt: result.excerpt,
+      highlightQuery: querySnapshot,
       source: "global-search",
     });
+  }
+
+  function handleResultPointerDown(
+    event: ReactPointerEvent<HTMLButtonElement>,
+    result: NoteSearchResult,
+  ) {
+    if (event.button !== 0) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    handleOpenResult(result, normalizedCommittedQuery);
+  }
+
+  function handleResultKeyDown(
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+    result: NoteSearchResult,
+  ) {
+    if (event.key !== "Enter" && event.key !== " ") {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    handleOpenResult(result, normalizedCommittedQuery);
   }
 
   return (
@@ -137,8 +234,24 @@ export function GlobalSearch({
           type="search"
           inputMode="search"
           className={styles.searchInput}
-          value={query}
-          onChange={(event) => setQuery(event.currentTarget.value)}
+          value={inputValue}
+          onChange={(event) => {
+            const nextValue = event.currentTarget.value;
+            setInputValue(nextValue);
+
+            if (!isComposing) {
+              setCommittedQuery(nextValue);
+            }
+          }}
+          onCompositionStart={() => {
+            setIsComposing(true);
+          }}
+          onCompositionEnd={(event) => {
+            const nextValue = event.currentTarget.value;
+            setIsComposing(false);
+            setInputValue(nextValue);
+            setCommittedQuery(nextValue);
+          }}
           placeholder="搜索文件标题或正文内容"
           aria-label="全局搜索"
           autoComplete="off"
@@ -168,11 +281,32 @@ export function GlobalSearch({
                   <button
                     type="button"
                     className={styles.resultItem}
-                    onClick={() => handleOpenResult(result)}
+                    onPointerDown={(event) => {
+                      handleResultPointerDown(event, result);
+                    }}
+                    onClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                    }}
+                    onKeyDown={(event) => {
+                      handleResultKeyDown(event, result);
+                    }}
                   >
-                    <span className={styles.resultTitle}>{result.title}</span>
+                    <span className={styles.resultTitle}>
+                      {renderHighlightedText(
+                        result.title,
+                        normalizedCommittedQuery,
+                        styles.resultHighlight,
+                      )}
+                    </span>
                     <span className={styles.resultPath}>{buildPath(result)}</span>
-                    <span className={styles.resultExcerpt}>{result.excerpt}</span>
+                    <span className={styles.resultExcerpt}>
+                      {renderHighlightedText(
+                        result.excerpt,
+                        normalizedCommittedQuery,
+                        styles.resultHighlight,
+                      )}
+                    </span>
                     <span className={styles.resultMeta}>
                       更新时间：{formatDate(result.updatedAt)}
                     </span>

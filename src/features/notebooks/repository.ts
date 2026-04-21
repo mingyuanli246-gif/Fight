@@ -741,7 +741,6 @@ export async function moveNote(
   targetIndex: number,
 ) {
   return withRepositoryError("保存文件排序", async () => {
-    await getNotebookDatabase();
     return moveNoteCommand(noteId, targetFolderId, targetIndex);
   });
 }

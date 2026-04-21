@@ -3,23 +3,17 @@ import { Extension } from "@tiptap/core";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { Plugin, PluginKey } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
+import {
+  buildExactSearchPattern,
+  splitExactSearchTokens,
+} from "./searchQuery";
 
 export interface SearchHighlightPayload {
   from: number;
   to: number;
 }
 
-const SEARCH_HIGHLIGHT_PLUGIN_KEY = new PluginKey<DecorationSet>(
-  "search-highlight",
-);
-
-function normalizeCandidate(value: string) {
-  return value
-    .replace(/…/g, "")
-    .trim()
-    .replace(/\s+/g, " ")
-    .toLocaleLowerCase("zh-CN");
-}
+const SEARCH_HIGHLIGHT_PLUGIN_KEY = new PluginKey<DecorationSet>("search-highlight");
 
 export function createSearchHighlightExtension(className: string) {
   return Extension.create({
@@ -33,7 +27,7 @@ export function createSearchHighlightExtension(className: string) {
             apply(transaction, previous) {
               const payload = transaction.getMeta(
                 SEARCH_HIGHLIGHT_PLUGIN_KEY,
-              ) as SearchHighlightPayload | null | undefined;
+              ) as SearchHighlightPayload[] | null | undefined;
 
               if (payload === null) {
                 return DecorationSet.empty;
@@ -41,9 +35,11 @@ export function createSearchHighlightExtension(className: string) {
 
               if (payload) {
                 return DecorationSet.create(transaction.doc, [
-                  Decoration.inline(payload.from, payload.to, {
-                    class: className,
-                  }),
+                  ...payload.map((entry) =>
+                    Decoration.inline(entry.from, entry.to, {
+                      class: className,
+                    }),
+                  ),
                 ]);
               }
 
@@ -77,7 +73,7 @@ export function clearSearchHighlight(editor: Editor | null) {
 
 export function setSearchHighlight(
   editor: Editor | null,
-  payload: SearchHighlightPayload,
+  payload: SearchHighlightPayload[],
 ) {
   if (!editor) {
     return;
@@ -88,51 +84,38 @@ export function setSearchHighlight(
   );
 }
 
-export function findFirstHighlightRange(
-  doc: ProseMirrorNode,
-  candidates: string[],
-) {
-  const normalizedCandidates = candidates
-    .flatMap((candidate) => {
-      const normalized = normalizeCandidate(candidate);
+export function findHighlightRanges(doc: ProseMirrorNode, query: string) {
+  const tokens = splitExactSearchTokens(query);
+  const pattern = buildExactSearchPattern(tokens);
 
-      if (!normalized) {
-        return [];
-      }
-
-      const tokens = normalized.split(" ").filter((token) => token.length >= 2);
-      return [normalized, ...tokens];
-    })
-    .filter((candidate, index, current) => current.indexOf(candidate) === index)
-    .sort((left, right) => right.length - left.length);
-
-  if (normalizedCandidates.length === 0) {
-    return null;
+  if (!pattern) {
+    return [] as SearchHighlightPayload[];
   }
 
-  let match: SearchHighlightPayload | null = null;
+  const matches: SearchHighlightPayload[] = [];
 
   doc.descendants((node, position) => {
-    if (match || !node.isText || !node.text) {
-      return !match;
+    if (!node.isText || !node.text) {
+      return true;
     }
 
-    const normalizedText = node.text.toLocaleLowerCase("zh-CN");
+    pattern.lastIndex = 0;
+    for (const match of node.text.matchAll(pattern)) {
+      const start = match.index ?? -1;
+      const content = match[0] ?? "";
 
-    for (const candidate of normalizedCandidates) {
-      const index = normalizedText.indexOf(candidate);
-
-      if (index >= 0) {
-        match = {
-          from: position + index,
-          to: position + index + candidate.length,
-        };
-        return false;
+      if (start < 0 || content.length === 0) {
+        continue;
       }
+
+      matches.push({
+        from: position + start,
+        to: position + start + content.length,
+      });
     }
 
     return true;
   });
 
-  return match;
+  return matches;
 }

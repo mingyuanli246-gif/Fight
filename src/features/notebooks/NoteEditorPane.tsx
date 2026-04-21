@@ -45,7 +45,7 @@ import {
 import {
   clearSearchHighlight,
   createSearchHighlightExtension,
-  findFirstHighlightRange,
+  findHighlightRanges,
   setSearchHighlight,
 } from "./searchHighlight";
 import type { EditorMathBridge, MathEditRequest } from "./mathNodes";
@@ -577,16 +577,13 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
       clearHighlightTimer();
       clearSearchHighlight(editor);
 
-      const range = findFirstHighlightRange(editor.state.doc, [
-        request.excerpt ?? "",
-        request.query ?? "",
-      ]);
+      const ranges = findHighlightRanges(editor.state.doc, request.query ?? "");
 
-      if (!range) {
+      if (ranges.length === 0) {
         return;
       }
 
-      setSearchHighlight(editor, range);
+      setSearchHighlight(editor, ranges);
 
       window.requestAnimationFrame(() => {
         const matchElement = editor.view.dom.querySelector(

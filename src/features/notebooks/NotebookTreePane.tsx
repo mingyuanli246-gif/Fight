@@ -30,6 +30,10 @@ import {
 import { ItemActionMenu } from "./ItemActionMenu";
 import styles from "./NotebookWorkspaceShell.module.css";
 
+const AUTO_SCROLL_ACTIVATE_DELAY_MS = 180;
+const AUTO_SCROLL_EDGE_THRESHOLD_PX = 40;
+const AUTO_SCROLL_SPEED_PX_PER_SECOND = 260;
+
 interface RenameState {
   kind: "folder" | "note";
   id: number;
@@ -93,6 +97,24 @@ type TreeDropIndicator =
   | {
       kind: "folder-empty";
       folderId: number;
+    };
+
+type PointerDropTarget =
+  | {
+      type: "folder-row";
+      folderId: number;
+      rect: DOMRect;
+    }
+  | {
+      type: "note-row";
+      noteId: number;
+      folderId: number;
+      rect: DOMRect;
+    }
+  | {
+      type: "empty-folder";
+      folderId: number;
+      rect: DOMRect;
     };
 
 interface TreeFolderRowProps {
@@ -294,6 +316,8 @@ function TreeFolderRow({
         <button
           ref={combineNodeRefs(setDraggableRef, setDroppableRef)}
           type="button"
+          data-tree-drop-type="folder-row"
+          data-tree-folder-id={folder.id}
           className={`${styles.treeRow} ${
             isActive ? styles.treeRowActive : ""
           } ${isDragging ? styles.treeDragSource : ""} ${
@@ -394,6 +418,9 @@ function TreeNoteRow({
     <button
       ref={combineNodeRefs(setDraggableRef, setDroppableRef)}
       type="button"
+      data-tree-drop-type="note-row"
+      data-tree-note-id={note.id}
+      data-tree-folder-id={note.folderId ?? undefined}
       className={`${styles.treeNoteRow} ${
         isActive ? styles.treeNoteRowActive : ""
       } ${isDragging ? styles.treeDragSource : ""} ${
@@ -438,6 +465,8 @@ function EmptyFolderDropZone({
   return (
     <div
       ref={setNodeRef}
+      data-tree-drop-type="empty-folder"
+      data-tree-folder-id={folderId}
       className={`${styles.treeEmptyDropZone} ${
         active ? styles.treeEmptyDropZoneActive : ""
       }`}
@@ -479,6 +508,9 @@ export function NotebookTreePane({
   const pendingExpandFolderIdRef = useRef<number | null>(null);
   const dragPointerCenterRef = useRef<{ x: number; y: number } | null>(null);
   const autoScrollRafRef = useRef<number | null>(null);
+  const autoScrollDelayTimerRef = useRef<number | null>(null);
+  const autoScrollDirectionRef = useRef<"up" | "down" | null>(null);
+  const autoScrollLastFrameAtRef = useRef<number | null>(null);
   const preDragExpandedFolderIdsRef = useRef<Set<number>>(buildExpandedSet([]));
   const activeDragItemRef = useRef<TreeDragItem | null>(null);
   const lastDragCompletedAtRef = useRef(0);
@@ -526,8 +558,22 @@ export function NotebookTreePane({
       setExpandedFolderIds(buildExpandedSet([]));
       setRenameState(null);
       setContextMenu(null);
+      activeDragItemRef.current = null;
+      dragPointerCenterRef.current = null;
       setActiveDragItem(null);
       setDropIndicator(null);
+      if (pendingExpandTimerRef.current !== null) {
+        window.clearTimeout(pendingExpandTimerRef.current);
+        pendingExpandTimerRef.current = null;
+      }
+      pendingExpandFolderIdRef.current = null;
+      clearAutoScrollDelayTimer();
+      if (autoScrollRafRef.current !== null) {
+        window.cancelAnimationFrame(autoScrollRafRef.current);
+        autoScrollRafRef.current = null;
+      }
+      autoScrollDirectionRef.current = null;
+      autoScrollLastFrameAtRef.current = null;
       lastNotebookIdRef.current = null;
       return;
     }
@@ -581,6 +627,10 @@ export function NotebookTreePane({
     return () => {
       if (pendingExpandTimerRef.current !== null) {
         window.clearTimeout(pendingExpandTimerRef.current);
+      }
+
+      if (autoScrollDelayTimerRef.current !== null) {
+        window.clearTimeout(autoScrollDelayTimerRef.current);
       }
 
       if (autoScrollRafRef.current !== null) {
@@ -668,57 +718,107 @@ export function NotebookTreePane({
     pendingExpandFolderIdRef.current = null;
   }
 
+  function clearAutoScrollDelayTimer() {
+    if (autoScrollDelayTimerRef.current !== null) {
+      window.clearTimeout(autoScrollDelayTimerRef.current);
+      autoScrollDelayTimerRef.current = null;
+    }
+  }
+
   function stopAutoScroll() {
+    clearAutoScrollDelayTimer();
+
     if (autoScrollRafRef.current !== null) {
       window.cancelAnimationFrame(autoScrollRafRef.current);
       autoScrollRafRef.current = null;
     }
+
+    autoScrollDirectionRef.current = null;
+    autoScrollLastFrameAtRef.current = null;
   }
 
-  function scheduleAutoScroll() {
-    if (autoScrollRafRef.current !== null) {
+  function getAutoScrollDirection() {
+    const pointerCenter = dragPointerCenterRef.current;
+    const container = treeBodyRef.current;
+
+    if (!pointerCenter || !container || isPointerInsideScrollbarGutter()) {
+      return null;
+    }
+
+    const containerRect = container.getBoundingClientRect();
+
+    if (pointerCenter.y <= containerRect.top + AUTO_SCROLL_EDGE_THRESHOLD_PX) {
+      return "up" as const;
+    }
+
+    if (pointerCenter.y >= containerRect.bottom - AUTO_SCROLL_EDGE_THRESHOLD_PX) {
+      return "down" as const;
+    }
+
+    return null;
+  }
+
+  function runAutoScrollFrame(timestamp: number) {
+    autoScrollRafRef.current = null;
+
+    const container = treeBodyRef.current;
+    const direction = autoScrollDirectionRef.current;
+    const nextDirection = getAutoScrollDirection();
+
+    if (!container || !direction || nextDirection !== direction) {
+      stopAutoScroll();
+      refreshDragFeedback();
       return;
     }
 
-    autoScrollRafRef.current = window.requestAnimationFrame(() => {
-      autoScrollRafRef.current = null;
+    const previousTimestamp = autoScrollLastFrameAtRef.current ?? timestamp;
+    const elapsedMs = Math.min(timestamp - previousTimestamp, 32);
+    autoScrollLastFrameAtRef.current = timestamp;
 
-      const container = treeBodyRef.current;
-      const pointerCenter = dragPointerCenterRef.current;
+    const scrollStep = Math.max(
+      1,
+      Math.round((AUTO_SCROLL_SPEED_PX_PER_SECOND * elapsedMs) / 1000),
+    );
+    const previousScrollTop = container.scrollTop;
+    container.scrollTop += direction === "up" ? -scrollStep : scrollStep;
 
-      if (!container || !pointerCenter) {
+    refreshDragFeedback();
+
+    if (container.scrollTop === previousScrollTop) {
+      stopAutoScroll();
+      return;
+    }
+
+    autoScrollRafRef.current = window.requestAnimationFrame(runAutoScrollFrame);
+  }
+
+  function syncAutoScroll() {
+    const nextDirection = getAutoScrollDirection();
+
+    if (nextDirection === null) {
+      stopAutoScroll();
+      return;
+    }
+
+    if (autoScrollDirectionRef.current === nextDirection) {
+      if (autoScrollDelayTimerRef.current !== null || autoScrollRafRef.current !== null) {
         return;
       }
+    }
 
-      const containerRect = container.getBoundingClientRect();
-      const scrollbarWidth = container.offsetWidth - container.clientWidth;
-      const scrollbarLeftEdge = containerRect.right - scrollbarWidth;
-      const edgeThreshold = 40;
-      let scrollDelta = 0;
+    stopAutoScroll();
+    autoScrollDirectionRef.current = nextDirection;
+    autoScrollDelayTimerRef.current = window.setTimeout(() => {
+      autoScrollDelayTimerRef.current = null;
 
-      if (scrollbarWidth > 0 && pointerCenter.x >= scrollbarLeftEdge) {
+      if (getAutoScrollDirection() !== nextDirection) {
         stopAutoScroll();
         return;
       }
 
-      if (pointerCenter.y < containerRect.top + edgeThreshold) {
-        scrollDelta = -Math.ceil(
-          ((containerRect.top + edgeThreshold - pointerCenter.y) / edgeThreshold) * 18,
-        );
-      } else if (pointerCenter.y > containerRect.bottom - edgeThreshold) {
-        scrollDelta = Math.ceil(
-          ((pointerCenter.y - (containerRect.bottom - edgeThreshold)) / edgeThreshold) * 18,
-        );
-      }
-
-      if (scrollDelta === 0) {
-        stopAutoScroll();
-        return;
-      }
-
-      container.scrollTop += scrollDelta;
-      scheduleAutoScroll();
-    });
+      autoScrollLastFrameAtRef.current = null;
+      autoScrollRafRef.current = window.requestAnimationFrame(runAutoScrollFrame);
+    }, AUTO_SCROLL_ACTIVATE_DELAY_MS);
   }
 
   function updateDragPointer(active: DragMoveEvent["active"] | DragOverEvent["active"] | DragStartEvent["active"] | DragEndEvent["active"]) {
@@ -726,11 +826,14 @@ export function NotebookTreePane({
     dragPointerCenterRef.current = pointerCenter;
 
     if (pointerCenter === null) {
+      clearPendingExpand();
+      setDropIndicator(null);
       stopAutoScroll();
       return;
     }
 
-    scheduleAutoScroll();
+    refreshDragFeedback();
+    syncAutoScroll();
   }
 
   function restoreExpandedFolders(preserveFolderIds: Set<number> = new Set()) {
@@ -752,6 +855,7 @@ export function NotebookTreePane({
     clearPendingExpand();
     stopAutoScroll();
     dragPointerCenterRef.current = null;
+    activeDragItemRef.current = null;
     setActiveDragItem(null);
     setDropIndicator(null);
   }
@@ -857,84 +961,124 @@ export function NotebookTreePane({
     return pointerCenter.x >= containerRect.right - scrollbarWidth;
   }
 
-  function resolveDropIndicator(
-    event: Pick<DragOverEvent | DragEndEvent, "active" | "over">,
-  ) {
-    if (!event.over || isPointerInsideScrollbarGutter()) {
+  function resolvePointerDropTarget() {
+    const pointerCenter = dragPointerCenterRef.current;
+
+    if (!pointerCenter || isPointerInsideScrollbarGutter()) {
       return null;
     }
 
-    const activeCenter = getActiveRectCenter(event.active);
-    if (!activeCenter) {
+    const rawElement = document.elementFromPoint(pointerCenter.x, pointerCenter.y);
+    const targetElement =
+      rawElement instanceof HTMLElement
+        ? rawElement.closest<HTMLElement>("[data-tree-drop-type]")
+        : null;
+
+    if (!targetElement) {
       return null;
     }
 
-    const activeType = event.active.data.current?.type;
-    const overType = event.over.data.current?.type;
+    const dropType = targetElement.dataset.treeDropType;
+    const folderId = Number(targetElement.dataset.treeFolderId);
+    const noteId = Number(targetElement.dataset.treeNoteId);
+    const rect = targetElement.getBoundingClientRect();
 
-    if (activeType === "folder-row" && overType === "folder-row") {
-      const activeFolderId = event.active.data.current?.folderId;
-      const overFolderId = event.over.data.current?.folderId;
+    if (dropType === "folder-row" && Number.isFinite(folderId)) {
+      return {
+        type: "folder-row",
+        folderId,
+        rect,
+      } satisfies PointerDropTarget;
+    }
 
-      if (
-        typeof activeFolderId !== "number" ||
-        typeof overFolderId !== "number" ||
-        activeFolderId === overFolderId
-      ) {
+    if (
+      dropType === "note-row" &&
+      Number.isFinite(folderId) &&
+      Number.isFinite(noteId)
+    ) {
+      return {
+        type: "note-row",
+        noteId,
+        folderId,
+        rect,
+      } satisfies PointerDropTarget;
+    }
+
+    if (dropType === "empty-folder" && Number.isFinite(folderId)) {
+      return {
+        type: "empty-folder",
+        folderId,
+        rect,
+      } satisfies PointerDropTarget;
+    }
+
+    return null;
+  }
+
+  function resolveDropIndicatorFromPointer(activeItem: TreeDragItem | null) {
+    if (!activeItem) {
+      return null;
+    }
+
+    const pointerCenter = dragPointerCenterRef.current;
+    const target = resolvePointerDropTarget();
+
+    if (!pointerCenter || !target) {
+      return null;
+    }
+
+    if (activeItem.type === "folder" && target.type === "folder-row") {
+      if (target.folderId === activeItem.folderId) {
         return null;
       }
 
       return {
         kind: "folder",
-        folderId: overFolderId,
+        folderId: target.folderId,
         side:
-          activeCenter.y < event.over.rect.top + event.over.rect.height / 2
+          pointerCenter.y < target.rect.top + target.rect.height / 2
             ? "before"
             : "after",
       } satisfies TreeDropIndicator;
     }
 
-    if (activeType === "note-row") {
-      if (overType === "empty-folder") {
-        const folderId = event.over.data.current?.folderId;
-
-        if (typeof folderId !== "number") {
-          return null;
-        }
-
-        return {
-          kind: "folder-empty",
-          folderId,
-        } satisfies TreeDropIndicator;
-      }
-
-      if (overType === "note-row") {
-        const noteId = event.over.data.current?.noteId;
-        const folderId = event.over.data.current?.folderId;
-        const activeNoteId = event.active.data.current?.noteId;
-
-        if (
-          typeof noteId !== "number" ||
-          typeof folderId !== "number" ||
-          typeof activeNoteId !== "number" ||
-          noteId === activeNoteId
-        ) {
-          return null;
-        }
-
-        return {
-          kind: "note",
-          noteId,
-          folderId,
-          side:
-            activeCenter.y < event.over.rect.top + event.over.rect.height / 2
-              ? "before"
-              : "after",
-        } satisfies TreeDropIndicator;
-      }
+    if (activeItem.type !== "note") {
+      return null;
     }
 
-    return null;
+    if (target.type === "empty-folder") {
+      return {
+        kind: "folder-empty",
+        folderId: target.folderId,
+      } satisfies TreeDropIndicator;
+    }
+
+    if (target.type !== "note-row" || target.noteId === activeItem.noteId) {
+      return null;
+    }
+
+    return {
+      kind: "note",
+      noteId: target.noteId,
+      folderId: target.folderId,
+      side:
+        pointerCenter.y < target.rect.top + target.rect.height / 2
+          ? "before"
+          : "after",
+    } satisfies TreeDropIndicator;
+  }
+
+  function refreshDragFeedback() {
+    const activeItem = activeDragItemRef.current;
+    const target = resolvePointerDropTarget();
+
+    if (activeItem?.type === "note" && target?.type === "folder-row") {
+      scheduleFolderExpand(target.folderId);
+    } else {
+      clearPendingExpand();
+    }
+
+    setDropIndicator(resolveDropIndicatorFromPointer(activeItem));
   }
 
   function scheduleFolderExpand(folderId: number) {
@@ -993,38 +1137,61 @@ export function NotebookTreePane({
     };
   }
 
-  function handleDragStart(event: DragStartEvent) {
-    updateDragPointer(event.active);
-    preDragExpandedFolderIdsRef.current = new Set(expandedFolderIds);
-    setContextMenu(null);
-
-    if (event.active.data.current?.type === "folder-row") {
-      const folderId = event.active.data.current.folderId;
+  function getDragItemFromActive(
+    active:
+      | DragStartEvent["active"]
+      | DragMoveEvent["active"]
+      | DragOverEvent["active"]
+      | DragEndEvent["active"],
+  ) {
+    if (active.data.current?.type === "folder-row") {
+      const folderId = active.data.current.folderId;
 
       if (typeof folderId === "number") {
-        onSelectEntity({ kind: "folder", id: folderId });
-        setActiveDragItem({
+        return {
           type: "folder",
           folderId,
-        });
+        } satisfies TreeDragItem;
       }
-
-      return;
     }
 
-    if (event.active.data.current?.type === "note-row") {
-      const noteId = event.active.data.current.noteId;
-      const folderId = event.active.data.current.folderId;
+    if (active.data.current?.type === "note-row") {
+      const noteId = active.data.current.noteId;
+      const folderId = active.data.current.folderId;
 
       if (typeof noteId === "number") {
-        onSelectEntity({ kind: "note", id: noteId });
-        setActiveDragItem({
+        return {
           type: "note",
           noteId,
           folderId: typeof folderId === "number" ? folderId : null,
-        });
+        } satisfies TreeDragItem;
       }
     }
+
+    return null;
+  }
+
+  function handleDragStart(event: DragStartEvent) {
+    preDragExpandedFolderIdsRef.current = new Set(expandedFolderIds);
+    setContextMenu(null);
+
+    const dragItem = getDragItemFromActive(event.active);
+
+    if (!dragItem) {
+      updateDragPointer(event.active);
+      return;
+    }
+
+    activeDragItemRef.current = dragItem;
+    setActiveDragItem(dragItem);
+
+    if (dragItem.type === "folder") {
+      onSelectEntity({ kind: "folder", id: dragItem.folderId });
+    } else {
+      onSelectEntity({ kind: "note", id: dragItem.noteId });
+    }
+
+    updateDragPointer(event.active);
   }
 
   function handleDragMove(event: DragMoveEvent) {
@@ -1033,32 +1200,20 @@ export function NotebookTreePane({
 
   function handleDragOver(event: DragOverEvent) {
     updateDragPointer(event.active);
-    const overType = event.over?.data.current?.type;
-    const overFolderId = event.over?.data.current?.folderId;
-
-    if (
-      activeDragItemRef.current?.type === "note" &&
-      overType === "folder-row" &&
-      typeof overFolderId === "number"
-    ) {
-      scheduleFolderExpand(overFolderId);
-    } else {
-      clearPendingExpand();
-    }
-
-    setDropIndicator(resolveDropIndicator(event));
   }
 
   async function handleDragEnd(event: DragEndEvent) {
-    const indicator = resolveDropIndicator(event) ?? dropIndicator;
+    const dragItem = getDragItemFromActive(event.active);
+    const indicator =
+      resolveDropIndicatorFromPointer(dragItem) ?? dropIndicator;
     const preserveExpandedFolderIds = new Set<number>();
-    finishVisualDragState();
 
     try {
       if (event.active.data.current?.type === "folder-row" && indicator?.kind === "folder") {
         const activeFolderId = event.active.data.current.folderId;
 
         if (typeof activeFolderId !== "number") {
+          finishVisualDragState();
           restoreExpandedFolders();
           return;
         }
@@ -1076,7 +1231,11 @@ export function NotebookTreePane({
         );
 
         if (hasChanged) {
-          await onReorderFolders(nextFolderIds);
+          const persistPromise = onReorderFolders(nextFolderIds);
+          finishVisualDragState();
+          await persistPromise;
+        } else {
+          finishVisualDragState();
         }
 
         restoreExpandedFolders();
@@ -1087,6 +1246,7 @@ export function NotebookTreePane({
         const activeNoteId = event.active.data.current.noteId;
 
         if (typeof activeNoteId !== "number") {
+          finishVisualDragState();
           restoreExpandedFolders();
           return;
         }
@@ -1094,6 +1254,7 @@ export function NotebookTreePane({
         const moveTarget = buildNoteMoveTarget(indicator, activeNoteId);
 
         if (!moveTarget) {
+          finishVisualDragState();
           restoreExpandedFolders();
           return;
         }
@@ -1103,24 +1264,29 @@ export function NotebookTreePane({
           activeNote?.folderId === moveTarget.targetFolderId &&
           activeNote.sortOrder === moveTarget.targetIndex
         ) {
+          finishVisualDragState();
           restoreExpandedFolders();
           return;
         }
 
         preserveExpandedFolderIds.add(moveTarget.targetFolderId);
-        await onMoveNote(
+        const persistPromise = onMoveNote(
           activeNoteId,
           moveTarget.targetFolderId,
           moveTarget.targetIndex,
         );
+        finishVisualDragState();
+        await persistPromise;
         restoreExpandedFolders(preserveExpandedFolderIds);
         return;
       }
     } catch {
+      finishVisualDragState();
       restoreExpandedFolders();
       return;
     }
 
+    finishVisualDragState();
     restoreExpandedFolders();
   }
 
