@@ -71,6 +71,7 @@ interface NotebookGridCardProps {
   disabled: boolean;
   dragEnabled: boolean;
   isDragging: boolean;
+  showTailInsertionBand: boolean;
   dropIndicatorSide: NotebookDropIndicator["side"] | null;
   renameValue: string;
   onRenameValueChange: (value: string) => void;
@@ -80,6 +81,14 @@ interface NotebookGridCardProps {
   onOpenNotebook: (notebookId: number) => void;
   onOpenContextMenu: (event: ReactMouseEvent<HTMLElement>) => void;
   shouldSuppressNotebookOpen: () => boolean;
+}
+
+interface NotebookInsertionBandProps {
+  droppableId: string;
+  notebookId: number;
+  side: "before" | "after";
+  position: "before" | "after";
+  enabled: boolean;
 }
 
 const SORT_OPTIONS: Array<{ value: NotebookHomeSort; label: string }> = [
@@ -158,6 +167,36 @@ function NotebookDragPreview({
   );
 }
 
+function NotebookInsertionBand({
+  droppableId,
+  notebookId,
+  side,
+  position,
+  enabled,
+}: NotebookInsertionBandProps) {
+  const { setNodeRef } = useDroppable({
+    id: droppableId,
+    data: {
+      type: "notebook-insert",
+      notebookId,
+      side,
+    },
+    disabled: !enabled,
+  });
+
+  return (
+    <div
+      ref={setNodeRef}
+      className={`${styles.notebookDropBand} ${
+        position === "before"
+          ? styles.notebookDropBandBefore
+          : styles.notebookDropBandAfter
+      }`}
+      aria-hidden="true"
+    />
+  );
+}
+
 function NotebookGridCard({
   notebook,
   isSelected,
@@ -165,6 +204,7 @@ function NotebookGridCard({
   disabled,
   dragEnabled,
   isDragging,
+  showTailInsertionBand,
   dropIndicatorSide,
   renameValue,
   onRenameValueChange,
@@ -210,104 +250,122 @@ function NotebookGridCard({
   );
 
   return (
-    <article
-      ref={setNodeRef}
-      className={`${styles.notebookCard} ${
-        isSelected ? styles.notebookCardSelected : ""
-      } ${isDragging ? styles.notebookCardDragging : ""} ${
-        dropIndicatorSide === "before" ? styles.notebookCardDropBefore : ""
-      } ${dropIndicatorSide === "after" ? styles.notebookCardDropAfter : ""}`}
-      onContextMenu={onOpenContextMenu}
-      {...attributes}
-      {...listeners}
-    >
-      <button
-        type="button"
-        className={styles.notebookCover}
-        onClick={() => {
-          if (shouldSuppressNotebookOpen()) {
-            return;
-          }
-
-          onOpenNotebook(notebook.id);
-        }}
-        disabled={disabled}
+    <div className={styles.notebookCardShell}>
+      <NotebookInsertionBand
+        droppableId={`notebook-insert-before-${notebook.id}`}
+        notebookId={notebook.id}
+        side="before"
+        position="before"
+        enabled={dragEnabled}
+      />
+      <article
+        ref={setNodeRef}
+        className={`${styles.notebookCard} ${
+          isSelected ? styles.notebookCardSelected : ""
+        } ${isDragging ? styles.notebookCardDragging : ""} ${
+          dropIndicatorSide === "before" ? styles.notebookCardDropBefore : ""
+        } ${dropIndicatorSide === "after" ? styles.notebookCardDropAfter : ""}`}
+        onContextMenu={onOpenContextMenu}
+        {...attributes}
+        {...listeners}
       >
-        <ManagedResourceImage
-          resourcePath={notebook.coverImagePath}
-          alt={`${notebook.name} 封面`}
-          imageClassName={styles.notebookCoverImage}
-          fallbackClassName={styles.notebookCoverFallback}
-          loadingClassName={styles.notebookCoverFallback}
-          fallbackTitle=""
-          fallbackMessage=""
-          fallbackStyle={{
-            background: getNotebookFallbackBackground(notebook),
+        <button
+          type="button"
+          className={styles.notebookCover}
+          onClick={() => {
+            if (shouldSuppressNotebookOpen()) {
+              return;
+            }
+
+            onOpenNotebook(notebook.id);
           }}
-        />
-      </button>
+          disabled={disabled}
+        >
+          <ManagedResourceImage
+            resourcePath={notebook.coverImagePath}
+            alt={`${notebook.name} 封面`}
+            imageClassName={styles.notebookCoverImage}
+            fallbackClassName={styles.notebookCoverFallback}
+            loadingClassName={styles.notebookCoverFallback}
+            fallbackTitle=""
+            fallbackMessage=""
+            fallbackStyle={{
+              background: getNotebookFallbackBackground(notebook),
+            }}
+          />
+        </button>
 
-      <div className={styles.notebookCardMeta}>
-        <div className={styles.notebookCardNameRow}>
-          {isEditing ? (
-            <div
-              className={`${styles.inlineNameEditor} ${styles.inlineNameEditorCentered}`}
-            >
-              <input
-                type="text"
-                className={`${styles.inlineNameInput} ${styles.inlineNameInputCentered}`}
-                value={renameValue}
-                onChange={(event) => onRenameValueChange(event.currentTarget.value)}
-                maxLength={80}
-                autoFocus
-                onClick={(event) => event.stopPropagation()}
-                onPointerDown={(event) => event.stopPropagation()}
-                onBlur={onCancelRename}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    event.preventDefault();
-                    void onSubmitRename();
+        <div className={styles.notebookCardMeta}>
+          <div className={styles.notebookCardNameRow}>
+            {isEditing ? (
+              <div
+                className={`${styles.inlineNameEditor} ${styles.inlineNameEditorCentered}`}
+              >
+                <input
+                  type="text"
+                  className={`${styles.inlineNameInput} ${styles.inlineNameInputCentered}`}
+                  value={renameValue}
+                  onChange={(event) => onRenameValueChange(event.currentTarget.value)}
+                  maxLength={80}
+                  autoFocus
+                  onClick={(event) => event.stopPropagation()}
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onBlur={onCancelRename}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      void onSubmitRename();
+                    }
+
+                    if (event.key === "Escape") {
+                      onCancelRename();
+                    }
+                  }}
+                />
+              </div>
+            ) : (
+              <button
+                type="button"
+                className={styles.ghostTitleButton}
+                onClick={() => {
+                  if (shouldSuppressNotebookOpen()) {
+                    return;
                   }
 
-                  if (event.key === "Escape") {
-                    onCancelRename();
+                  if (clickTimerRef.current !== null) {
+                    window.clearTimeout(clickTimerRef.current);
                   }
+
+                  clickTimerRef.current = window.setTimeout(() => {
+                    onOpenNotebook(notebook.id);
+                    clickTimerRef.current = null;
+                  }, 220);
                 }}
-              />
-            </div>
-          ) : (
-            <button
-              type="button"
-              className={styles.ghostTitleButton}
-              onClick={() => {
-                if (shouldSuppressNotebookOpen()) {
-                  return;
-                }
+                onDoubleClick={() => {
+                  if (clickTimerRef.current !== null) {
+                    window.clearTimeout(clickTimerRef.current);
+                    clickTimerRef.current = null;
+                  }
 
-                if (clickTimerRef.current !== null) {
-                  window.clearTimeout(clickTimerRef.current);
-                }
-
-                clickTimerRef.current = window.setTimeout(() => {
-                  onOpenNotebook(notebook.id);
-                  clickTimerRef.current = null;
-                }, 220);
-              }}
-              onDoubleClick={() => {
-                if (clickTimerRef.current !== null) {
-                  window.clearTimeout(clickTimerRef.current);
-                  clickTimerRef.current = null;
-                }
-
-                onStartRename(notebook);
-              }}
-            >
-              <h4 className={styles.notebookCardName}>{notebook.name}</h4>
-            </button>
-          )}
+                  onStartRename(notebook);
+                }}
+              >
+                <h4 className={styles.notebookCardName}>{notebook.name}</h4>
+              </button>
+            )}
+          </div>
         </div>
-      </div>
-    </article>
+      </article>
+      {showTailInsertionBand ? (
+        <NotebookInsertionBand
+          droppableId={`notebook-insert-after-${notebook.id}`}
+          notebookId={notebook.id}
+          side="after"
+          position="after"
+          enabled={dragEnabled}
+        />
+      ) : null}
+    </div>
   );
 }
 
@@ -452,9 +510,24 @@ export function NotebookHomeWorkspace({
 
   const collisionDetection = useMemo<CollisionDetection>(() => {
     return (args) =>
-      pointerWithin(args).filter(
-        (entry) => entry.id !== `notebook-${activeNotebookIdRef.current ?? ""}`,
-      );
+      pointerWithin(args).filter((entry) => {
+        const data = args.droppableContainers.find(
+          (container) => container.id === entry.id,
+        )?.data.current;
+
+        if (!data) {
+          return false;
+        }
+
+        if (
+          (data.type === "notebook-card" || data.type === "notebook-insert") &&
+          data.notebookId === activeNotebookIdRef.current
+        ) {
+          return false;
+        }
+
+        return data.type === "notebook-card" || data.type === "notebook-insert";
+      });
   }, []);
 
   function startRename(notebook: Notebook) {
@@ -494,17 +567,12 @@ export function NotebookHomeWorkspace({
   function resolveDropIndicator(
     event: Pick<DragOverEvent | DragEndEvent, "active" | "over">,
   ) {
-    if (!event.over || event.over.data.current?.type !== "notebook-card") {
-      return null;
-    }
-
-    const activeRect =
-      event.active.rect.current.translated ?? event.active.rect.current.initial;
-    if (!activeRect) {
+    if (!event.over) {
       return null;
     }
 
     const activeNotebookId = event.active.data.current?.notebookId;
+    const overType = event.over.data.current?.type;
     const overNotebookId = event.over.data.current?.notebookId;
 
     if (
@@ -512,6 +580,29 @@ export function NotebookHomeWorkspace({
       typeof overNotebookId !== "number" ||
       activeNotebookId === overNotebookId
     ) {
+      return null;
+    }
+
+    if (overType === "notebook-insert") {
+      const side = event.over.data.current?.side;
+
+      if (side !== "before" && side !== "after") {
+        return null;
+      }
+
+      return {
+        notebookId: overNotebookId,
+        side,
+      } satisfies NotebookDropIndicator;
+    }
+
+    if (overType !== "notebook-card") {
+      return null;
+    }
+
+    const activeRect =
+      event.active.rect.current.translated ?? event.active.rect.current.initial;
+    if (!activeRect) {
       return null;
     }
 
@@ -743,6 +834,9 @@ export function NotebookHomeWorkspace({
                 disabled={disabled}
                 dragEnabled={isDragEnabled && notebook.id !== editingNotebookId}
                 isDragging={notebook.id === activeNotebookId}
+                showTailInsertionBand={
+                  notebook.id === notebooks[notebooks.length - 1]?.id
+                }
                 dropIndicatorSide={
                   dropIndicator?.notebookId === notebook.id ? dropIndicator.side : null
                 }

@@ -826,7 +826,19 @@ export const NotebookWorkspace = forwardRef<
     try {
       // 在 drop 合法确认后同一调用栈里立即发起后端事务，缩短拖拽后丢失窗口。
       const persistencePromise = moveNote(noteId, targetFolderId, targetIndex);
-      return await persistencePromise;
+      const movedNote = await persistencePromise;
+
+      if (treeOrderSaveTokenRef.current === token) {
+        setNotes((currentNotes) =>
+          sortNotesByFolderAndOrder(
+            currentNotes.map((note) =>
+              note.id === movedNote.id ? { ...note, ...movedNote } : note,
+            ),
+          ),
+        );
+      }
+
+      return movedNote;
     } catch (error) {
       if (treeOrderSaveTokenRef.current === token) {
         setNotes(previousNotes);

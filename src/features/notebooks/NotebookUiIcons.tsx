@@ -164,3 +164,36 @@ export function TextSizeIncreaseIcon(props: SVGProps<SVGSVGElement>) {
     </svg>
   );
 }
+
+export function TrashIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" {...props}>
+      <path
+        d="M5 7.5h14"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+      />
+      <path
+        d="M9 7.5V6.5c0-.83.67-1.5 1.5-1.5h3c.83 0 1.5.67 1.5 1.5v1"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M7.5 7.5l.55 9.08A1.5 1.5 0 0 0 9.55 18h4.9a1.5 1.5 0 0 0 1.5-1.42l.55-9.08"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M10 10.5v4.5M14 10.5v4.5"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}

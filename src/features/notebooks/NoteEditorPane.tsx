@@ -17,6 +17,7 @@ import { RichTextToolbar } from "./RichTextToolbar";
 import {
   TextSizeDecreaseIcon,
   TextSizeIncreaseIcon,
+  TrashIcon,
 } from "./NotebookUiIcons";
 import {
   insertNoteImage,
@@ -184,6 +185,10 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
     const [saveStatus, setSaveStatus] = useState<NoteSaveStatus>("unchanged");
     const [lastSavedAt, setLastSavedAt] = useState(note.updatedAt);
     const [isLoadingNote, setIsLoadingNote] = useState(true);
+    const [editorSessionKey, setEditorSessionKey] = useState(0);
+    const [editorSessionContent, setEditorSessionContent] = useState(() =>
+      toEditorHtml(note.contentPlaintext),
+    );
     const [editorFontSize, setEditorFontSize] = useState(getInitialEditorFontSize);
     const [fontUndoStack, setFontUndoStack] = useState<FontSizeHistoryEntry[]>([]);
     const [fontRedoStack, setFontRedoStack] = useState<FontSizeHistoryEntry[]>([]);
@@ -199,6 +204,7 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
     const requestVersionRef = useRef(0);
     const draftContentRef = useRef("");
     const lastSavedContentRef = useRef("");
+    const editorRef = useRef<Editor | null>(null);
     const onNoteUpdatedRef = useRef(onNoteUpdated);
     const onErrorRef = useRef(onError);
     const ongoingSaveRef = useRef<Promise<boolean> | null>(null);
@@ -239,7 +245,7 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
     const editor = useEditor({
       extensions: editorExtensionsRef.current,
       enableInputRules: enabledInputRulesRef.current,
-      content: toEditorDocumentContent(note.contentPlaintext),
+      content: toEditorDocumentContent(editorSessionContent),
       immediatelyRender: false,
       autofocus: false,
       editorProps: {
@@ -254,7 +260,11 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
         draftContentRef.current = normalizedHtml;
         setDraftContent(normalizedHtml);
       },
-    });
+    }, [editorSessionKey]);
+
+    useEffect(() => {
+      editorRef.current = editor;
+    }, [editor]);
 
     const noteFolder =
       note.folderId === null
@@ -269,6 +279,8 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
       editorFontSize <= MIN_EDITOR_FONT_SIZE;
     const isIncreaseFontDisabled =
       editorFontSize >= MAX_EDITOR_FONT_SIZE;
+    const isClearContentDisabled =
+      disabled || isLoadingNote || draftContent === "";
     const editorCanvasStyle = {
       "--editor-font-size": `${editorFontSize}px`,
     } as CSSProperties;
@@ -388,16 +400,6 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
       setLastSavedContent(value);
     }
 
-    function syncEditorContent(currentEditor: Editor | null, content: string) {
-      if (!currentEditor) {
-        return;
-      }
-
-      currentEditor.commands.setContent(toEditorDocumentContent(content), {
-        emitUpdate: false,
-      });
-    }
-
     function handleConfirmMathDialog() {
       if (!mathDialogState) {
         return;
@@ -448,6 +450,17 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
           error instanceof Error ? error.message : "图片导入失败，请稍后重试。",
         );
       }
+    }
+
+    function handleClearEditorContent() {
+      if (!editor || isLoadingNote || draftContentRef.current === "") {
+        return;
+      }
+
+      clearHighlightTimer();
+      clearSearchHighlight(editor);
+      closeMathDialog();
+      editor.chain().focus().clearContent().run();
     }
 
     function clearPendingSaveTimer() {
@@ -649,7 +662,7 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
       clearPendingSaveTimer();
       clearSavedStatusTimer();
       clearHighlightTimer();
-      clearSearchHighlight(editor);
+      clearSearchHighlight(editorRef.current);
       ongoingSaveRef.current = null;
       ongoingSaveContentRef.current = null;
       setFontUndoStack([]);
@@ -675,8 +688,9 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
           setDraftState(normalizedContent);
           setLastSavedState(normalizedContent);
           setLastSavedAt(loadedNote.updatedAt);
+          setEditorSessionContent(normalizedContent);
+          setEditorSessionKey((current) => current + 1);
           setSaveStatus("unchanged");
-          syncEditorContent(editor, normalizedContent);
           onNoteUpdatedRef.current(loadedNote);
         } catch (error) {
           if (
@@ -688,8 +702,9 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
 
           setDraftState("");
           setLastSavedState("");
+          setEditorSessionContent("");
+          setEditorSessionKey((current) => current + 1);
           setSaveStatus("error");
-          syncEditorContent(editor, "");
           onErrorRef.current(
             error instanceof Error ? error.message : "读取文件正文失败，请稍后重试。",
           );
@@ -708,7 +723,7 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
         clearSavedStatusTimer();
         clearHighlightTimer();
       };
-    }, [editor, note.id, note.title]);
+    }, [note.id]);
 
     useEffect(() => {
       if (isLoadingNote) {
@@ -799,6 +814,16 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
               }}
               trailingContent={
                 <>
+                  <button
+                    type="button"
+                    className={editorStyles.toolbarIconButton}
+                    onClick={handleClearEditorContent}
+                    disabled={isClearContentDisabled}
+                    aria-label="清空正文"
+                    title="清空正文"
+                  >
+                    <TrashIcon className={editorStyles.toolbarIcon} />
+                  </button>
                   <button
                     type="button"
                     className={editorStyles.toolbarIconButton}

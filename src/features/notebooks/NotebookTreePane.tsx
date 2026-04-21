@@ -115,6 +115,17 @@ type PointerDropTarget =
       type: "empty-folder";
       folderId: number;
       rect: DOMRect;
+    }
+  | {
+      type: "folder-insert";
+      folderId: number;
+      side: "before" | "after";
+    }
+  | {
+      type: "note-insert";
+      noteId: number;
+      folderId: number;
+      side: "before" | "after";
     };
 
 type TreeOverTarget =
@@ -157,6 +168,15 @@ interface TreeNoteRowProps {
   onSelectNote: () => void;
   onOpenContextMenu: (event: ReactMouseEvent<HTMLElement>) => void;
   onStartRename: () => void;
+}
+
+interface TreeInsertionBandProps {
+  droppableId: string;
+  dropType: "folder-insert" | "note-insert";
+  side: "before" | "after";
+  folderId: number;
+  noteId?: number;
+  position: "before" | "after";
 }
 
 function buildExpandedSet(folderIds: number[]) {
@@ -458,6 +478,41 @@ function TreeNoteRow({
   );
 }
 
+function TreeInsertionBand({
+  droppableId,
+  dropType,
+  side,
+  folderId,
+  noteId,
+  position,
+}: TreeInsertionBandProps) {
+  const { setNodeRef } = useDroppable({
+    id: droppableId,
+    data: {
+      type: dropType,
+      side,
+      folderId,
+      noteId,
+    },
+  });
+
+  return (
+    <div
+      ref={setNodeRef}
+      data-tree-drop-type={dropType}
+      data-tree-drop-side={side}
+      data-tree-folder-id={folderId}
+      data-tree-note-id={noteId}
+      className={`${styles.treeDropBand} ${
+        position === "before"
+          ? styles.treeDropBandBefore
+          : styles.treeDropBandAfter
+      }`}
+      aria-hidden="true"
+    />
+  );
+}
+
 function EmptyFolderDropZone({
   folderId,
   active,
@@ -719,15 +774,26 @@ export function NotebookTreePane({
         }
 
         if (currentActive.type === "folder") {
-          return data.type === "folder-row" && data.folderId !== currentActive.folderId;
+          return (
+            (data.type === "folder-row" || data.type === "folder-insert") &&
+            data.folderId !== currentActive.folderId
+          );
         }
 
         if (data.type === "folder-row") {
           return data.folderId !== currentActive.folderId;
         }
 
+        if (data.type === "folder-insert") {
+          return false;
+        }
+
         if (data.type === "empty-folder") {
           return true;
+        }
+
+        if (data.type === "note-insert") {
+          return data.noteId !== currentActive.noteId;
         }
 
         return data.type === "note-row" && data.noteId !== currentActive.noteId;
@@ -1027,6 +1093,7 @@ export function NotebookTreePane({
     const dropType = targetElement.dataset.treeDropType;
     const folderId = Number(targetElement.dataset.treeFolderId);
     const noteId = Number(targetElement.dataset.treeNoteId);
+    const dropSide = targetElement.dataset.treeDropSide;
     const rect = targetElement.getBoundingClientRect();
 
     if (dropType === "folder-row" && Number.isFinite(folderId)) {
@@ -1066,6 +1133,32 @@ export function NotebookTreePane({
       } satisfies PointerDropTarget;
     }
 
+    if (
+      dropType === "folder-insert" &&
+      Number.isFinite(folderId) &&
+      (dropSide === "before" || dropSide === "after")
+    ) {
+      return {
+        type: "folder-insert",
+        folderId,
+        side: dropSide,
+      } satisfies PointerDropTarget;
+    }
+
+    if (
+      dropType === "note-insert" &&
+      Number.isFinite(folderId) &&
+      Number.isFinite(noteId) &&
+      (dropSide === "before" || dropSide === "after")
+    ) {
+      return {
+        type: "note-insert",
+        noteId,
+        folderId,
+        side: dropSide,
+      } satisfies PointerDropTarget;
+    }
+
     return null;
   }
 
@@ -1096,6 +1189,14 @@ export function NotebookTreePane({
       } satisfies TreeDropIndicator;
     }
 
+    if (activeItem.type === "folder" && target.type === "folder-insert") {
+      return {
+        kind: "folder",
+        folderId: target.folderId,
+        side: target.side,
+      } satisfies TreeDropIndicator;
+    }
+
     if (activeItem.type !== "note") {
       return null;
     }
@@ -1104,6 +1205,19 @@ export function NotebookTreePane({
       return {
         kind: "folder-empty",
         folderId: target.folderId,
+      } satisfies TreeDropIndicator;
+    }
+
+    if (target.type === "note-insert") {
+      if (target.noteId === activeItem.noteId) {
+        return null;
+      }
+
+      return {
+        kind: "note",
+        noteId: target.noteId,
+        folderId: target.folderId,
+        side: target.side,
       } satisfies TreeDropIndicator;
     }
 
@@ -1161,6 +1275,25 @@ export function NotebookTreePane({
       } satisfies TreeDropIndicator;
     }
 
+    if (activeItem.type === "folder" && overType === "folder-insert") {
+      const folderId = over.data.current?.folderId;
+      const side = over.data.current?.side;
+
+      if (
+        typeof folderId !== "number" ||
+        folderId === activeItem.folderId ||
+        (side !== "before" && side !== "after")
+      ) {
+        return null;
+      }
+
+      return {
+        kind: "folder",
+        folderId,
+        side,
+      } satisfies TreeDropIndicator;
+    }
+
     if (activeItem.type !== "note") {
       return null;
     }
@@ -1175,6 +1308,28 @@ export function NotebookTreePane({
       return {
         kind: "folder-empty",
         folderId,
+      } satisfies TreeDropIndicator;
+    }
+
+    if (overType === "note-insert") {
+      const noteId = over.data.current?.noteId;
+      const folderId = over.data.current?.folderId;
+      const side = over.data.current?.side;
+
+      if (
+        typeof noteId !== "number" ||
+        typeof folderId !== "number" ||
+        noteId === activeItem.noteId ||
+        (side !== "before" && side !== "after")
+      ) {
+        return null;
+      }
+
+      return {
+        kind: "note",
+        noteId,
+        folderId,
+        side,
       } satisfies TreeDropIndicator;
     }
 
@@ -1439,6 +1594,15 @@ export function NotebookTreePane({
         }
 
         preserveExpandedFolderIds.add(moveTarget.targetFolderId);
+        setExpandedFolderIds((current) => {
+          if (current.has(moveTarget.targetFolderId)) {
+            return current;
+          }
+
+          const next = new Set(current);
+          next.add(moveTarget.targetFolderId);
+          return next;
+        });
         const persistPromise = onMoveNote(
           activeNoteId,
           moveTarget.targetFolderId,
@@ -1519,7 +1683,11 @@ export function NotebookTreePane({
         </div>
       </header>
 
-      <div ref={treeBodyRef} className={styles.treeBody}>
+      <div
+        ref={treeBodyRef}
+        className={styles.treeBody}
+        data-tree-dragging={activeDragItem ? "true" : "false"}
+      >
         {!notebook ? (
           <div className={styles.treeEmpty}>请选择一个笔记本后继续。</div>
         ) : folders.length === 0 ? (
@@ -1547,7 +1715,7 @@ export function NotebookTreePane({
             }}
           >
             <ul className={styles.treeList}>
-              {folders.map((folder) => {
+              {folders.map((folder, folderIndex) => {
                 const folderNotes = notesByFolder.get(folder.id) ?? [];
                 const isExpanded = expandedFolderIds.has(folder.id);
                 const isActive =
@@ -1559,9 +1727,17 @@ export function NotebookTreePane({
                   folderNotes.length === 0 &&
                   dropIndicator?.kind === "folder-empty" &&
                   dropIndicator.folderId === folder.id;
+                const isLastFolder = folderIndex === folders.length - 1;
 
                 return (
-                  <li key={folder.id}>
+                  <li key={folder.id} className={styles.treeListItem}>
+                    <TreeInsertionBand
+                      droppableId={`tree-folder-insert-before-${folder.id}`}
+                      dropType="folder-insert"
+                      folderId={folder.id}
+                      side="before"
+                      position="before"
+                    />
                     <TreeFolderRow
                       folder={folder}
                       noteCount={folderNotes.length}
@@ -1608,15 +1784,24 @@ export function NotebookTreePane({
                     {isExpanded ? (
                       folderNotes.length > 0 ? (
                         <ul className={styles.treeNoteList}>
-                          {folderNotes.map((note) => {
+                          {folderNotes.map((note, noteIndex) => {
                             const isNoteActive =
                               selectedEntity?.kind === "note" &&
                               selectedEntity.id === note.id;
                             const isNoteEditing =
                               renameState?.kind === "note" && renameState.id === note.id;
+                            const isLastNote = noteIndex === folderNotes.length - 1;
 
                             return (
-                              <li key={note.id}>
+                              <li key={note.id} className={styles.treeListItem}>
+                                <TreeInsertionBand
+                                  droppableId={`tree-note-insert-before-${note.id}`}
+                                  dropType="note-insert"
+                                  folderId={folder.id}
+                                  noteId={note.id}
+                                  side="before"
+                                  position="before"
+                                />
                                 <TreeNoteRow
                                   note={note}
                                   isActive={isNoteActive}
@@ -1656,6 +1841,16 @@ export function NotebookTreePane({
                                     startRename("note", note.id, note.title)
                                   }
                                 />
+                                {isLastNote ? (
+                                  <TreeInsertionBand
+                                    droppableId={`tree-note-insert-after-${note.id}`}
+                                    dropType="note-insert"
+                                    folderId={folder.id}
+                                    noteId={note.id}
+                                    side="after"
+                                    position="after"
+                                  />
+                                ) : null}
                               </li>
                             );
                           })}
@@ -1668,6 +1863,15 @@ export function NotebookTreePane({
                       ) : (
                         <div className={styles.treeEmpty}>这个文件夹还没有文件。</div>
                       )
+                    ) : null}
+                    {isLastFolder ? (
+                      <TreeInsertionBand
+                        droppableId={`tree-folder-insert-after-${folder.id}`}
+                        dropType="folder-insert"
+                        folderId={folder.id}
+                        side="after"
+                        position="after"
+                      />
                     ) : null}
                   </li>
                 );

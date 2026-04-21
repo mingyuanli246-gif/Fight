@@ -268,6 +268,12 @@
   transition: transform 180ms ease;
 }
 
+.notebookCardShell {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
 .notebookCard:hover {
   transform: scale(1.05);
   z-index: 1;
@@ -315,6 +321,23 @@
 
 .notebookCardDropAfter::after {
   right: -9px;
+}
+
+.notebookDropBand {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 26px;
+  pointer-events: none;
+  z-index: 4;
+}
+
+.notebookDropBandBefore {
+  top: -16px;
+}
+
+.notebookDropBandAfter {
+  bottom: -16px;
 }
 
 .notebookCardSelected:hover .notebookCover {
@@ -730,6 +753,10 @@
   list-style: none;
 }
 
+.treeListItem {
+  position: relative;
+}
+
 .treeRow,
 .treeNoteRow {
   display: flex;
@@ -838,6 +865,27 @@
 
 .treeDropAfter::after {
   bottom: -4px;
+}
+
+.treeDropBand {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 18px;
+  z-index: 5;
+  pointer-events: none;
+}
+
+.treeBody[data-tree-dragging="true"] .treeDropBand {
+  pointer-events: auto;
+}
+
+.treeDropBandBefore {
+  top: -9px;
+}
+
+.treeDropBandAfter {
+  bottom: -9px;
 }
 
 .treeDisclosure {
