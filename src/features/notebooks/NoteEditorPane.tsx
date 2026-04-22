@@ -280,6 +280,7 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
     const highlightTimerRef = useRef<number | null>(null);
     const lastHandledHighlightRequestRef = useRef<number | null>(null);
     const textTagInspectionPulseVariantRef = useRef<"A" | "B">("A");
+    const textTagInspectionPulseTokenRef = useRef(0);
     const mathBridgeRef = useRef<EditorMathBridge>({
       onEditMathRequest() {
         // 运行时由当前组件覆写。
@@ -349,17 +350,25 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
         : false;
 
       if (occurrence) {
+        const nextPulseToken = options?.pulse
+          ? textTagInspectionPulseTokenRef.current + 1
+          : 0;
         const nextPulseVariant = options?.pulse
           ? textTagInspectionPulseVariantRef.current === "A"
             ? "B"
             : "A"
           : textTagInspectionPulseVariantRef.current;
 
+        if (options?.pulse) {
+          textTagInspectionPulseTokenRef.current = nextPulseToken;
+        }
+
         textTagInspectionPulseVariantRef.current = nextPulseVariant;
         setActiveTextTagOccurrence(
           editorRef.current,
           occurrence.key,
           options?.pulse ? nextPulseVariant : null,
+          nextPulseToken,
         );
       } else {
         clearActiveTextTagOccurrence(editorRef.current);

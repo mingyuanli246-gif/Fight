@@ -5,7 +5,10 @@ import {
   type Editor,
   type Extensions,
 } from "@tiptap/core";
-import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
+import type {
+  Mark as ProseMirrorMark,
+  Node as ProseMirrorNode,
+} from "@tiptap/pm/model";
 import { Plugin, PluginKey } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import { TAG_COLOR_PALETTE } from "./tagColors";
@@ -31,7 +34,6 @@ const TEXT_TAG_PALETTE_SET = new Set<string>(TAG_COLOR_PALETTE);
 const HEX_COLOR_PATTERN = /^#[0-9A-F]{6}$/;
 const BLOCK_ID_PATTERN = /^blk_[A-Za-z0-9_-]{10,}$/;
 const OCCURRENCE_SNIPPET_MAX_LENGTH = 120;
-const TEXT_TAG_REMARK_MAX_LENGTH = 120;
 
 type TextTagAttrs = {
   tagId: number;
@@ -73,6 +75,7 @@ type TextTagActivationMeta =
       type: "set";
       occurrenceKey: string;
       pulseClassName: string | null;
+      pulseToken: number;
     }
   | {
       type: "clear";
@@ -81,6 +84,7 @@ type TextTagActivationMeta =
 type TextTagActivationState = {
   occurrenceKey: string | null;
   pulseClassName: string | null;
+  pulseToken: number;
 };
 
 const TEXT_TAG_ACTIVE_CLASS = "textTagActive";
@@ -205,9 +209,7 @@ export function normalizeTextTagRemark(value: unknown) {
     return null;
   }
 
-  const normalized = Array.from(value.trim())
-    .slice(0, TEXT_TAG_REMARK_MAX_LENGTH)
-    .join("");
+  const normalized = value.trim();
   return normalized === "" ? null : normalized;
 }
 
@@ -230,6 +232,166 @@ function buildOccurrenceKey(
   tagId: number,
 ) {
   return `${blockId}:${startOffset}:${endOffset}:${tagId}`;
+}
+
+function getTextTagMarkType(editorOrState: Editor | Editor["state"] | null) {
+  if (!editorOrState) {
+    return null;
+  }
+
+  const state = "state" in editorOrState ? editorOrState.state : editorOrState;
+  return state.schema.marks[TEXT_TAG_MARK_NAME] ?? null;
+}
+
+function stripTextTagMark(
+  marks: readonly ProseMirrorMark[] | null | undefined,
+  markType: NonNullable<ReturnType<typeof getTextTagMarkType>>,
+) {
+  return (marks ?? []).filter((mark) => mark.type !== markType);
+}
+
+function areMarksEqual(
+  left: readonly ProseMirrorMark[] | null | undefined,
+  right: readonly ProseMirrorMark[] | null | undefined,
+) {
+  const normalizedLeft = left ?? [];
+  const normalizedRight = right ?? [];
+
+  if (normalizedLeft.length !== normalizedRight.length) {
+    return false;
+  }
+
+  return normalizedLeft.every((mark, index) => mark.eq(normalizedRight[index]));
+}
+
+function findTextTagOccurrenceStartingAtPosition(
+  documentContent: Editor["state"]["doc"],
+  position: number,
+) {
+  return (
+    extractLiveTextTagOccurrences(documentContent).find(
+      (occurrence) => occurrence.from === position,
+    ) ?? null
+  );
+}
+
+function findTextTagOccurrenceEndingAtPosition(
+  documentContent: Editor["state"]["doc"],
+  position: number,
+) {
+  return (
+    extractLiveTextTagOccurrences(documentContent).find(
+      (occurrence) => occurrence.to === position,
+    ) ?? null
+  );
+}
+
+type TextTagCursorContext =
+  | {
+      kind: "inside";
+      occurrence: LiveTextTagOccurrence;
+    }
+  | {
+      kind: "boundary";
+    }
+  | {
+      kind: "outside";
+    };
+
+function getTextTagCursorContext(state: Editor["state"]): TextTagCursorContext {
+  const { selection } = state;
+
+  if (!selection.empty) {
+    return {
+      kind: "outside",
+    };
+  }
+
+  const position = selection.from;
+  const containingOccurrence = findTextTagOccurrenceAtPosition(state.doc, position);
+
+  if (
+    containingOccurrence &&
+    position > containingOccurrence.from &&
+    position < containingOccurrence.to
+  ) {
+    return {
+      kind: "inside",
+      occurrence: containingOccurrence,
+    };
+  }
+
+  if (
+    (containingOccurrence && position === containingOccurrence.from) ||
+    findTextTagOccurrenceStartingAtPosition(state.doc, position) ||
+    findTextTagOccurrenceEndingAtPosition(state.doc, position)
+  ) {
+    return {
+      kind: "boundary",
+    };
+  }
+
+  return {
+    kind: "outside",
+  };
+}
+
+function getNormalizedStoredMarksForCursor(
+  state: Editor["state"],
+): ProseMirrorMark[] | null {
+  if (!state.selection.empty) {
+    return null;
+  }
+
+  const markType = getTextTagMarkType(state);
+
+  if (!markType) {
+    return state.storedMarks ? [...state.storedMarks] : null;
+  }
+
+  const baseMarks = stripTextTagMark(
+    state.storedMarks ?? state.selection.$from.marks(),
+    markType,
+  );
+  const cursorContext = getTextTagCursorContext(state);
+
+  if (cursorContext.kind !== "inside") {
+    return baseMarks;
+  }
+
+  return [
+    ...baseMarks,
+    markType.create({
+      tagId: cursorContext.occurrence.tagId,
+      colorSnapshot: cursorContext.occurrence.colorSnapshot,
+      remark: cursorContext.occurrence.remark,
+    }),
+  ];
+}
+
+function ensureCursorStoredMarks(
+  state: Editor["state"],
+  dispatch?: (transaction: Editor["state"]["tr"]) => void,
+) {
+  if (!state.selection.empty) {
+    return false;
+  }
+
+  const desiredMarks = getNormalizedStoredMarksForCursor(state);
+  const currentStoredMarks = state.storedMarks;
+
+  if (
+    (desiredMarks === null && currentStoredMarks === null) ||
+    areMarksEqual(currentStoredMarks, desiredMarks)
+  ) {
+    return false;
+  }
+
+  if (dispatch) {
+    dispatch(state.tr.setStoredMarks(desiredMarks));
+  }
+
+  return true;
 }
 
 function createEmptyTextTagInspectionStateInternal(): TextTagInspectionState {
@@ -704,7 +866,7 @@ export function clearTextTagFromOccurrence(
 
 export const TextTag = Mark.create({
   name: TEXT_TAG_MARK_NAME,
-  inclusive: true,
+  inclusive: false,
   priority: 1100,
 
   addAttributes() {
@@ -791,6 +953,61 @@ export const TextTag = Mark.create({
   },
 });
 
+const TextTagBoundaryBehaviorExtension = Extension.create({
+  name: "textTagBoundaryBehavior",
+
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        props: {
+          handleTextInput(view) {
+            if (view.state.selection.empty) {
+              ensureCursorStoredMarks(view.state, view.dispatch);
+            }
+
+            return false;
+          },
+          handleKeyDown(view, event) {
+            if (event.key === "Enter" && view.state.selection.empty) {
+              ensureCursorStoredMarks(view.state, view.dispatch);
+            }
+
+            return false;
+          },
+        },
+        appendTransaction(transactions, _oldState, newState) {
+          if (
+            !transactions.some(
+              (transaction) =>
+                transaction.selectionSet ||
+                transaction.docChanged ||
+                transaction.storedMarksSet,
+            )
+          ) {
+            return null;
+          }
+
+          if (!newState.selection.empty) {
+            return null;
+          }
+
+          const desiredMarks = getNormalizedStoredMarksForCursor(newState);
+          const currentStoredMarks = newState.storedMarks;
+
+          if (
+            (desiredMarks === null && currentStoredMarks === null) ||
+            areMarksEqual(currentStoredMarks, desiredMarks)
+          ) {
+            return null;
+          }
+
+          return newState.tr.setStoredMarks(desiredMarks);
+        },
+      }),
+    ];
+  },
+});
+
 export const BlockIdExtension = Extension.create({
   name: "noteBlockIds",
 
@@ -866,6 +1083,7 @@ const TextTagActivationExtension = Extension.create({
           init: () => ({
             occurrenceKey: null,
             pulseClassName: null,
+            pulseToken: 0,
           }),
           apply(tr, pluginState) {
             const meta = tr.getMeta(
@@ -880,12 +1098,14 @@ const TextTagActivationExtension = Extension.create({
               return {
                 occurrenceKey: null,
                 pulseClassName: null,
+                pulseToken: 0,
               };
             }
 
             return {
               occurrenceKey: meta.occurrenceKey,
               pulseClassName: meta.pulseClassName,
+              pulseToken: meta.pulseToken,
             };
           },
         },
@@ -912,11 +1132,28 @@ const TextTagActivationExtension = Extension.create({
             ]
               .filter(Boolean)
               .join(" ");
+            const pulseToken =
+              pluginState.pulseClassName && pluginState.pulseToken > 0
+                ? pluginState.pulseToken
+                : null;
 
             return DecorationSet.create(state.doc, [
-              Decoration.inline(occurrence.from, occurrence.to, {
-                class: className,
-              }),
+              Decoration.inline(
+                occurrence.from,
+                occurrence.to,
+                {
+                  class: className,
+                  ...(pulseToken === null
+                    ? {}
+                    : { "data-text-tag-pulse-token": String(pulseToken) }),
+                },
+                {
+                  key:
+                    pulseToken === null
+                      ? `text-tag-active:${pluginState.occurrenceKey}`
+                      : `text-tag-active:${pluginState.occurrenceKey}:${pulseToken}`,
+                },
+              ),
             ]);
           },
         },
@@ -1129,6 +1366,7 @@ export function setActiveTextTagOccurrence(
   editor: Editor | null,
   occurrenceKey: string,
   pulseVariant: "A" | "B" | null = null,
+  pulseToken = 0,
 ) {
   if (!editor) {
     return;
@@ -1144,6 +1382,7 @@ export function setActiveTextTagOccurrence(
           : pulseVariant === "B"
             ? TEXT_TAG_PULSE_CLASS_B
             : null,
+      pulseToken,
     } satisfies TextTagActivationMeta),
   );
 }
@@ -1176,5 +1415,10 @@ export function extractTextTagOccurrences(
 }
 
 export function createTextTagExtensions(): Extensions {
-  return [BlockIdExtension, TextTag, TextTagActivationExtension];
+  return [
+    BlockIdExtension,
+    TextTag,
+    TextTagBoundaryBehaviorExtension,
+    TextTagActivationExtension,
+  ];
 }

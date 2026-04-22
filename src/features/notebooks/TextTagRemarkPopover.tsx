@@ -1,7 +1,5 @@
 import {
-  FloatingArrow,
   FloatingPortal,
-  arrow,
   autoUpdate,
   flip,
   offset,
@@ -9,7 +7,7 @@ import {
   useFloating,
 } from "@floating-ui/react";
 import type { Editor } from "@tiptap/react";
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo } from "react";
 import type { TextTagInspectionState } from "./types";
 import styles from "./TextTagRemarkPopover.module.css";
 
@@ -61,7 +59,6 @@ export function TextTagRemarkPopover({
   onRemarkChange,
 }: TextTagRemarkPopoverProps) {
   const activeOccurrence = inspectionState.activeOccurrence;
-  const arrowRef = useRef<SVGSVGElement | null>(null);
   const open =
     editor !== null &&
     activeOccurrence !== null &&
@@ -80,18 +77,15 @@ export function TextTagRemarkPopover({
     };
   }, [editor, activeOccurrence, open]);
 
-  const { refs, floatingStyles, placement, middlewareData, context } = useFloating({
+  const { refs, floatingStyles } = useFloating({
     open,
     placement: "bottom",
     middleware: [
-      offset(10),
+      offset(12),
       flip({
-        fallbackPlacements: ["top", "bottom-start", "top-start"],
+        fallbackPlacements: ["top", "bottom-start", "top"],
       }),
       shift({ padding: 12 }),
-      arrow({
-        element: arrowRef,
-      }),
     ],
     whileElementsMounted: autoUpdate,
   });
@@ -106,7 +100,6 @@ export function TextTagRemarkPopover({
     return null;
   }
 
-  const side = placement.split("-")[0];
   const remarkValue = activeOccurrence.remark ?? "";
 
   return (
@@ -116,29 +109,17 @@ export function TextTagRemarkPopover({
         style={floatingStyles}
         className={styles.popover}
       >
-        <FloatingArrow
-          ref={arrowRef}
-          context={context}
-          className={styles.arrow}
-          style={{
-            left: middlewareData.arrow?.x,
-            top: middlewareData.arrow?.y,
-            [side === "bottom" ? "top" : "bottom"]: -8,
-          }}
-        />
         <div className={styles.header}>
           <p className={styles.title}>批注</p>
-          <span className={styles.counter}>{remarkValue.length}/120</span>
         </div>
         <textarea
           key={inspectionState.popoverAnchorKey ?? activeOccurrence.key}
           className={styles.textarea}
           value={remarkValue}
           onChange={(event) => {
-            onRemarkChange(Array.from(event.target.value).slice(0, 120).join(""));
+            onRemarkChange(event.target.value);
           }}
           placeholder="添加批注或解释..."
-          maxLength={120}
           autoFocus
           disabled={disabled}
         />

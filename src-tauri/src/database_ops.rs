@@ -32,7 +32,6 @@ const DEFAULT_REVIEW_PLAN_NAME: &str = "系统默认计划";
 const DEFAULT_REVIEW_STEP_OFFSETS: [i64; 4] = [2, 5, 10, 18];
 const LEGACY_RECOVERY_FOLDER_NAME: &str = "未归档迁移";
 const DEFAULT_TAG_COLOR: &str = "#FF3B30";
-const TEXT_TAG_REMARK_MAX_LENGTH: usize = 120;
 const TAG_COLOR_PALETTE: [&str; 12] = [
     "#FF3B30", "#FF9500", "#FFCC00", "#34C759", "#00C7BE", "#5AC8FA", "#007AFF", "#5856D6",
     "#AF52DE", "#FF2D55", "#A2845E", "#8E8E93",
@@ -1190,10 +1189,6 @@ fn normalize_text_tag_remark(remark: Option<&str>) -> Result<Option<String>, Str
     }
 
     let normalized_value = normalized.to_string();
-
-    if normalized_value.chars().count() > TEXT_TAG_REMARK_MAX_LENGTH {
-        return Err("批注内容过长，请控制在 120 个字符以内。".to_string());
-    }
 
     Ok(Some(normalized_value))
 }
@@ -3705,7 +3700,7 @@ mod tests {
         set_review_task_completed_tx_internal, today_local_date_key,
         update_notebook_cover_image_tx_internal, APP_META_KEY_REVIEW_FEATURE_REBUILD_V1_DONE,
         APP_META_KEY_REVIEW_SCHEDULE_DIRTY_NOTE_IDS, DEFAULT_REVIEW_PLAN_NAME, DEFAULT_TAG_COLOR,
-        NoteTagOccurrenceInput, TEXT_TAG_REMARK_MAX_LENGTH,
+        NoteTagOccurrenceInput,
     };
     use chrono::Local;
     use rusqlite::Connection;
@@ -5633,7 +5628,7 @@ mod tests {
     }
 
     #[test]
-    fn save_note_content_with_tags_path_rejects_too_long_remark() {
+    fn save_note_content_with_tags_path_accepts_long_remark() {
         let mut connection = test_connection();
         connection
             .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
@@ -5654,10 +5649,14 @@ mod tests {
             .execute("INSERT INTO tags (name, color) VALUES ('重点', '#FF3B30')", [])
             .expect("insert tag");
 
-        let error = save_note_content_with_tags_tx_internal(
+        let long_remark = "很长的批注".repeat(80);
+
+        let saved_note = save_note_content_with_tags_tx_internal(
             &mut connection,
             1,
-            "<p>新正文</p>",
+            &format!(
+                "<p data-block-id=\"blk_long_remark_001\"><span data-note-tag=\"true\" data-note-tag-id=\"1\" data-note-tag-color=\"#FF3B30\" data-note-tag-remark=\"{long_remark}\">重点</span></p>"
+            ),
             &[NoteTagOccurrenceInput {
                 tag_id: 1,
                 block_id: "blk_long_remark_001".to_string(),
@@ -5665,13 +5664,25 @@ mod tests {
                 end_offset: 2,
                 node_type: "paragraph".to_string(),
                 snippet_text: "重点".to_string(),
-                remark: Some("a".repeat(TEXT_TAG_REMARK_MAX_LENGTH + 1)),
+                remark: Some(long_remark.clone()),
                 sort_order: 0,
             }],
         )
-        .expect_err("too-long remark should fail");
+        .expect("long remark should save");
 
-        assert_eq!(error, "批注内容过长，请控制在 120 个字符以内。");
+        let stored_remark: Option<String> = connection
+            .query_row(
+                "SELECT remark_text FROM note_tag_occurrences WHERE note_id = 1 AND tag_id = 1 LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read long remark");
+
+        assert!(saved_note
+            .content_plaintext
+            .as_deref()
+            .is_some_and(|content| content.contains(&long_remark)));
+        assert_eq!(stored_remark.as_deref(), Some(long_remark.as_str()));
     }
 
     #[test]
