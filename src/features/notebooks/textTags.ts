@@ -521,9 +521,9 @@ export const TextTag = Mark.create({
     ];
   },
 
-  renderHTML({ HTMLAttributes }) {
-    const tagId = parseTagId(HTMLAttributes.tagId);
-    const colorSnapshot = parseColorSnapshot(HTMLAttributes.colorSnapshot);
+  renderHTML({ mark, HTMLAttributes }) {
+    const tagId = parseTagId(mark.attrs.tagId);
+    const colorSnapshot = parseColorSnapshot(mark.attrs.colorSnapshot);
 
     if (tagId === null || colorSnapshot === null) {
       return ["span", {}, 0];

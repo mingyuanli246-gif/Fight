@@ -299,6 +299,24 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
       onTextTagSelectionStateChangeRef.current?.(resolvedState);
     }
 
+    function capturePendingSaveSnapshot(currentEditor: Editor | null) {
+      if (!currentEditor) {
+        return pendingSaveSnapshotRef.current;
+      }
+
+      return {
+        content: normalizeEditorHtmlForStorage(currentEditor.getHTML()),
+        occurrences: extractTextTagOccurrences(currentEditor.state.doc),
+      };
+    }
+
+    function syncPendingSaveSnapshot(currentEditor: Editor | null) {
+      const snapshot = capturePendingSaveSnapshot(currentEditor);
+      pendingSaveSnapshotRef.current = snapshot;
+      setDraftState(snapshot.content);
+      return snapshot;
+    }
+
     const editor = useEditor({
       extensions: editorExtensionsRef.current,
       enableInputRules: enabledInputRulesRef.current,
@@ -311,16 +329,7 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
         },
       },
       onUpdate({ editor: currentEditor }) {
-        const normalizedHtml = normalizeEditorHtmlForStorage(
-          currentEditor.getHTML(),
-        );
-        const occurrences = extractTextTagOccurrences(currentEditor.state.doc);
-        pendingSaveSnapshotRef.current = {
-          content: normalizedHtml,
-          occurrences,
-        };
-        draftContentRef.current = normalizedHtml;
-        setDraftContent(normalizedHtml);
+        syncPendingSaveSnapshot(currentEditor);
         emitTextTagSelectionState(getTextTagSelectionState(currentEditor));
       },
     }, [editorSessionKey]);
@@ -623,9 +632,16 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
       expectedNoteId: number,
       snapshot: PendingSaveSnapshot,
     ) {
+      const latestSnapshot =
+        activeNoteIdRef.current === expectedNoteId
+          ? capturePendingSaveSnapshot(editorRef.current)
+          : snapshot;
+
+      pendingSaveSnapshotRef.current = latestSnapshot;
+
       if (
         ongoingSaveRef.current !== null &&
-        ongoingSaveContentRef.current === snapshot.content &&
+        ongoingSaveContentRef.current === latestSnapshot.content &&
         activeNoteIdRef.current === expectedNoteId
       ) {
         return ongoingSaveRef.current;
@@ -641,11 +657,11 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
         }
 
         setSaveStatus("saving");
-        return executeSave(expectedNoteId, snapshot);
+        return executeSave(expectedNoteId, latestSnapshot);
       });
 
       ongoingSaveRef.current = savePromise;
-      ongoingSaveContentRef.current = snapshot.content;
+      ongoingSaveContentRef.current = latestSnapshot.content;
 
       try {
         return await savePromise;
@@ -662,7 +678,11 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
         return true;
       }
 
-      const currentDraft = draftContentRef.current;
+      const latestSnapshot = capturePendingSaveSnapshot(editorRef.current);
+      pendingSaveSnapshotRef.current = latestSnapshot;
+      draftContentRef.current = latestSnapshot.content;
+
+      const currentDraft = latestSnapshot.content;
       const currentLastSaved = lastSavedContentRef.current;
 
       if (currentDraft === currentLastSaved) {
@@ -670,7 +690,8 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
         return true;
       }
 
-      return performSave(note.id, pendingSaveSnapshotRef.current);
+      setDraftContent(currentDraft);
+      return performSave(note.id, latestSnapshot);
     }
 
     function applySearchHighlight(request: NotebookHighlightRequest) {
@@ -723,6 +744,7 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
           const didApply = applyTextTag(editorRef.current, tagId, colorSnapshot);
 
           if (didApply) {
+            syncPendingSaveSnapshot(editorRef.current);
             emitTextTagSelectionState();
           }
 
@@ -732,6 +754,7 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
           const didClear = clearTextTag(editorRef.current);
 
           if (didClear) {
+            syncPendingSaveSnapshot(editorRef.current);
             emitTextTagSelectionState();
           }
 

@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type RefObject,
+} from "react";
 import { listTagsWithCounts } from "./repository";
 import type { NoteEditorPaneRef } from "./NoteEditorPane";
 import { normalizeTagColor } from "./tagColors";
@@ -18,6 +25,10 @@ function getErrorMessage(error: unknown) {
   }
 
   return "标签操作失败，请稍后重试。";
+}
+
+function handleTagActionMouseDown(event: ReactMouseEvent) {
+  event.preventDefault();
 }
 
 export function NoteTextTagManager({
@@ -177,6 +188,7 @@ export function NoteTextTagManager({
               <button
                 type="button"
                 className={styles.secondaryButton}
+                onMouseDown={handleTagActionMouseDown}
                 onClick={() => {
                   void handleClearTag();
                 }}
@@ -240,6 +252,7 @@ export function NoteTextTagManager({
                       onClick={() => {
                         void handleApplyTag(tag.id, normalizedColor);
                       }}
+                      onMouseDown={handleTagActionMouseDown}
                       disabled={!canApplyTag}
                     >
                       <span
