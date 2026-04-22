@@ -1044,10 +1044,11 @@ fn fetch_tag_by_id(connection: &Connection, tag_id: i64) -> Result<TagRecord, St
             ",
             [tag_id],
             |row| {
+                let color: String = row.get(2)?;
                 Ok(TagRecord {
                     id: row.get(0)?,
                     name: row.get(1)?,
-                    color: row.get(2)?,
+                    color: normalize_tag_color(&color),
                     created_at: row.get(3)?,
                     updated_at: row.get(4)?,
                 })
@@ -1072,10 +1073,11 @@ fn fetch_tag_by_name(connection: &Connection, name: &str) -> Result<Option<TagRe
             ",
             [name],
             |row| {
+                let color: String = row.get(2)?;
                 Ok(TagRecord {
                     id: row.get(0)?,
                     name: row.get(1)?,
-                    color: row.get(2)?,
+                    color: normalize_tag_color(&color),
                     created_at: row.get(3)?,
                     updated_at: row.get(4)?,
                 })
@@ -1104,10 +1106,11 @@ fn fetch_tags_by_note(connection: &Connection, note_id: i64) -> Result<Vec<TagRe
         .map_err(|error| to_command_error("读取文件标签", error))?;
     let rows = statement
         .query_map([note_id], |row| {
+            let color: String = row.get(2)?;
             Ok(TagRecord {
                 id: row.get(0)?,
                 name: row.get(1)?,
-                color: row.get(2)?,
+                color: normalize_tag_color(&color),
                 created_at: row.get(3)?,
                 updated_at: row.get(4)?,
             })

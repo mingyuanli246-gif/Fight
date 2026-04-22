@@ -5,6 +5,7 @@ import {
   listTagsByNote,
   removeTagFromNote,
 } from "./repository";
+import { normalizeTagColor } from "./tagColors";
 import type { Tag, TagWithCount } from "./types";
 import styles from "./NoteTagManager.module.css";
 
@@ -182,30 +183,34 @@ export function NoteTagManager({
         <p className={styles.stateText}>这个文件还没有标签。</p>
       ) : (
         <div className={styles.tagList}>
-          {tags.map((tag) => (
-            <span
-              key={tag.id}
-              className={styles.tagChip}
-              style={{
-                color: tag.color,
-                borderColor: `${tag.color}40`,
-                backgroundColor: `${tag.color}18`,
-              }}
-            >
-              <span className={styles.tagName}>{tag.name}</span>
-              <button
-                type="button"
-                className={styles.removeButton}
-                onClick={() => {
-                  void handleRemoveTag(tag.id);
+          {tags.map((tag) => {
+            const normalizedColor = normalizeTagColor(tag.color);
+
+            return (
+              <span
+                key={tag.id}
+                className={styles.tagChip}
+                style={{
+                  color: normalizedColor,
+                  borderColor: `${normalizedColor}40`,
+                  backgroundColor: `${normalizedColor}18`,
                 }}
-                disabled={disabled || isBusy}
-                aria-label={`移除标签 ${tag.name}`}
               >
-                移除
-              </button>
-            </span>
-          ))}
+                <span className={styles.tagName}>{tag.name}</span>
+                <button
+                  type="button"
+                  className={styles.removeButton}
+                  onClick={() => {
+                    void handleRemoveTag(tag.id);
+                  }}
+                  disabled={disabled || isBusy}
+                  aria-label={`移除标签 ${tag.name}`}
+                >
+                  移除
+                </button>
+              </span>
+            );
+          })}
         </div>
       )}
 
@@ -234,7 +239,7 @@ export function NoteTagManager({
               >
                 <span
                   className={styles.tagPickerDot}
-                  style={{ backgroundColor: tag.color }}
+                  style={{ backgroundColor: normalizeTagColor(tag.color) }}
                 />
                 <span className={styles.tagPickerName}>{tag.name}</span>
               </button>

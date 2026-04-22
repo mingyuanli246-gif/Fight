@@ -116,12 +116,14 @@ function ColorPicker({
   onToggle,
   onSelect,
 }: ColorPickerProps) {
+  const normalizedSelectedColor = normalizeTagColor(selectedColor);
+
   return (
     <div ref={pickerRef} className={styles.colorPicker}>
       <button
         type="button"
         className={styles.colorTrigger}
-        style={{ backgroundColor: selectedColor }}
+        style={{ backgroundColor: normalizedSelectedColor }}
         onMouseDown={handlePaletteControlMouseDown}
         onClick={onToggle}
         aria-label={label}
@@ -132,7 +134,7 @@ function ColorPicker({
       {isOpen ? (
         <div className={styles.colorPalette} role="menu" aria-label="标签颜色">
           {TAG_COLOR_PALETTE.map((color) => {
-            const isSelected = selectedColor === color;
+            const isSelected = normalizedSelectedColor === color;
 
             return (
               <button
@@ -143,7 +145,7 @@ function ColorPicker({
                 }`}
                 style={{ backgroundColor: color }}
                 onMouseDown={handlePaletteControlMouseDown}
-                onClick={() => onSelect(color)}
+                onClick={() => onSelect(normalizeTagColor(color))}
                 aria-label={`选择颜色 ${color}`}
                 aria-pressed={isSelected}
               >
@@ -519,7 +521,7 @@ export function TagPlazaWorkspace({ onOpenNote }: TagPlazaWorkspaceProps) {
               >
                 <span
                   className={styles.tagDot}
-                  style={{ backgroundColor: tag.color }}
+                  style={{ backgroundColor: normalizeTagColor(tag.color) }}
                 />
                 <span className={styles.tagItemText}>
                   <span className={styles.tagItemTitle}>{tag.name}</span>

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { listTagsWithCounts } from "./repository";
 import type { NoteEditorPaneRef } from "./NoteEditorPane";
+import { normalizeTagColor } from "./tagColors";
 import type { TagWithCount, TextTagSelectionState } from "./types";
 import styles from "./NoteTextTagManager.module.css";
 
@@ -74,7 +75,7 @@ export function NoteTextTagManager({
       return {
         id: matchedTag.id,
         name: matchedTag.name,
-        color: matchedTag.color,
+        color: normalizeTagColor(matchedTag.color),
         available: true,
       };
     }
@@ -82,7 +83,7 @@ export function NoteTextTagManager({
     return {
       id: selectionState.activeTagId,
       name: `标签 #${selectionState.activeTagId}`,
-      color: selectionState.activeColorSnapshot,
+      color: normalizeTagColor(selectionState.activeColorSnapshot),
       available: false,
     };
   }, [selectionState, tagCatalog]);
@@ -217,6 +218,7 @@ export function NoteTextTagManager({
             ) : (
               <div className={styles.catalog}>
                 {tagCatalog.map((tag) => {
+                  const normalizedColor = normalizeTagColor(tag.color);
                   const isActive = selectionState.activeTagId === tag.id;
 
                   return (
@@ -227,18 +229,22 @@ export function NoteTextTagManager({
                         isActive ? styles.tagButtonActive : ""
                       }`}
                       style={{
-                        color: tag.color,
-                        borderColor: isActive ? `${tag.color}55` : `${tag.color}38`,
-                        backgroundColor: isActive ? `${tag.color}1F` : `${tag.color}12`,
+                        color: normalizedColor,
+                        borderColor: isActive
+                          ? `${normalizedColor}55`
+                          : `${normalizedColor}38`,
+                        backgroundColor: isActive
+                          ? `${normalizedColor}1F`
+                          : `${normalizedColor}12`,
                       }}
                       onClick={() => {
-                        void handleApplyTag(tag.id, tag.color);
+                        void handleApplyTag(tag.id, normalizedColor);
                       }}
                       disabled={!canApplyTag}
                     >
                       <span
                         className={styles.tagDot}
-                        style={{ backgroundColor: tag.color }}
+                        style={{ backgroundColor: normalizedColor }}
                       />
                       <span className={styles.tagName}>{tag.name}</span>
                     </button>

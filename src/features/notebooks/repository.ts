@@ -504,7 +504,7 @@ async function fetchNoteById(database: Database, id: number) {
 }
 
 async function fetchTagById(database: Database, id: number) {
-  return selectOne<Tag>(
+  const tag = await selectOne<Tag>(
     database,
     `
       SELECT
@@ -519,6 +519,11 @@ async function fetchTagById(database: Database, id: number) {
     [id],
     "目标标签不存在。",
   );
+
+  return {
+    ...tag,
+    color: normalizeTagColor(tag.color),
+  };
 }
 
 async function createTagRecord(
@@ -543,7 +548,7 @@ async function createTagRecord(
 }
 
 async function listTagsByNoteInternal(database: Database, noteId: number) {
-  return database.select<Tag[]>(
+  const tags = await database.select<Tag[]>(
     `
       SELECT
         tags.id,
@@ -558,6 +563,11 @@ async function listTagsByNoteInternal(database: Database, noteId: number) {
     `,
     [noteId],
   );
+
+  return tags.map((tag) => ({
+    ...tag,
+    color: normalizeTagColor(tag.color),
+  }));
 }
 
 async function ensureNoteSearchReadyInternal(database: Database) {
@@ -955,7 +965,7 @@ export async function listTagsWithCounts() {
   return withRepositoryError("读取标签", async () => {
     const database = await getNotebookDatabase();
 
-    return database.select<TagWithCountRow[]>(
+    const tags = await database.select<TagWithCountRow[]>(
       `
         SELECT
           tags.id AS id,
@@ -970,6 +980,11 @@ export async function listTagsWithCounts() {
         ${TAG_ORDER}
       `,
     );
+
+    return tags.map((tag) => ({
+      ...tag,
+      color: normalizeTagColor(tag.color),
+    }));
   });
 }
 
