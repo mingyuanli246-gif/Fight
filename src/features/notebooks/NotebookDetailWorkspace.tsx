@@ -9,7 +9,7 @@ import type {
   Notebook,
   NotebookHighlightRequest,
   SelectedEntity,
-  TextTagPanelState,
+  TextTagSelectionState,
 } from "./types";
 import styles from "./NotebookWorkspaceShell.module.css";
 
@@ -24,7 +24,7 @@ interface NotebookDetailWorkspaceProps {
   treeDisabled: boolean;
   rightPanelCollapsed: boolean;
   highlightRequest: NotebookHighlightRequest | null;
-  textTagPanelState: TextTagPanelState;
+  textTagSelectionState: TextTagSelectionState;
   noteEditorRef: RefObject<NoteEditorPaneRef | null>;
   reviewManagerRef: RefObject<NoteReviewPlanManagerRef | null>;
   onReturnHome: () => void;
@@ -43,7 +43,7 @@ interface NotebookDetailWorkspaceProps {
   ) => Promise<Note>;
   onToggleRightPanel: () => void;
   onNoteUpdated: (note: Note) => void;
-  onTextTagPanelStateChange: (state: TextTagPanelState) => void;
+  onTextTagSelectionStateChange: (state: TextTagSelectionState) => void;
   onError: (message: string) => void;
 }
 
@@ -58,7 +58,7 @@ export function NotebookDetailWorkspace({
   treeDisabled,
   rightPanelCollapsed,
   highlightRequest,
-  textTagPanelState,
+  textTagSelectionState,
   noteEditorRef,
   reviewManagerRef,
   onReturnHome,
@@ -73,7 +73,7 @@ export function NotebookDetailWorkspace({
   onMoveNote,
   onToggleRightPanel,
   onNoteUpdated,
-  onTextTagPanelStateChange,
+  onTextTagSelectionStateChange,
   onError,
 }: NotebookDetailWorkspaceProps) {
   return (
@@ -113,7 +113,7 @@ export function NotebookDetailWorkspace({
               disabled={disabled}
               highlightRequest={highlightRequest}
               onNoteUpdated={onNoteUpdated}
-              onTextTagPanelStateChange={onTextTagPanelStateChange}
+              onTextTagSelectionStateChange={onTextTagSelectionStateChange}
               onError={onError}
             />
           ) : (
@@ -140,7 +140,7 @@ export function NotebookDetailWorkspace({
           collapsed={rightPanelCollapsed}
           disabled={disabled}
           noteEditorRef={noteEditorRef}
-          textTagPanelState={textTagPanelState}
+          textTagSelectionState={textTagSelectionState}
           reviewManagerRef={reviewManagerRef}
           onToggleCollapsed={onToggleRightPanel}
           onError={onError}

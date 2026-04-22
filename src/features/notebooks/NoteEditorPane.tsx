@@ -49,11 +49,6 @@ import {
   findHighlightRanges,
   setSearchHighlight,
 } from "./searchHighlight";
-import {
-  clearOccurrenceFocusHighlight,
-  createOccurrenceFocusHighlightExtension,
-  setOccurrenceFocusHighlight,
-} from "./occurrenceFocusHighlight";
 import type { EditorMathBridge, MathEditRequest } from "./mathNodes";
 import {
   getMathNodeName,
@@ -62,21 +57,19 @@ import {
 } from "./mathSerialization";
 import {
   applyTextTag,
-  createEmptyTextTagPanelState,
+  createEmptyTextTagSelectionState,
   clearTextTag,
   extractTextTagOccurrences,
-  getTextTagPanelState,
-  getTextTagPanelStateSignature,
+  getTextTagSelectionState,
 } from "./textTags";
 import type {
   Folder,
-  LiveTextTagOccurrence,
   Note,
   NoteSaveStatus,
   Notebook,
   NotebookHighlightRequest,
-  TextTagPanelState,
   TextTagOccurrenceDraft,
+  TextTagSelectionState,
 } from "./types";
 import editorStyles from "./NoteEditorSurface.module.css";
 import styles from "./NotebookWorkspace.module.css";
@@ -93,10 +86,9 @@ const LEGACY_DEFAULT_EDITOR_FONT_SIZE = 14;
 export interface NoteEditorPaneRef {
   flushPendingSave: () => Promise<boolean>;
   hasUnsavedChanges: () => boolean;
-  getTextTagPanelState: () => TextTagPanelState;
+  getTextTagSelectionState: () => TextTagSelectionState;
   applyTextTag: (tagId: number, colorSnapshot: string) => boolean;
   clearTextTag: () => boolean;
-  scrollToTextTagOccurrence: (occurrenceKey: string) => boolean;
 }
 
 interface NoteEditorPaneProps {
@@ -106,7 +98,7 @@ interface NoteEditorPaneProps {
   disabled: boolean;
   highlightRequest?: NotebookHighlightRequest | null;
   onNoteUpdated: (note: Note) => void;
-  onTextTagPanelStateChange?: (state: TextTagPanelState) => void;
+  onTextTagSelectionStateChange?: (state: TextTagSelectionState) => void;
   onError: (message: string) => void;
 }
 
@@ -211,7 +203,7 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
       disabled,
       highlightRequest = null,
       onNoteUpdated,
-      onTextTagPanelStateChange,
+      onTextTagSelectionStateChange,
       onError,
     },
     ref,
@@ -247,20 +239,21 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
       content: "",
       occurrences: [],
     });
-    const textTagPanelStateRef = useRef<TextTagPanelState>(
-      createEmptyTextTagPanelState(),
+    const textTagSelectionStateRef = useRef<TextTagSelectionState>(
+      createEmptyTextTagSelectionState(),
     );
-    const textTagPanelStateSignatureRef = useRef(
-      getTextTagPanelStateSignature(createEmptyTextTagPanelState()),
+    const textTagSelectionStateSignatureRef = useRef(
+      JSON.stringify(createEmptyTextTagSelectionState()),
     );
     const editorRef = useRef<Editor | null>(null);
     const onNoteUpdatedRef = useRef(onNoteUpdated);
-    const onTextTagPanelStateChangeRef = useRef(onTextTagPanelStateChange);
+    const onTextTagSelectionStateChangeRef = useRef(
+      onTextTagSelectionStateChange,
+    );
     const onErrorRef = useRef(onError);
     const ongoingSaveRef = useRef<Promise<boolean> | null>(null);
     const ongoingSaveContentRef = useRef<string | null>(null);
     const highlightTimerRef = useRef<number | null>(null);
-    const occurrenceFocusTimerRef = useRef<number | null>(null);
     const lastHandledHighlightRequestRef = useRef<number | null>(null);
     const mathBridgeRef = useRef<EditorMathBridge>({
       onEditMathRequest() {
@@ -289,24 +282,21 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
           mathBridge: mathBridgeRef.current,
         }),
         createSearchHighlightExtension(editorStyles.searchHighlight),
-        createOccurrenceFocusHighlightExtension(
-          editorStyles.occurrenceFocusHighlight,
-        ),
       ],
     );
     const enabledInputRulesRef = useRef([...NOTE_EDITOR_ENABLED_INPUT_RULES]);
 
-    function emitTextTagPanelState(nextState?: TextTagPanelState) {
-      const resolvedState = nextState ?? getTextTagPanelState(editorRef.current);
-      const nextSignature = getTextTagPanelStateSignature(resolvedState);
+    function emitTextTagSelectionState(nextState?: TextTagSelectionState) {
+      const resolvedState = nextState ?? getTextTagSelectionState(editorRef.current);
+      const nextSignature = JSON.stringify(resolvedState);
 
-      if (nextSignature === textTagPanelStateSignatureRef.current) {
+      if (nextSignature === textTagSelectionStateSignatureRef.current) {
         return;
       }
 
-      textTagPanelStateSignatureRef.current = nextSignature;
-      textTagPanelStateRef.current = resolvedState;
-      onTextTagPanelStateChangeRef.current?.(resolvedState);
+      textTagSelectionStateSignatureRef.current = nextSignature;
+      textTagSelectionStateRef.current = resolvedState;
+      onTextTagSelectionStateChangeRef.current?.(resolvedState);
     }
 
     const editor = useEditor({
@@ -331,14 +321,16 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
         };
         draftContentRef.current = normalizedHtml;
         setDraftContent(normalizedHtml);
-        emitTextTagPanelState(getTextTagPanelState(currentEditor));
+        emitTextTagSelectionState(getTextTagSelectionState(currentEditor));
       },
     }, [editorSessionKey]);
 
     useEffect(() => {
       editorRef.current = editor;
-      emitTextTagPanelState(
-        editor ? getTextTagPanelState(editor) : createEmptyTextTagPanelState(),
+      emitTextTagSelectionState(
+        editor
+          ? getTextTagSelectionState(editor)
+          : createEmptyTextTagSelectionState(),
       );
     }, [editor]);
 
@@ -573,13 +565,6 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
       }
     }
 
-    function clearOccurrenceFocusTimer() {
-      if (occurrenceFocusTimerRef.current !== null) {
-        window.clearTimeout(occurrenceFocusTimerRef.current);
-        occurrenceFocusTimerRef.current = null;
-      }
-    }
-
     function scheduleSavedReset() {
       clearSavedStatusTimer();
       savedStatusTimerRef.current = window.setTimeout(() => {
@@ -727,50 +712,18 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
       }, SEARCH_HIGHLIGHT_DURATION_MS);
     }
 
-    function scrollToOccurrence(occurrence: LiveTextTagOccurrence) {
-      if (!editor) {
-        return false;
-      }
-
-      clearOccurrenceFocusTimer();
-      setOccurrenceFocusHighlight(editor, {
-        from: occurrence.from,
-        to: occurrence.to,
-      });
-
-      window.requestAnimationFrame(() => {
-        const matchElement = editor.view.dom.querySelector(
-          `.${editorStyles.occurrenceFocusHighlight}`,
-        );
-
-        if (matchElement instanceof HTMLElement) {
-          matchElement.scrollIntoView({
-            block: "center",
-            behavior: "smooth",
-          });
-        }
-      });
-
-      occurrenceFocusTimerRef.current = window.setTimeout(() => {
-        clearOccurrenceFocusHighlight(editor);
-        occurrenceFocusTimerRef.current = null;
-      }, 1600);
-
-      return true;
-    }
-
     useImperativeHandle(
       ref,
       () => ({
         flushPendingSave,
         hasUnsavedChanges: () =>
           draftContentRef.current !== lastSavedContentRef.current,
-        getTextTagPanelState: () => textTagPanelStateRef.current,
+        getTextTagSelectionState: () => textTagSelectionStateRef.current,
         applyTextTag: (tagId, colorSnapshot) => {
           const didApply = applyTextTag(editorRef.current, tagId, colorSnapshot);
 
           if (didApply) {
-            emitTextTagPanelState();
+            emitTextTagSelectionState();
           }
 
           return didApply;
@@ -779,22 +732,10 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
           const didClear = clearTextTag(editorRef.current);
 
           if (didClear) {
-            emitTextTagPanelState();
+            emitTextTagSelectionState();
           }
 
           return didClear;
-        },
-        scrollToTextTagOccurrence: (occurrenceKey) => {
-          const occurrence =
-            textTagPanelStateRef.current.occurrences.find(
-              (candidate) => candidate.key === occurrenceKey,
-            ) ?? null;
-
-          if (!occurrence) {
-            return false;
-          }
-
-          return scrollToOccurrence(occurrence);
         },
       }),
       [note.id],
@@ -805,8 +746,8 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
     }, [onNoteUpdated]);
 
     useEffect(() => {
-      onTextTagPanelStateChangeRef.current = onTextTagPanelStateChange;
-    }, [onTextTagPanelStateChange]);
+      onTextTagSelectionStateChangeRef.current = onTextTagSelectionStateChange;
+    }, [onTextTagSelectionStateChange]);
 
     useEffect(() => {
       onErrorRef.current = onError;
@@ -844,9 +785,7 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
       clearPendingSaveTimer();
       clearSavedStatusTimer();
       clearHighlightTimer();
-      clearOccurrenceFocusTimer();
       clearSearchHighlight(editorRef.current);
-      clearOccurrenceFocusHighlight(editorRef.current);
       ongoingSaveRef.current = null;
       ongoingSaveContentRef.current = null;
       setFontUndoStack([]);
@@ -864,11 +803,11 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
         content: "",
         occurrences: [],
       };
-      textTagPanelStateRef.current = createEmptyTextTagPanelState();
-      textTagPanelStateSignatureRef.current = getTextTagPanelStateSignature(
-        textTagPanelStateRef.current,
+      textTagSelectionStateRef.current = createEmptyTextTagSelectionState();
+      textTagSelectionStateSignatureRef.current = JSON.stringify(
+        textTagSelectionStateRef.current,
       );
-      onTextTagPanelStateChangeRef.current?.(textTagPanelStateRef.current);
+      onTextTagSelectionStateChangeRef.current?.(textTagSelectionStateRef.current);
 
       void (async () => {
         try {
@@ -927,7 +866,6 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
         clearPendingSaveTimer();
         clearSavedStatusTimer();
         clearHighlightTimer();
-        clearOccurrenceFocusTimer();
       };
     }, [note.id]);
 
@@ -975,21 +913,19 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
 
     useEffect(() => {
       if (!editor) {
-        emitTextTagPanelState(createEmptyTextTagPanelState());
+        emitTextTagSelectionState(createEmptyTextTagSelectionState());
         return;
       }
 
       const emitCurrentState = () => {
-        emitTextTagPanelState(getTextTagPanelState(editor));
+        emitTextTagSelectionState(getTextTagSelectionState(editor));
       };
 
       emitCurrentState();
       editor.on("selectionUpdate", emitCurrentState);
-      editor.on("transaction", emitCurrentState);
 
       return () => {
         editor.off("selectionUpdate", emitCurrentState);
-        editor.off("transaction", emitCurrentState);
       };
     }, [editor, note.id]);
 

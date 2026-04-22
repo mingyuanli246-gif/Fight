@@ -405,20 +405,13 @@ export function applyTextTag(
     return false;
   }
 
-  const panelState = getTextTagPanelState(editor);
-  let from = editor.state.selection.from;
-  let to = editor.state.selection.to;
+  const selectionState = getTextTagSelectionState(editor);
 
-  if (panelState.mode === "apply") {
-    if (!panelState.selection.isTaggableSelection) {
-      return false;
-    }
-  } else if (panelState.mode === "inspect" && panelState.activeOccurrence) {
-    from = panelState.activeOccurrence.from;
-    to = panelState.activeOccurrence.to;
-  } else {
+  if (!selectionState.isTaggableSelection) {
     return false;
   }
+
+  const { from, to } = editor.state.selection;
 
   return editor
     .chain()
@@ -450,20 +443,17 @@ export function clearTextTag(editor: Editor | null) {
     return false;
   }
 
-  const panelState = getTextTagPanelState(editor);
-  let from = editor.state.selection.from;
-  let to = editor.state.selection.to;
+  const selectionState = getTextTagSelectionState(editor);
 
-  if (panelState.mode === "apply") {
-    if (!panelState.selection.isTaggableSelection) {
-      return false;
-    }
-  } else if (panelState.mode === "inspect" && panelState.activeOccurrence) {
-    from = panelState.activeOccurrence.from;
-    to = panelState.activeOccurrence.to;
-  } else {
+  if (
+    !selectionState.isTaggableSelection ||
+    selectionState.activeTagId === null ||
+    selectionState.hasMixedOrInvalidSelection
+  ) {
     return false;
   }
+
+  const { from, to } = editor.state.selection;
 
   return editor
     .chain()
