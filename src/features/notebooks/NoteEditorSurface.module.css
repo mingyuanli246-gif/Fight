@@ -383,6 +383,41 @@
   padding: 0 0.08em;
 }
 
+.proseMirrorRoot :global(.textTagActive),
+.editorDocument :global(.textTagActive) {
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--note-tag-color, #ff3b30) 18%, transparent) 0%,
+      color-mix(in srgb, var(--note-tag-color, #ff3b30) 28%, transparent) 100%
+    );
+  box-shadow:
+    inset 0 -2px 0
+      color-mix(in srgb, var(--note-tag-color, #ff3b30) 72%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--note-tag-color, #ff3b30) 22%, transparent);
+}
+
+.proseMirrorRoot :global(.textTagPulseA),
+.proseMirrorRoot :global(.textTagPulseB),
+.editorDocument :global(.textTagPulseA),
+.editorDocument :global(.textTagPulseB) {
+  animation: textTagPulse 220ms ease-out;
+}
+
+@keyframes textTagPulse {
+  0% {
+    filter: none;
+  }
+
+  35% {
+    filter: saturate(1.08) brightness(0.96);
+  }
+
+  100% {
+    filter: none;
+  }
+}
+
 .proseMirrorRoot p:empty::before,
 .proseMirrorRoot p.is-editor-empty:first-child::before {
   content: "";

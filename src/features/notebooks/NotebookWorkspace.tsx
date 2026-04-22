@@ -53,10 +53,14 @@ import type {
   NotebookHomeSort,
   NotebookShellMode,
   SelectedEntity,
+  TextTagInspectionState,
   TextTagSelectionState,
 } from "./types";
 import styles from "./NotebookWorkspaceShell.module.css";
-import { createEmptyTextTagSelectionState } from "./textTags";
+import {
+  createEmptyTextTagInspectionState,
+  createEmptyTextTagSelectionState,
+} from "./textTags";
 
 const SECTION_LEAVE_BLOCKED_MESSAGE =
   "当前笔记保存失败，已阻止切换。请先重试保存或复制内容后再操作。";
@@ -387,6 +391,8 @@ export const NotebookWorkspace = forwardRef<
     useState<NotebookHighlightRequest | null>(null);
   const [textTagSelectionState, setTextTagSelectionState] =
     useState<TextTagSelectionState>(() => createEmptyTextTagSelectionState());
+  const [textTagInspectionState, setTextTagInspectionState] =
+    useState<TextTagInspectionState>(() => createEmptyTextTagInspectionState());
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const [initializationError, setInitializationError] = useState<string | null>(
     null,
@@ -433,6 +439,7 @@ export const NotebookWorkspace = forwardRef<
 
   useEffect(() => {
     setTextTagSelectionState(createEmptyTextTagSelectionState());
+    setTextTagInspectionState(createEmptyTextTagInspectionState());
   }, [selectedNote?.id]);
 
   useEffect(() => {
@@ -1270,6 +1277,7 @@ export const NotebookWorkspace = forwardRef<
           rightPanelCollapsed={isRightPanelCollapsed}
           highlightRequest={highlightRequest}
           textTagSelectionState={textTagSelectionState}
+          textTagInspectionState={textTagInspectionState}
           noteEditorRef={noteEditorRef}
           reviewManagerRef={reviewManagerRef}
           onReturnHome={() => {
@@ -1316,6 +1324,7 @@ export const NotebookWorkspace = forwardRef<
             );
           }}
           onTextTagSelectionStateChange={setTextTagSelectionState}
+          onTextTagInspectionStateChange={setTextTagInspectionState}
           onError={setErrorMessage}
         />
       )}

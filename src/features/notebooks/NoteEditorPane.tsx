@@ -56,11 +56,20 @@ import {
   type MathNodeName,
 } from "./mathSerialization";
 import {
+  applyTextTagToOccurrence,
   applyTextTag,
-  createEmptyTextTagSelectionState,
   clearTextTag,
+  clearTextTagFromOccurrence,
+  clearActiveTextTagOccurrence,
+  createEmptyTextTagInspectionState,
+  createEmptyTextTagSelectionState,
   extractTextTagOccurrences,
+  findTextTagOccurrenceAtPosition,
+  findTextTagOccurrenceByKey,
+  getTextTagInspectionStateSignature,
   getTextTagSelectionState,
+  setActiveTextTagOccurrence,
+  TEXT_TAG_SENTINEL_ATTR,
 } from "./textTags";
 import type {
   Folder,
@@ -68,6 +77,7 @@ import type {
   NoteSaveStatus,
   Notebook,
   NotebookHighlightRequest,
+  TextTagInspectionState,
   TextTagOccurrenceDraft,
   TextTagSelectionState,
 } from "./types";
@@ -99,6 +109,7 @@ interface NoteEditorPaneProps {
   highlightRequest?: NotebookHighlightRequest | null;
   onNoteUpdated: (note: Note) => void;
   onTextTagSelectionStateChange?: (state: TextTagSelectionState) => void;
+  onTextTagInspectionStateChange?: (state: TextTagInspectionState) => void;
   onError: (message: string) => void;
 }
 
@@ -204,6 +215,7 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
       highlightRequest = null,
       onNoteUpdated,
       onTextTagSelectionStateChange,
+      onTextTagInspectionStateChange,
       onError,
     },
     ref,
@@ -245,16 +257,26 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
     const textTagSelectionStateSignatureRef = useRef(
       JSON.stringify(createEmptyTextTagSelectionState()),
     );
+    const textTagInspectionStateRef = useRef<TextTagInspectionState>(
+      createEmptyTextTagInspectionState(),
+    );
+    const textTagInspectionStateSignatureRef = useRef(
+      getTextTagInspectionStateSignature(createEmptyTextTagInspectionState()),
+    );
     const editorRef = useRef<Editor | null>(null);
     const onNoteUpdatedRef = useRef(onNoteUpdated);
     const onTextTagSelectionStateChangeRef = useRef(
       onTextTagSelectionStateChange,
+    );
+    const onTextTagInspectionStateChangeRef = useRef(
+      onTextTagInspectionStateChange,
     );
     const onErrorRef = useRef(onError);
     const ongoingSaveRef = useRef<Promise<boolean> | null>(null);
     const ongoingSaveContentRef = useRef<string | null>(null);
     const highlightTimerRef = useRef<number | null>(null);
     const lastHandledHighlightRequestRef = useRef<number | null>(null);
+    const textTagInspectionPulseVariantRef = useRef<"A" | "B">("A");
     const mathBridgeRef = useRef<EditorMathBridge>({
       onEditMathRequest() {
         // 运行时由当前组件覆写。
@@ -299,6 +321,85 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
       onTextTagSelectionStateChangeRef.current?.(resolvedState);
     }
 
+    function emitTextTagInspectionState(nextState?: TextTagInspectionState) {
+      const resolvedState = nextState ?? textTagInspectionStateRef.current;
+      const nextSignature = getTextTagInspectionStateSignature(resolvedState);
+
+      if (nextSignature === textTagInspectionStateSignatureRef.current) {
+        return;
+      }
+
+      textTagInspectionStateSignatureRef.current = nextSignature;
+      textTagInspectionStateRef.current = resolvedState;
+      onTextTagInspectionStateChangeRef.current?.(resolvedState);
+    }
+
+    function setTextTagInspectionOccurrence(
+      occurrence: TextTagInspectionState["activeOccurrence"],
+      options?: {
+        pulse?: boolean;
+      },
+    ) {
+      if (occurrence) {
+        const nextPulseVariant = options?.pulse
+          ? textTagInspectionPulseVariantRef.current === "A"
+            ? "B"
+            : "A"
+          : textTagInspectionPulseVariantRef.current;
+
+        textTagInspectionPulseVariantRef.current = nextPulseVariant;
+        setActiveTextTagOccurrence(
+          editorRef.current,
+          occurrence.key,
+          options?.pulse ? nextPulseVariant : null,
+        );
+      } else {
+        clearActiveTextTagOccurrence(editorRef.current);
+      }
+
+      emitTextTagInspectionState({
+        activeOccurrence: occurrence,
+      });
+    }
+
+    function reconcileTextTagInspectionState(
+      currentEditor: Editor | null,
+      nextSelectionState?: TextTagSelectionState,
+    ) {
+      if (!currentEditor) {
+        setTextTagInspectionOccurrence(null);
+        return;
+      }
+
+      const resolvedSelectionState =
+        nextSelectionState ?? getTextTagSelectionState(currentEditor);
+
+      if (resolvedSelectionState.hasSelection) {
+        setTextTagInspectionOccurrence(null);
+        return;
+      }
+
+      const activeOccurrence = textTagInspectionStateRef.current.activeOccurrence;
+
+      if (!activeOccurrence) {
+        return;
+      }
+
+      const nextOccurrence = findTextTagOccurrenceByKey(
+        currentEditor.state.doc,
+        activeOccurrence.key,
+      );
+
+      if (!nextOccurrence) {
+        setTextTagInspectionOccurrence(null);
+        return;
+      }
+
+      emitTextTagInspectionState({
+        activeOccurrence: nextOccurrence,
+      });
+    }
+
     function capturePendingSaveSnapshot(currentEditor: Editor | null) {
       if (!currentEditor) {
         return pendingSaveSnapshotRef.current;
@@ -327,10 +428,37 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
         attributes: {
           class: editorStyles.proseMirrorRoot,
         },
+        handleClick(view, position, event) {
+          if (!view.state.selection.empty) {
+            return false;
+          }
+
+          const target =
+            event.target instanceof HTMLElement
+              ? event.target.closest(`[${TEXT_TAG_SENTINEL_ATTR}="true"]`)
+              : null;
+
+          if (!target) {
+            setTextTagInspectionOccurrence(null);
+            return false;
+          }
+
+          const occurrence = findTextTagOccurrenceAtPosition(view.state.doc, position);
+
+          if (!occurrence) {
+            setTextTagInspectionOccurrence(null);
+            return false;
+          }
+
+          setTextTagInspectionOccurrence(occurrence, { pulse: true });
+          return false;
+        },
       },
       onUpdate({ editor: currentEditor }) {
         syncPendingSaveSnapshot(currentEditor);
-        emitTextTagSelectionState(getTextTagSelectionState(currentEditor));
+        const nextSelectionState = getTextTagSelectionState(currentEditor);
+        emitTextTagSelectionState(nextSelectionState);
+        reconcileTextTagInspectionState(currentEditor, nextSelectionState);
       },
     }, [editorSessionKey]);
 
@@ -341,6 +469,7 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
           ? getTextTagSelectionState(editor)
           : createEmptyTextTagSelectionState(),
       );
+      emitTextTagInspectionState(createEmptyTextTagInspectionState());
     }, [editor]);
 
     const noteFolder =
@@ -741,21 +870,53 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
           draftContentRef.current !== lastSavedContentRef.current,
         getTextTagSelectionState: () => textTagSelectionStateRef.current,
         applyTextTag: (tagId, colorSnapshot) => {
-          const didApply = applyTextTag(editorRef.current, tagId, colorSnapshot);
+          const inspectionOccurrence = textTagInspectionStateRef.current.activeOccurrence;
+          const didApply =
+            !textTagSelectionStateRef.current.hasSelection && inspectionOccurrence
+              ? applyTextTagToOccurrence(
+                  editorRef.current,
+                  inspectionOccurrence,
+                  tagId,
+                  colorSnapshot,
+                )
+              : applyTextTag(editorRef.current, tagId, colorSnapshot);
 
           if (didApply) {
             syncPendingSaveSnapshot(editorRef.current);
-            emitTextTagSelectionState();
+            const nextSelectionState = getTextTagSelectionState(editorRef.current);
+            emitTextTagSelectionState(nextSelectionState);
+
+            if (!nextSelectionState.hasSelection && inspectionOccurrence && editorRef.current) {
+              setTextTagInspectionOccurrence(
+                findTextTagOccurrenceAtPosition(
+                  editorRef.current.state.doc,
+                  inspectionOccurrence.from,
+                ),
+              );
+            } else {
+              reconcileTextTagInspectionState(editorRef.current, nextSelectionState);
+            }
           }
 
           return didApply;
         },
         clearTextTag: () => {
-          const didClear = clearTextTag(editorRef.current);
+          const inspectionOccurrence = textTagInspectionStateRef.current.activeOccurrence;
+          const didClear =
+            !textTagSelectionStateRef.current.hasSelection && inspectionOccurrence
+              ? clearTextTagFromOccurrence(editorRef.current, inspectionOccurrence)
+              : clearTextTag(editorRef.current);
 
           if (didClear) {
             syncPendingSaveSnapshot(editorRef.current);
-            emitTextTagSelectionState();
+            const nextSelectionState = getTextTagSelectionState(editorRef.current);
+            emitTextTagSelectionState(nextSelectionState);
+
+            if (!nextSelectionState.hasSelection && inspectionOccurrence) {
+              setTextTagInspectionOccurrence(null);
+            } else {
+              reconcileTextTagInspectionState(editorRef.current, nextSelectionState);
+            }
           }
 
           return didClear;
@@ -771,6 +932,10 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
     useEffect(() => {
       onTextTagSelectionStateChangeRef.current = onTextTagSelectionStateChange;
     }, [onTextTagSelectionStateChange]);
+
+    useEffect(() => {
+      onTextTagInspectionStateChangeRef.current = onTextTagInspectionStateChange;
+    }, [onTextTagInspectionStateChange]);
 
     useEffect(() => {
       onErrorRef.current = onError;
@@ -831,6 +996,12 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
         textTagSelectionStateRef.current,
       );
       onTextTagSelectionStateChangeRef.current?.(textTagSelectionStateRef.current);
+      textTagInspectionStateRef.current = createEmptyTextTagInspectionState();
+      textTagInspectionStateSignatureRef.current = getTextTagInspectionStateSignature(
+        textTagInspectionStateRef.current,
+      );
+      onTextTagInspectionStateChangeRef.current?.(textTagInspectionStateRef.current);
+      clearActiveTextTagOccurrence(editorRef.current);
 
       void (async () => {
         try {
@@ -937,11 +1108,14 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
     useEffect(() => {
       if (!editor) {
         emitTextTagSelectionState(createEmptyTextTagSelectionState());
+        emitTextTagInspectionState(createEmptyTextTagInspectionState());
         return;
       }
 
       const emitCurrentState = () => {
-        emitTextTagSelectionState(getTextTagSelectionState(editor));
+        const nextSelectionState = getTextTagSelectionState(editor);
+        emitTextTagSelectionState(nextSelectionState);
+        reconcileTextTagInspectionState(editor, nextSelectionState);
       };
 
       emitCurrentState();

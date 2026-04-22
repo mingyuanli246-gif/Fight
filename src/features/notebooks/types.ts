@@ -66,6 +66,10 @@ export interface TextTagSelectionState {
   hasMixedOrInvalidSelection: boolean;
 }
 
+export interface TextTagInspectionState {
+  activeOccurrence: LiveTextTagOccurrence | null;
+}
+
 export interface LiveTextTagOccurrence {
   key: string;
   tagId: number;

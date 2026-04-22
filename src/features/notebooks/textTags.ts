@@ -6,10 +6,12 @@ import {
   type Extensions,
 } from "@tiptap/core";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
-import { Plugin } from "@tiptap/pm/state";
+import { Plugin, PluginKey } from "@tiptap/pm/state";
+import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import { TAG_COLOR_PALETTE } from "./tagColors";
 import type {
   LiveTextTagOccurrence,
+  TextTagInspectionState,
   TextTagOccurrenceDraft,
   TextTagPanelState,
   TextTagSelectionState,
@@ -53,6 +55,35 @@ type PendingOccurrence = {
   from: number;
   to: number;
 };
+
+type TextTagOperationTarget = {
+  from: number;
+  to: number;
+  activeTagId: number | null;
+  activeColorSnapshot: string | null;
+};
+
+type TextTagActivationMeta =
+  | {
+      type: "set";
+      occurrenceKey: string;
+      pulseClassName: string | null;
+    }
+  | {
+      type: "clear";
+    };
+
+type TextTagActivationState = {
+  occurrenceKey: string | null;
+  pulseClassName: string | null;
+};
+
+const TEXT_TAG_ACTIVE_CLASS = "textTagActive";
+const TEXT_TAG_PULSE_CLASS_A = "textTagPulseA";
+const TEXT_TAG_PULSE_CLASS_B = "textTagPulseB";
+const TEXT_TAG_ACTIVATION_PLUGIN_KEY = new PluginKey<TextTagActivationState>(
+  "textTagActivation",
+);
 
 function createBlockId() {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -177,6 +208,12 @@ function buildOccurrenceKey(
   tagId: number,
 ) {
   return `${blockId}:${startOffset}:${endOffset}:${tagId}`;
+}
+
+function createEmptyTextTagInspectionStateInternal(): TextTagInspectionState {
+  return {
+    activeOccurrence: null,
+  };
 }
 
 function createTextTagSummary(occurrences: LiveTextTagOccurrence[]): TextTagSummary {
@@ -327,6 +364,29 @@ export function createEmptyTextTagSelectionState(): TextTagSelectionState {
   };
 }
 
+export function createEmptyTextTagInspectionState(): TextTagInspectionState {
+  return createEmptyTextTagInspectionStateInternal();
+}
+
+export function getTextTagInspectionStateSignature(
+  inspectionState: TextTagInspectionState,
+) {
+  const activeOccurrence = inspectionState.activeOccurrence;
+
+  if (!activeOccurrence) {
+    return "";
+  }
+
+  return [
+    activeOccurrence.key,
+    activeOccurrence.tagId,
+    activeOccurrence.colorSnapshot,
+    activeOccurrence.from,
+    activeOccurrence.to,
+    activeOccurrence.snippetText,
+  ].join("::");
+}
+
 export function createEmptyTextTagPanelState(): TextTagPanelState {
   return {
     mode: "index",
@@ -388,8 +448,58 @@ export function getTextTagPanelStateSignature(panelState: TextTagPanelState) {
   ].join("::");
 }
 
-export function applyTextTag(
+function resolveTextTagOperationTarget(
   editor: Editor | null,
+): TextTagOperationTarget | null {
+  if (!editor) {
+    return null;
+  }
+
+  const selectionState = getTextTagSelectionState(editor);
+
+  if (!selectionState.isTaggableSelection || selectionState.hasMixedOrInvalidSelection) {
+    return null;
+  }
+
+  const { from, to } = editor.state.selection;
+
+  if (
+    selectionState.activeTagId === null ||
+    selectionState.activeColorSnapshot === null
+  ) {
+    return {
+      from,
+      to,
+      activeTagId: null,
+      activeColorSnapshot: null,
+    };
+  }
+
+  const matchedOccurrence =
+    extractLiveTextTagOccurrences(editor.state.doc).find(
+      (occurrence) =>
+        occurrence.tagId === selectionState.activeTagId &&
+        occurrence.colorSnapshot === selectionState.activeColorSnapshot &&
+        from >= occurrence.from &&
+        to <= occurrence.to,
+    ) ?? null;
+
+  if (!matchedOccurrence) {
+    return null;
+  }
+
+  return {
+    from: matchedOccurrence.from,
+    to: matchedOccurrence.to,
+    activeTagId: matchedOccurrence.tagId,
+    activeColorSnapshot: matchedOccurrence.colorSnapshot,
+  };
+}
+
+function applyTextTagToRange(
+  editor: Editor | null,
+  from: number,
+  to: number,
   tagId: number,
   colorSnapshot: string,
 ) {
@@ -401,17 +511,14 @@ export function applyTextTag(
   const normalizedColorSnapshot = parseColorSnapshot(colorSnapshot);
   const markType = editor.state.schema.marks[TEXT_TAG_MARK_NAME];
 
-  if (!markType || normalizedTagId === null || normalizedColorSnapshot === null) {
+  if (
+    !markType ||
+    normalizedTagId === null ||
+    normalizedColorSnapshot === null ||
+    from >= to
+  ) {
     return false;
   }
-
-  const selectionState = getTextTagSelectionState(editor);
-
-  if (!selectionState.isTaggableSelection) {
-    return false;
-  }
-
-  const { from, to } = editor.state.selection;
 
   return editor
     .chain()
@@ -432,28 +539,16 @@ export function applyTextTag(
     .run();
 }
 
-export function clearTextTag(editor: Editor | null) {
+function clearTextTagFromRange(editor: Editor | null, from: number, to: number) {
   if (!editor) {
     return false;
   }
 
   const markType = editor.state.schema.marks[TEXT_TAG_MARK_NAME];
 
-  if (!markType) {
+  if (!markType || from >= to) {
     return false;
   }
-
-  const selectionState = getTextTagSelectionState(editor);
-
-  if (
-    !selectionState.isTaggableSelection ||
-    selectionState.activeTagId === null ||
-    selectionState.hasMixedOrInvalidSelection
-  ) {
-    return false;
-  }
-
-  const { from, to } = editor.state.selection;
 
   return editor
     .chain()
@@ -464,6 +559,68 @@ export function clearTextTag(editor: Editor | null) {
       return true;
     })
     .run();
+}
+
+export function applyTextTag(
+  editor: Editor | null,
+  tagId: number,
+  colorSnapshot: string,
+) {
+  if (!editor) {
+    return false;
+  }
+
+  const target = resolveTextTagOperationTarget(editor);
+
+  if (!target) {
+    return false;
+  }
+
+  return applyTextTagToRange(
+    editor,
+    target.from,
+    target.to,
+    tagId,
+    colorSnapshot,
+  );
+}
+
+export function clearTextTag(editor: Editor | null) {
+  if (!editor) {
+    return false;
+  }
+
+  const target = resolveTextTagOperationTarget(editor);
+
+  if (!target || target.activeTagId === null) {
+    return false;
+  }
+
+  return clearTextTagFromRange(editor, target.from, target.to);
+}
+
+export function applyTextTagToOccurrence(
+  editor: Editor | null,
+  occurrence: LiveTextTagOccurrence | null,
+  tagId: number,
+  colorSnapshot: string,
+) {
+  if (!occurrence) {
+    return false;
+  }
+
+  return applyTextTagToRange(editor, occurrence.from, occurrence.to, tagId, colorSnapshot);
+}
+
+export function clearTextTagFromOccurrence(
+  editor: Editor | null,
+  occurrence: LiveTextTagOccurrence | null,
+) {
+  if (!occurrence) {
+    return false;
+  }
+
+  return clearTextTagFromRange(editor, occurrence.from, occurrence.to);
 }
 
 export const TextTag = Mark.create({
@@ -606,6 +763,76 @@ export const BlockIdExtension = Extension.create({
   },
 });
 
+const TextTagActivationExtension = Extension.create({
+  name: "textTagActivation",
+
+  addProseMirrorPlugins() {
+    return [
+      new Plugin<TextTagActivationState>({
+        key: TEXT_TAG_ACTIVATION_PLUGIN_KEY,
+        state: {
+          init: () => ({
+            occurrenceKey: null,
+            pulseClassName: null,
+          }),
+          apply(tr, pluginState) {
+            const meta = tr.getMeta(
+              TEXT_TAG_ACTIVATION_PLUGIN_KEY,
+            ) as TextTagActivationMeta | undefined;
+
+            if (!meta) {
+              return pluginState;
+            }
+
+            if (meta.type === "clear") {
+              return {
+                occurrenceKey: null,
+                pulseClassName: null,
+              };
+            }
+
+            return {
+              occurrenceKey: meta.occurrenceKey,
+              pulseClassName: meta.pulseClassName,
+            };
+          },
+        },
+        props: {
+          decorations(state) {
+            const pluginState = TEXT_TAG_ACTIVATION_PLUGIN_KEY.getState(state);
+
+            if (!pluginState?.occurrenceKey) {
+              return DecorationSet.empty;
+            }
+
+            const occurrence = findTextTagOccurrenceByKey(
+              state.doc,
+              pluginState.occurrenceKey,
+            );
+
+            if (!occurrence) {
+              return DecorationSet.empty;
+            }
+
+            const className = [
+              TEXT_TAG_ACTIVE_CLASS,
+              pluginState.pulseClassName,
+            ]
+              .filter(Boolean)
+              .join(" ");
+
+            return DecorationSet.create(state.doc, [
+              Decoration.inline(occurrence.from, occurrence.to, {
+                class: className,
+              }),
+            ]);
+          },
+        },
+      }),
+    ];
+  },
+});
+
 export function extractLiveTextTagOccurrences(
   documentContent: Editor["state"]["doc"],
 ): LiveTextTagOccurrence[] {
@@ -727,6 +954,63 @@ export function extractLiveTextTagOccurrences(
   return occurrences;
 }
 
+export function findTextTagOccurrenceAtPosition(
+  documentContent: Editor["state"]["doc"],
+  position: number,
+) {
+  return (
+    extractLiveTextTagOccurrences(documentContent).find(
+      (occurrence) => position >= occurrence.from && position < occurrence.to,
+    ) ?? null
+  );
+}
+
+export function findTextTagOccurrenceByKey(
+  documentContent: Editor["state"]["doc"],
+  occurrenceKey: string,
+) {
+  return (
+    extractLiveTextTagOccurrences(documentContent).find(
+      (occurrence) => occurrence.key === occurrenceKey,
+    ) ?? null
+  );
+}
+
+export function setActiveTextTagOccurrence(
+  editor: Editor | null,
+  occurrenceKey: string,
+  pulseVariant: "A" | "B" | null = null,
+) {
+  if (!editor) {
+    return;
+  }
+
+  editor.view.dispatch(
+    editor.state.tr.setMeta(TEXT_TAG_ACTIVATION_PLUGIN_KEY, {
+      type: "set",
+      occurrenceKey,
+      pulseClassName:
+        pulseVariant === "A"
+          ? TEXT_TAG_PULSE_CLASS_A
+          : pulseVariant === "B"
+            ? TEXT_TAG_PULSE_CLASS_B
+            : null,
+    } satisfies TextTagActivationMeta),
+  );
+}
+
+export function clearActiveTextTagOccurrence(editor: Editor | null) {
+  if (!editor) {
+    return;
+  }
+
+  editor.view.dispatch(
+    editor.state.tr.setMeta(TEXT_TAG_ACTIVATION_PLUGIN_KEY, {
+      type: "clear",
+    } satisfies TextTagActivationMeta),
+  );
+}
+
 export function extractTextTagOccurrences(
   documentContent: Editor["state"]["doc"],
 ): TextTagOccurrenceDraft[] {
@@ -742,5 +1026,5 @@ export function extractTextTagOccurrences(
 }
 
 export function createTextTagExtensions(): Extensions {
-  return [BlockIdExtension, TextTag];
+  return [BlockIdExtension, TextTag, TextTagActivationExtension];
 }
