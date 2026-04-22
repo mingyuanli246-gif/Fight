@@ -115,6 +115,7 @@ function isRepositoryValidationMessage(message: string) {
     "创建标签失败，请稍后重试。",
     "该标签仍被正文标注引用，请先移除相关内容标注后再删除。",
     "标注数据无效，请重新应用标签后再保存。",
+    "批注内容过长，请控制在 120 个字符以内。",
   ].includes(message);
 }
 

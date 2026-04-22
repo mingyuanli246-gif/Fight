@@ -64,13 +64,16 @@ import {
   createEmptyTextTagInspectionState,
   createEmptyTextTagSelectionState,
   extractTextTagOccurrences,
+  findClosestMatchingTextTagOccurrence,
   findTextTagOccurrenceAtPosition,
   findTextTagOccurrenceByKey,
   getTextTagInspectionStateSignature,
   getTextTagSelectionState,
+  updateTextTagOccurrenceRemark,
   setActiveTextTagOccurrence,
   TEXT_TAG_SENTINEL_ATTR,
 } from "./textTags";
+import { TextTagRemarkPopover } from "./TextTagRemarkPopover";
 import type {
   Folder,
   Note,
@@ -338,8 +341,13 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
       occurrence: TextTagInspectionState["activeOccurrence"],
       options?: {
         pulse?: boolean;
+        isPopoverOpen?: boolean;
       },
     ) {
+      const nextPopoverOpen = occurrence
+        ? options?.isPopoverOpen ?? textTagInspectionStateRef.current.isPopoverOpen
+        : false;
+
       if (occurrence) {
         const nextPulseVariant = options?.pulse
           ? textTagInspectionPulseVariantRef.current === "A"
@@ -359,7 +367,19 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
 
       emitTextTagInspectionState({
         activeOccurrence: occurrence,
+        isPopoverOpen: nextPopoverOpen,
+        popoverAnchorKey: occurrence && nextPopoverOpen ? occurrence.key : null,
       });
+    }
+
+    async function flushOpenTextTagPopoverIfNeeded() {
+      const inspectionState = textTagInspectionStateRef.current;
+
+      if (!inspectionState.activeOccurrence || !inspectionState.isPopoverOpen) {
+        return true;
+      }
+
+      return flushPendingSave();
     }
 
     function reconcileTextTagInspectionState(
@@ -388,6 +408,10 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
       const nextOccurrence = findTextTagOccurrenceByKey(
         currentEditor.state.doc,
         activeOccurrence.key,
+      ) ??
+      findClosestMatchingTextTagOccurrence(
+        currentEditor.state.doc,
+        activeOccurrence,
       );
 
       if (!nextOccurrence) {
@@ -395,8 +419,44 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
         return;
       }
 
-      emitTextTagInspectionState({
-        activeOccurrence: nextOccurrence,
+      setTextTagInspectionOccurrence(nextOccurrence, {
+        isPopoverOpen: textTagInspectionStateRef.current.isPopoverOpen,
+      });
+    }
+
+    function handleActiveTextTagRemarkChange(nextRemark: string) {
+      const inspectionOccurrence = textTagInspectionStateRef.current.activeOccurrence;
+
+      if (!inspectionOccurrence || !editorRef.current) {
+        return;
+      }
+
+      const didUpdateRemark = updateTextTagOccurrenceRemark(
+        editorRef.current,
+        inspectionOccurrence.key,
+        nextRemark,
+      );
+
+      if (!didUpdateRemark) {
+        return;
+      }
+
+      syncPendingSaveSnapshot(editorRef.current);
+      const nextSelectionState = getTextTagSelectionState(editorRef.current);
+      emitTextTagSelectionState(nextSelectionState);
+
+      const nextOccurrence =
+        findTextTagOccurrenceByKey(
+          editorRef.current.state.doc,
+          inspectionOccurrence.key,
+        ) ??
+        findClosestMatchingTextTagOccurrence(
+          editorRef.current.state.doc,
+          inspectionOccurrence,
+        );
+
+      setTextTagInspectionOccurrence(nextOccurrence, {
+        isPopoverOpen: true,
       });
     }
 
@@ -429,17 +489,37 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
           class: editorStyles.proseMirrorRoot,
         },
         handleClick(view, position, event) {
+          const targetElement =
+            event.target instanceof HTMLElement
+              ? event.target
+              : event.target instanceof Node
+                ? event.target.parentElement
+                : null;
+          const target = targetElement?.closest(
+            `[${TEXT_TAG_SENTINEL_ATTR}="true"]`,
+          );
+
           if (!view.state.selection.empty) {
             return false;
           }
 
-          const target =
-            event.target instanceof HTMLElement
-              ? event.target.closest(`[${TEXT_TAG_SENTINEL_ATTR}="true"]`)
-              : null;
+          const currentInspectionState = textTagInspectionStateRef.current;
 
           if (!target) {
-            setTextTagInspectionOccurrence(null);
+            if (
+              currentInspectionState.activeOccurrence &&
+              currentInspectionState.isPopoverOpen
+            ) {
+              void (async () => {
+                const didFlush = await flushOpenTextTagPopoverIfNeeded();
+
+                if (didFlush) {
+                  setTextTagInspectionOccurrence(null);
+                }
+              })();
+            } else {
+              setTextTagInspectionOccurrence(null);
+            }
             return false;
           }
 
@@ -450,7 +530,28 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
             return false;
           }
 
-          setTextTagInspectionOccurrence(occurrence, { pulse: true });
+          if (
+            currentInspectionState.activeOccurrence &&
+            currentInspectionState.isPopoverOpen &&
+            currentInspectionState.activeOccurrence.key !== occurrence.key
+          ) {
+            void (async () => {
+              const didFlush = await flushOpenTextTagPopoverIfNeeded();
+
+              if (didFlush) {
+                setTextTagInspectionOccurrence(occurrence, {
+                  pulse: true,
+                  isPopoverOpen: true,
+                });
+              }
+            })();
+            return false;
+          }
+
+          setTextTagInspectionOccurrence(occurrence, {
+            pulse: true,
+            isPopoverOpen: true,
+          });
           return false;
         },
       },
@@ -892,6 +993,9 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
                   editorRef.current.state.doc,
                   inspectionOccurrence.from,
                 ),
+                {
+                  isPopoverOpen: textTagInspectionStateRef.current.isPopoverOpen,
+                },
               );
             } else {
               reconcileTextTagInspectionState(editorRef.current, nextSelectionState);
@@ -1238,6 +1342,12 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
           }}
           onCancel={closeMathDialog}
           onConfirm={handleConfirmMathDialog}
+        />
+        <TextTagRemarkPopover
+          editor={editor}
+          inspectionState={textTagInspectionStateRef.current}
+          disabled={disabled || isLoadingNote}
+          onRemarkChange={handleActiveTextTagRemarkChange}
         />
       </section>
     );

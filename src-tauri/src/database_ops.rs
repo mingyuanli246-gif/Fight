@@ -32,6 +32,7 @@ const DEFAULT_REVIEW_PLAN_NAME: &str = "系统默认计划";
 const DEFAULT_REVIEW_STEP_OFFSETS: [i64; 4] = [2, 5, 10, 18];
 const LEGACY_RECOVERY_FOLDER_NAME: &str = "未归档迁移";
 const DEFAULT_TAG_COLOR: &str = "#FF3B30";
+const TEXT_TAG_REMARK_MAX_LENGTH: usize = 120;
 const TAG_COLOR_PALETTE: [&str; 12] = [
     "#FF3B30", "#FF9500", "#FFCC00", "#34C759", "#00C7BE", "#5AC8FA", "#007AFF", "#5856D6",
     "#AF52DE", "#FF2D55", "#A2845E", "#8E8E93",
@@ -176,6 +177,7 @@ pub struct NoteTagOccurrenceInput {
     pub end_offset: i64,
     pub node_type: String,
     pub snippet_text: String,
+    pub remark: Option<String>,
     pub sort_order: i64,
 }
 
@@ -1176,6 +1178,26 @@ fn tag_exists(connection: &Connection, tag_id: i64) -> Result<bool, String> {
         .map(|value| value.is_some())
 }
 
+fn normalize_text_tag_remark(remark: Option<&str>) -> Result<Option<String>, String> {
+    let Some(raw_remark) = remark else {
+        return Ok(None);
+    };
+
+    let normalized = raw_remark.trim();
+
+    if normalized.is_empty() {
+        return Ok(None);
+    }
+
+    let normalized_value = normalized.to_string();
+
+    if normalized_value.chars().count() > TEXT_TAG_REMARK_MAX_LENGTH {
+        return Err("批注内容过长，请控制在 120 个字符以内。".to_string());
+    }
+
+    Ok(Some(normalized_value))
+}
+
 fn validate_note_tag_occurrences(
     connection: &Connection,
     occurrences: &[NoteTagOccurrenceInput],
@@ -1197,6 +1219,8 @@ fn validate_note_tag_occurrences(
         {
             return Err("标注数据无效，请重新应用标签后再保存。".to_string());
         }
+
+        normalize_text_tag_remark(occurrence.remark.as_deref())?;
 
         distinct_tag_ids.insert(occurrence.tag_id);
     }
@@ -2451,14 +2475,16 @@ fn save_note_content_with_tags_tx_internal(
                     end_offset,
                     node_type,
                     snippet_text,
+                    remark_text,
                     sort_order
                   )
-                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                 ",
             )
             .map_err(|error| to_command_error("准备写入标注索引", error))?;
 
         for occurrence in occurrences {
+            let normalized_remark = normalize_text_tag_remark(occurrence.remark.as_deref())?;
             insert_occurrence
                 .execute(params![
                     note_id,
@@ -2468,6 +2494,7 @@ fn save_note_content_with_tags_tx_internal(
                     occurrence.end_offset,
                     occurrence.node_type.trim(),
                     occurrence.snippet_text.trim(),
+                    normalized_remark,
                     occurrence.sort_order,
                 ])
                 .map_err(|error| to_command_error("写入标注索引", error))?;
@@ -3678,7 +3705,7 @@ mod tests {
         set_review_task_completed_tx_internal, today_local_date_key,
         update_notebook_cover_image_tx_internal, APP_META_KEY_REVIEW_FEATURE_REBUILD_V1_DONE,
         APP_META_KEY_REVIEW_SCHEDULE_DIRTY_NOTE_IDS, DEFAULT_REVIEW_PLAN_NAME, DEFAULT_TAG_COLOR,
-        NoteTagOccurrenceInput,
+        NoteTagOccurrenceInput, TEXT_TAG_REMARK_MAX_LENGTH,
     };
     use chrono::Local;
     use rusqlite::Connection;
@@ -3762,6 +3789,7 @@ mod tests {
                   end_offset INTEGER NOT NULL CHECK (end_offset >= 0),
                   node_type TEXT NOT NULL,
                   snippet_text TEXT NOT NULL,
+                  remark_text TEXT,
                   sort_order INTEGER NOT NULL CHECK (sort_order >= 0),
                   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -5411,7 +5439,7 @@ mod tests {
             .expect("insert legacy note_tags");
         connection
             .execute(
-                "INSERT INTO note_tag_occurrences (note_id, tag_id, block_id, start_offset, end_offset, node_type, snippet_text, sort_order) VALUES (1, 1, 'blk_oldlegacy0001', 0, 2, 'paragraph', '旧', 0)",
+                "INSERT INTO note_tag_occurrences (note_id, tag_id, block_id, start_offset, end_offset, node_type, snippet_text, remark_text, sort_order) VALUES (1, 1, 'blk_oldlegacy0001', 0, 2, 'paragraph', '旧', NULL, 0)",
                 [],
             )
             .expect("insert legacy occurrence");
@@ -5419,7 +5447,7 @@ mod tests {
         let saved_note = save_note_content_with_tags_tx_internal(
             &mut connection,
             1,
-            "<p data-block-id=\"blk_new_a\"><span data-note-tag=\"true\" data-note-tag-id=\"1\" data-note-tag-color=\"#FF3B30\">重点</span>文本</p>",
+            "<p data-block-id=\"blk_new_a\"><span data-note-tag=\"true\" data-note-tag-id=\"1\" data-note-tag-color=\"#FF3B30\" data-note-tag-remark=\"第一条批注\">重点</span>文本</p>",
             &[
                 NoteTagOccurrenceInput {
                     tag_id: 1,
@@ -5428,6 +5456,7 @@ mod tests {
                     end_offset: 2,
                     node_type: "paragraph".to_string(),
                     snippet_text: "重点".to_string(),
+                    remark: Some("第一条批注".to_string()),
                     sort_order: 0,
                 },
                 NoteTagOccurrenceInput {
@@ -5437,6 +5466,7 @@ mod tests {
                     end_offset: 4,
                     node_type: "paragraph".to_string(),
                     snippet_text: "文本".to_string(),
+                    remark: None,
                     sort_order: 1,
                 },
             ],
@@ -5451,6 +5481,13 @@ mod tests {
         let note_tag_count: i64 = connection
             .query_row("SELECT COUNT(*) FROM note_tags WHERE note_id = 1", [], |row| row.get(0))
             .expect("count note_tags");
+        let stored_first_remark: Option<String> = connection
+            .query_row(
+                "SELECT remark_text FROM note_tag_occurrences WHERE note_id = 1 AND tag_id = 1 LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read occurrence remark");
         let stored_title_body: (String, String) = connection
             .query_row(
                 "SELECT title, body_plaintext FROM note_search WHERE rowid = 1",
@@ -5459,9 +5496,10 @@ mod tests {
             )
             .expect("read note_search");
 
-        assert_eq!(saved_note.content_plaintext.as_deref(), Some("<p data-block-id=\"blk_new_a\"><span data-note-tag=\"true\" data-note-tag-id=\"1\" data-note-tag-color=\"#FF3B30\">重点</span>文本</p>"));
+        assert_eq!(saved_note.content_plaintext.as_deref(), Some("<p data-block-id=\"blk_new_a\"><span data-note-tag=\"true\" data-note-tag-id=\"1\" data-note-tag-color=\"#FF3B30\" data-note-tag-remark=\"第一条批注\">重点</span>文本</p>"));
         assert_eq!(occurrence_count, 2);
         assert_eq!(note_tag_count, 2);
+        assert_eq!(stored_first_remark.as_deref(), Some("第一条批注"));
         assert_eq!(stored_title_body.0, "文件一");
         assert!(stored_title_body.1.contains("重点文本"));
     }
@@ -5499,6 +5537,7 @@ mod tests {
                 end_offset: 2,
                 node_type: "paragraph".to_string(),
                 snippet_text: "重点".to_string(),
+                remark: None,
                 sort_order: 0,
             }],
         )
@@ -5545,6 +5584,7 @@ mod tests {
                 end_offset: 2,
                 node_type: "paragraph".to_string(),
                 snippet_text: "   ".to_string(),
+                remark: None,
                 sort_order: 0,
             }],
         )
@@ -5583,12 +5623,55 @@ mod tests {
                 end_offset: 2,
                 node_type: "paragraph".to_string(),
                 snippet_text: "重点".to_string(),
+                remark: None,
                 sort_order: 0,
             }],
         )
         .expect_err("missing tag should fail");
 
         assert_eq!(error, "目标标签不存在。");
+    }
+
+    #[test]
+    fn save_note_content_with_tags_path_rejects_too_long_remark() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', '<p>旧正文</p>')",
+                [],
+            )
+            .expect("insert note");
+        connection
+            .execute("INSERT INTO tags (name, color) VALUES ('重点', '#FF3B30')", [])
+            .expect("insert tag");
+
+        let error = save_note_content_with_tags_tx_internal(
+            &mut connection,
+            1,
+            "<p>新正文</p>",
+            &[NoteTagOccurrenceInput {
+                tag_id: 1,
+                block_id: "blk_long_remark_001".to_string(),
+                start_offset: 0,
+                end_offset: 2,
+                node_type: "paragraph".to_string(),
+                snippet_text: "重点".to_string(),
+                remark: Some("a".repeat(TEXT_TAG_REMARK_MAX_LENGTH + 1)),
+                sort_order: 0,
+            }],
+        )
+        .expect_err("too-long remark should fail");
+
+        assert_eq!(error, "批注内容过长，请控制在 120 个字符以内。");
     }
 
     #[test]

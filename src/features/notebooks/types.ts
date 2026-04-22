@@ -55,6 +55,7 @@ export interface TextTagOccurrenceDraft {
   endOffset: number;
   nodeType: string;
   snippetText: string;
+  remark: string | null;
   sortOrder: number;
 }
 
@@ -68,12 +69,15 @@ export interface TextTagSelectionState {
 
 export interface TextTagInspectionState {
   activeOccurrence: LiveTextTagOccurrence | null;
+  isPopoverOpen: boolean;
+  popoverAnchorKey: string | null;
 }
 
 export interface LiveTextTagOccurrence {
   key: string;
   tagId: number;
   colorSnapshot: string;
+  remark: string | null;
   blockId: string;
   startOffset: number;
   endOffset: number;

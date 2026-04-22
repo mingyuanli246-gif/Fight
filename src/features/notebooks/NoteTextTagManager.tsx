@@ -140,6 +140,14 @@ export function NoteTextTagManager({
     setIsBusy(true);
 
     try {
+      if (hasInspectionTarget) {
+        const didFlush = await noteEditorRef.current?.flushPendingSave();
+
+        if (!didFlush) {
+          throw new Error("当前批注保存失败，请稍后重试。");
+        }
+      }
+
       const didApply = noteEditorRef.current?.applyTextTag(tagId, colorSnapshot);
 
       if (!didApply) {

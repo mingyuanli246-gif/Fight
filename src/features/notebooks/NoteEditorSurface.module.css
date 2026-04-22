@@ -401,20 +401,40 @@
 .proseMirrorRoot :global(.textTagPulseB),
 .editorDocument :global(.textTagPulseA),
 .editorDocument :global(.textTagPulseB) {
-  animation: textTagPulse 220ms ease-out;
+  display: inline-block;
+  transform-origin: center bottom;
+  animation: textTagPulse 300ms cubic-bezier(0.18, 0.9, 0.26, 1.24);
+  will-change: transform, filter;
 }
 
 @keyframes textTagPulse {
   0% {
+    transform: scale3d(1, 1, 1);
     filter: none;
   }
 
-  35% {
-    filter: saturate(1.08) brightness(0.96);
+  28% {
+    transform: scale3d(1.028, 0.94, 1);
+    filter: saturate(1.06) brightness(0.98);
+  }
+
+  58% {
+    transform: scale3d(0.988, 1.018, 1);
+    filter: saturate(1.02) brightness(1.01);
   }
 
   100% {
+    transform: scale3d(1, 1, 1);
     filter: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .proseMirrorRoot :global(.textTagPulseA),
+  .proseMirrorRoot :global(.textTagPulseB),
+  .editorDocument :global(.textTagPulseA),
+  .editorDocument :global(.textTagPulseB) {
+    animation-duration: 1ms;
   }
 }
 

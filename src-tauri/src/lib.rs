@@ -67,6 +67,12 @@ pub fn run() {
             sql: include_str!("../migrations/0007_tag_occurrences.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 8,
+            description: "add_note_tag_occurrence_remark",
+            sql: include_str!("../migrations/0008_note_tag_occurrence_remark.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()

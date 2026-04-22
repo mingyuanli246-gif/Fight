@@ -22,6 +22,7 @@ export const TEXT_TAG_MARK_NAME = "textTag";
 export const TEXT_TAG_SENTINEL_ATTR = "data-note-tag";
 export const TEXT_TAG_ID_ATTR = "data-note-tag-id";
 export const TEXT_TAG_COLOR_ATTR = "data-note-tag-color";
+export const TEXT_TAG_REMARK_ATTR = "data-note-tag-remark";
 export const BLOCK_ID_ATTR = "data-block-id";
 
 const SUPPORTED_BLOCK_TYPES = ["paragraph", "heading", "blockquote"] as const;
@@ -30,10 +31,12 @@ const TEXT_TAG_PALETTE_SET = new Set<string>(TAG_COLOR_PALETTE);
 const HEX_COLOR_PATTERN = /^#[0-9A-F]{6}$/;
 const BLOCK_ID_PATTERN = /^blk_[A-Za-z0-9_-]{10,}$/;
 const OCCURRENCE_SNIPPET_MAX_LENGTH = 120;
+const TEXT_TAG_REMARK_MAX_LENGTH = 120;
 
 type TextTagAttrs = {
   tagId: number;
   colorSnapshot: string;
+  remark: string | null;
 };
 
 type SupportedBlockNodeLike = {
@@ -48,6 +51,7 @@ type SelectionAnalysis = TextTagSelectionState;
 type PendingOccurrence = {
   tagId: number;
   colorSnapshot: string;
+  remark: string | null;
   startOffset: number;
   endOffset: number;
   nodeType: string;
@@ -61,6 +65,7 @@ type TextTagOperationTarget = {
   to: number;
   activeTagId: number | null;
   activeColorSnapshot: string | null;
+  activeRemark: string | null;
 };
 
 type TextTagActivationMeta =
@@ -156,6 +161,9 @@ function parseTextTagAttributesFromElement(element: HTMLElement): TextTagAttrs |
   const colorSnapshot = parseColorSnapshot(
     element.getAttribute(TEXT_TAG_COLOR_ATTR),
   );
+  const remark = normalizeTextTagRemark(
+    element.getAttribute(TEXT_TAG_REMARK_ATTR),
+  );
 
   if (tagId === null || colorSnapshot === null) {
     return false;
@@ -164,6 +172,7 @@ function parseTextTagAttributesFromElement(element: HTMLElement): TextTagAttrs |
   return {
     tagId,
     colorSnapshot,
+    remark,
   };
 }
 
@@ -178,6 +187,7 @@ function getValidTextTagAttrsFromMark(
 
   const tagId = parseTagId(mark.attrs.tagId);
   const colorSnapshot = parseColorSnapshot(mark.attrs.colorSnapshot);
+  const remark = normalizeTextTagRemark(mark.attrs.remark);
 
   if (tagId === null || colorSnapshot === null) {
     return null;
@@ -186,7 +196,19 @@ function getValidTextTagAttrsFromMark(
   return {
     tagId,
     colorSnapshot,
+    remark,
   };
+}
+
+export function normalizeTextTagRemark(value: unknown) {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = Array.from(value.trim())
+    .slice(0, TEXT_TAG_REMARK_MAX_LENGTH)
+    .join("");
+  return normalized === "" ? null : normalized;
 }
 
 function normalizeOccurrenceSnippet(value: string) {
@@ -213,6 +235,8 @@ function buildOccurrenceKey(
 function createEmptyTextTagInspectionStateInternal(): TextTagInspectionState {
   return {
     activeOccurrence: null,
+    isPopoverOpen: false,
+    popoverAnchorKey: null,
   };
 }
 
@@ -284,7 +308,13 @@ function analyzeTextTagSelection(editor: Editor | null): SelectionAnalysis {
 
       if (attrs) {
         hasTaggedSegment = true;
-        tagStates.add(`${attrs.tagId}:${attrs.colorSnapshot}`);
+        tagStates.add(
+          JSON.stringify([
+            attrs.tagId,
+            attrs.colorSnapshot,
+            attrs.remark ?? "",
+          ]),
+        );
       } else {
         hasUntaggedSegment = true;
       }
@@ -313,8 +343,8 @@ function analyzeTextTagSelection(editor: Editor | null): SelectionAnalysis {
 
   if (tagStates.size === 1 && !hasUntaggedSegment) {
     const [rawState] = Array.from(tagStates);
-    const [rawTagId, colorSnapshot] = rawState.split(":");
-    const activeTagId = Number.parseInt(rawTagId ?? "", 10);
+    const [rawTagId, colorSnapshot] = JSON.parse(rawState) as [number, string, string];
+    const activeTagId = Number.parseInt(String(rawTagId ?? ""), 10);
 
     return {
       hasSelection: true,
@@ -374,16 +404,19 @@ export function getTextTagInspectionStateSignature(
   const activeOccurrence = inspectionState.activeOccurrence;
 
   if (!activeOccurrence) {
-    return "";
+    return inspectionState.isPopoverOpen ? "popover-only" : "";
   }
 
   return [
     activeOccurrence.key,
     activeOccurrence.tagId,
     activeOccurrence.colorSnapshot,
+    activeOccurrence.remark ?? "",
     activeOccurrence.from,
     activeOccurrence.to,
     activeOccurrence.snippetText,
+    inspectionState.isPopoverOpen ? "1" : "0",
+    inspectionState.popoverAnchorKey ?? "",
   ].join("::");
 }
 
@@ -467,13 +500,14 @@ function resolveTextTagOperationTarget(
     selectionState.activeTagId === null ||
     selectionState.activeColorSnapshot === null
   ) {
-    return {
-      from,
-      to,
-      activeTagId: null,
-      activeColorSnapshot: null,
-    };
-  }
+      return {
+        from,
+        to,
+        activeTagId: null,
+        activeColorSnapshot: null,
+        activeRemark: null,
+      };
+    }
 
   const matchedOccurrence =
     extractLiveTextTagOccurrences(editor.state.doc).find(
@@ -493,6 +527,7 @@ function resolveTextTagOperationTarget(
     to: matchedOccurrence.to,
     activeTagId: matchedOccurrence.tagId,
     activeColorSnapshot: matchedOccurrence.colorSnapshot,
+    activeRemark: matchedOccurrence.remark,
   };
 }
 
@@ -502,6 +537,7 @@ function applyTextTagToRange(
   to: number,
   tagId: number,
   colorSnapshot: string,
+  remark: string | null = null,
 ) {
   if (!editor) {
     return false;
@@ -509,6 +545,7 @@ function applyTextTagToRange(
 
   const normalizedTagId = parseTagId(tagId);
   const normalizedColorSnapshot = parseColorSnapshot(colorSnapshot);
+  const normalizedRemark = normalizeTextTagRemark(remark);
   const markType = editor.state.schema.marks[TEXT_TAG_MARK_NAME];
 
   if (
@@ -531,6 +568,7 @@ function applyTextTagToRange(
         markType.create({
           tagId: normalizedTagId,
           colorSnapshot: normalizedColorSnapshot,
+          remark: normalizedRemark,
         }),
       );
       dispatch?.(tr.scrollIntoView());
@@ -582,6 +620,7 @@ export function applyTextTag(
     target.to,
     tagId,
     colorSnapshot,
+    target.activeRemark,
   );
 }
 
@@ -609,7 +648,47 @@ export function applyTextTagToOccurrence(
     return false;
   }
 
-  return applyTextTagToRange(editor, occurrence.from, occurrence.to, tagId, colorSnapshot);
+  return applyTextTagToRange(
+    editor,
+    occurrence.from,
+    occurrence.to,
+    tagId,
+    colorSnapshot,
+    occurrence.remark,
+  );
+}
+
+export function updateTextTagOccurrenceRemark(
+  editor: Editor | null,
+  occurrenceKey: string,
+  remark: string | null,
+) {
+  if (!editor) {
+    return false;
+  }
+
+  const markType = editor.state.schema.marks[TEXT_TAG_MARK_NAME];
+  const occurrence = findTextTagOccurrenceByKey(editor.state.doc, occurrenceKey);
+
+  if (!markType || !occurrence) {
+    return false;
+  }
+
+  const normalizedRemark = normalizeTextTagRemark(remark);
+
+  const transaction = editor.state.tr;
+  transaction.removeMark(occurrence.from, occurrence.to, markType);
+  transaction.addMark(
+    occurrence.from,
+    occurrence.to,
+    markType.create({
+      tagId: occurrence.tagId,
+      colorSnapshot: occurrence.colorSnapshot,
+      remark: normalizedRemark,
+    }),
+  );
+  editor.view.dispatch(transaction);
+  return true;
 }
 
 export function clearTextTagFromOccurrence(
@@ -660,6 +739,17 @@ export const TextTag = Mark.create({
           };
         },
       },
+      remark: {
+        default: null,
+        parseHTML: (element) =>
+          element instanceof HTMLElement
+            ? normalizeTextTagRemark(element.getAttribute(TEXT_TAG_REMARK_ATTR))
+            : null,
+        renderHTML: (attributes) => {
+          const nextRemark = normalizeTextTagRemark(attributes.remark);
+          return nextRemark === null ? {} : { [TEXT_TAG_REMARK_ATTR]: nextRemark };
+        },
+      },
     };
   },
 
@@ -681,6 +771,7 @@ export const TextTag = Mark.create({
   renderHTML({ mark, HTMLAttributes }) {
     const tagId = parseTagId(mark.attrs.tagId);
     const colorSnapshot = parseColorSnapshot(mark.attrs.colorSnapshot);
+    const remark = normalizeTextTagRemark(mark.attrs.remark);
 
     if (tagId === null || colorSnapshot === null) {
       return ["span", {}, 0];
@@ -692,6 +783,7 @@ export const TextTag = Mark.create({
         [TEXT_TAG_SENTINEL_ATTR]: "true",
         [TEXT_TAG_ID_ATTR]: String(tagId),
         [TEXT_TAG_COLOR_ATTR]: colorSnapshot,
+        ...(remark === null ? {} : { [TEXT_TAG_REMARK_ATTR]: remark }),
         style: `--note-tag-color: ${colorSnapshot};`,
       }),
       0,
@@ -875,6 +967,7 @@ export function extractLiveTextTagOccurrences(
           ),
           tagId: pendingOccurrence.tagId,
           colorSnapshot: pendingOccurrence.colorSnapshot,
+          remark: pendingOccurrence.remark,
           blockId,
           startOffset: pendingOccurrence.startOffset,
           endOffset: pendingOccurrence.endOffset,
@@ -912,6 +1005,7 @@ export function extractLiveTextTagOccurrences(
           pendingOccurrence &&
           pendingOccurrence.tagId === attrs.tagId &&
           pendingOccurrence.colorSnapshot === attrs.colorSnapshot &&
+          pendingOccurrence.remark === attrs.remark &&
           pendingOccurrence.endOffset === textOffset &&
           pendingOccurrence.to === absolutePosition
         ) {
@@ -923,6 +1017,7 @@ export function extractLiveTextTagOccurrences(
           pendingOccurrence = {
             tagId: attrs.tagId,
             colorSnapshot: attrs.colorSnapshot,
+            remark: attrs.remark,
             startOffset: textOffset,
             endOffset: textOffset + textValue.length,
             nodeType: node.type.name,
@@ -976,6 +1071,60 @@ export function findTextTagOccurrenceByKey(
   );
 }
 
+export function findClosestMatchingTextTagOccurrence(
+  documentContent: Editor["state"]["doc"],
+  previousOccurrence: LiveTextTagOccurrence,
+) {
+  const occurrences = extractLiveTextTagOccurrences(documentContent).filter(
+    (occurrence) =>
+      occurrence.blockId === previousOccurrence.blockId &&
+      occurrence.tagId === previousOccurrence.tagId &&
+      occurrence.colorSnapshot === previousOccurrence.colorSnapshot &&
+      occurrence.remark === previousOccurrence.remark,
+  );
+
+  if (occurrences.length === 0) {
+    return null;
+  }
+
+  const containingPreviousFrom =
+    occurrences.find(
+      (occurrence) =>
+        previousOccurrence.from >= occurrence.from &&
+        previousOccurrence.from < occurrence.to,
+    ) ?? null;
+
+  if (containingPreviousFrom) {
+    return containingPreviousFrom;
+  }
+
+  const overlappingOccurrence =
+    occurrences.find(
+      (occurrence) =>
+        occurrence.from < previousOccurrence.to &&
+        occurrence.to > previousOccurrence.from,
+    ) ?? null;
+
+  if (overlappingOccurrence) {
+    return overlappingOccurrence;
+  }
+
+  return occurrences.reduce((closest, occurrence) => {
+    if (!closest) {
+      return occurrence;
+    }
+
+    const occurrenceDistance =
+      Math.abs(occurrence.startOffset - previousOccurrence.startOffset) +
+      Math.abs(occurrence.endOffset - previousOccurrence.endOffset);
+    const closestDistance =
+      Math.abs(closest.startOffset - previousOccurrence.startOffset) +
+      Math.abs(closest.endOffset - previousOccurrence.endOffset);
+
+    return occurrenceDistance < closestDistance ? occurrence : closest;
+  }, null as LiveTextTagOccurrence | null);
+}
+
 export function setActiveTextTagOccurrence(
   editor: Editor | null,
   occurrenceKey: string,
@@ -1021,6 +1170,7 @@ export function extractTextTagOccurrences(
     endOffset: occurrence.endOffset,
     nodeType: occurrence.nodeType,
     snippetText: occurrence.snippetText,
+    remark: occurrence.remark,
     sortOrder: occurrence.sortOrder,
   }));
 }

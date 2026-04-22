@@ -1,0 +1,64 @@
+.popover {
+  z-index: 32;
+  width: 360px;
+  padding: 14px;
+  background: rgba(255, 255, 255, 0.98);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 18px;
+  box-shadow:
+    0 18px 36px rgba(15, 23, 42, 0.14),
+    0 6px 14px rgba(15, 23, 42, 0.08);
+  backdrop-filter: blur(18px);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.title {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.4;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.counter {
+  font-size: 12px;
+  line-height: 1;
+  font-weight: 700;
+  color: var(--color-text-tertiary);
+}
+
+.textarea {
+  width: 100%;
+  height: 180px;
+  padding: 12px 14px;
+  resize: none;
+  border: 1px solid var(--color-border-soft);
+  border-radius: 14px;
+  outline: none;
+  background: rgba(248, 250, 252, 0.92);
+  color: var(--color-text-primary);
+  font: inherit;
+  line-height: 1.65;
+}
+
+.textarea:focus {
+  border-color: rgba(59, 130, 246, 0.42);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.12);
+}
+
+.textarea::placeholder {
+  color: var(--color-text-tertiary);
+}
+
+.arrow {
+  fill: rgba(255, 255, 255, 0.98);
+  stroke: rgba(15, 23, 42, 0.08);
+  stroke-width: 1px;
+}
