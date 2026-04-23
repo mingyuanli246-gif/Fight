@@ -97,7 +97,7 @@ const MIN_EDITOR_FONT_SIZE = 12;
 const MAX_EDITOR_FONT_SIZE = 20;
 const DEFAULT_EDITOR_FONT_SIZE = 16;
 const LEGACY_DEFAULT_EDITOR_FONT_SIZE = 14;
-const LONG_TEXT_TAG_WIDTH_THRESHOLD_PX = 220;
+const LONG_TEXT_TAG_WIDTH_RATIO_THRESHOLD = 0.74;
 
 export interface NoteEditorPaneRef {
   flushPendingSave: () => Promise<boolean>;
@@ -223,7 +223,17 @@ function getTextTagOccurrenceListSignature(
     .join("|");
 }
 
-function shouldPulseTextTag(target: Element) {
+function getAvailableLineWidth(editorRoot: HTMLElement) {
+  const computedStyle = window.getComputedStyle(editorRoot);
+  const horizontalPadding =
+    Number.parseFloat(computedStyle.paddingLeft || "0") +
+    Number.parseFloat(computedStyle.paddingRight || "0");
+  const contentWidth = editorRoot.clientWidth - horizontalPadding;
+
+  return contentWidth > 0 ? contentWidth : null;
+}
+
+function shouldPulseTextTag(target: Element, editorRoot: HTMLElement | null) {
   const clientRects = Array.from(target.getClientRects()).filter(
     (rect) => rect.width > 0 && rect.height > 0,
   );
@@ -233,7 +243,13 @@ function shouldPulseTextTag(target: Element) {
   }
 
   const primaryRect = clientRects[0] ?? target.getBoundingClientRect();
-  return primaryRect.width <= LONG_TEXT_TAG_WIDTH_THRESHOLD_PX;
+  const availableLineWidth = editorRoot ? getAvailableLineWidth(editorRoot) : null;
+
+  if (!availableLineWidth) {
+    return true;
+  }
+
+  return primaryRect.width / availableLineWidth <= LONG_TEXT_TAG_WIDTH_RATIO_THRESHOLD;
 }
 
 export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>(
@@ -580,7 +596,7 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
           }
 
           const occurrence = findTextTagOccurrenceAtPosition(view.state.doc, position);
-          const shouldPulse = shouldPulseTextTag(target);
+          const shouldPulse = shouldPulseTextTag(target, view.dom as HTMLElement);
           const anchorHint = {
             clientX: event.clientX,
             clientY: event.clientY,
