@@ -12,20 +12,19 @@ import { getNotebookDatabase } from "./db";
 import { extractIndexablePlainText } from "./richTextContent";
 import { findFirstExactSearchMatch } from "./searchQuery";
 import { DEFAULT_TAG_COLOR, normalizeTagColor } from "./tagColors";
+import { validateTagName } from "./tagNameValidation";
 import type {
   Folder,
   Note,
   NoteSearchResult,
   Notebook,
   Tag,
-  TaggedNoteResult,
+  TagContentPreviewResult,
   TextTagOccurrenceDraft,
   TagWithCount,
 } from "./types";
 
 class RepositoryValidationError extends Error {}
-
-const MAX_TAG_NAME_LENGTH = 40;
 
 type NoteSearchRow = {
   noteId: number;
@@ -40,7 +39,7 @@ type NoteSearchRow = {
 };
 
 type TagWithCountRow = TagWithCount;
-type TaggedNoteRow = TaggedNoteResult;
+type TagContentPreviewRow = TagContentPreviewResult;
 type CountRow = {
   count: number;
 };
@@ -131,7 +130,7 @@ function toRepositoryError(action: string, error: unknown) {
     error instanceof Error &&
     error.message.toLowerCase().includes("unique constraint failed: tags.name")
   ) {
-    return new RepositoryValidationError("标签名称已存在。");
+    return new RepositoryValidationError("标签名称已存在");
   }
 
   logRepositoryError(action, error);
@@ -276,20 +275,13 @@ function requireName(value: string, label: string) {
 }
 
 function normalizeTagName(value: string) {
-  const normalized = value.trim().replace(/\s+/g, " ");
-  const length = Array.from(normalized).length;
+  const { name, error } = validateTagName(value);
 
-  if (!normalized) {
-    throw new RepositoryValidationError("标签名称不能为空。");
+  if (error) {
+    throw new RepositoryValidationError(error);
   }
 
-  if (length > MAX_TAG_NAME_LENGTH) {
-    throw new RepositoryValidationError(
-      `标签名称不能超过${MAX_TAG_NAME_LENGTH}个字符。`,
-    );
-  }
-
-  return normalized;
+  return name;
 }
 
 function normalizeSearchInput(value: string) {
@@ -997,25 +989,62 @@ export async function listTagsByNote(noteId: number) {
 }
 
 export async function listNotesByTag(tagId: number) {
-  return withRepositoryError("读取标签关联文件", async () => {
+  return listTagContentPreviews(tagId);
+}
+
+async function countTagUsageNoteCountInternal(database: Database, tagId: number) {
+  const rows = await database.select<CountRow[]>(
+    `
+      SELECT COUNT(DISTINCT note_id) AS count
+      FROM note_tag_occurrences
+      WHERE tag_id = $1
+    `,
+    [tagId],
+  );
+
+  return rows[0]?.count ?? 0;
+}
+
+function buildTagUsageBlockedMessage(noteCount: number) {
+  return `该标签仍被 ${noteCount} 个文件使用，需先移除正文中的标签后才能删除。`;
+}
+
+export async function countTagUsageNotes(tagId: number) {
+  return withRepositoryError("读取标签使用情况", async () => {
+    const database = await getNotebookDatabase();
+    await fetchTagById(database, tagId);
+    return countTagUsageNoteCountInternal(database, tagId);
+  });
+}
+
+export async function listTagContentPreviews(tagId: number) {
+  return withRepositoryError("读取标签关联内容", async () => {
     const database = await getNotebookDatabase();
     await fetchTagById(database, tagId);
 
-    return database.select<TaggedNoteRow[]>(
+    return database.select<TagContentPreviewRow[]>(
       `
+        WITH ranked_occurrences AS (
+          SELECT
+            note_tag_occurrences.id AS occurrenceId,
+            note_tag_occurrences.note_id AS noteId,
+            note_tag_occurrences.snippet_text AS previewText,
+            ROW_NUMBER() OVER (
+              PARTITION BY note_tag_occurrences.note_id
+              ORDER BY note_tag_occurrences.sort_order ASC, note_tag_occurrences.id ASC
+            ) AS occurrenceRank
+          FROM note_tag_occurrences
+          WHERE note_tag_occurrences.tag_id = $1
+        )
         SELECT
           notes.id AS noteId,
           notes.notebook_id AS notebookId,
           notes.folder_id AS folderId,
           notes.title AS title,
-          notebooks.name AS notebookName,
-          folders.name AS folderName,
-          notes.updated_at AS updatedAt
-        FROM note_tags
-        INNER JOIN notes ON notes.id = note_tags.note_id
-        INNER JOIN notebooks ON notebooks.id = notes.notebook_id
-        LEFT JOIN folders ON folders.id = notes.folder_id
-        WHERE note_tags.tag_id = $1
+          ranked_occurrences.previewText AS previewText
+        FROM ranked_occurrences
+        INNER JOIN notes ON notes.id = ranked_occurrences.noteId
+        WHERE ranked_occurrences.occurrenceRank = 1
         ${TAGGED_NOTE_ORDER}
       `,
       [tagId],
@@ -1060,31 +1089,11 @@ export async function renameTag(
 export async function deleteTag(id: number) {
   return withRepositoryError("删除标签", async () => {
     const database = await getNotebookDatabase();
-    const [occurrenceReference, legacyReference] = await Promise.all([
-      database.select<CountRow[]>(
-        `
-          SELECT COUNT(*) AS count
-          FROM note_tag_occurrences
-          WHERE tag_id = $1
-        `,
-        [id],
-      ),
-      database.select<CountRow[]>(
-        `
-          SELECT COUNT(*) AS count
-          FROM note_tags
-          WHERE tag_id = $1
-        `,
-        [id],
-      ),
-    ]);
+    const occurrenceCount = await countTagUsageNoteCountInternal(database, id);
 
-    const occurrenceCount = occurrenceReference[0]?.count ?? 0;
-    const legacyCount = legacyReference[0]?.count ?? 0;
-
-    if (occurrenceCount > 0 || legacyCount > 0) {
+    if (occurrenceCount > 0) {
       throw new RepositoryValidationError(
-        "该标签仍被正文标注引用，请先移除相关内容标注后再删除。",
+        buildTagUsageBlockedMessage(occurrenceCount),
       );
     }
 

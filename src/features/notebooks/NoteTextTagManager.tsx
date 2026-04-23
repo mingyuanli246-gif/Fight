@@ -10,6 +10,7 @@ import { listTagsWithCounts } from "./repository";
 import type { NoteEditorPaneRef } from "./NoteEditorPane";
 import { normalizeTagColor } from "./tagColors";
 import type {
+  LiveTextTagOccurrence,
   TagWithCount,
   TextTagInspectionState,
   TextTagSelectionState,
@@ -20,6 +21,7 @@ interface NoteTextTagManagerProps {
   noteEditorRef: RefObject<NoteEditorPaneRef | null>;
   selectionState: TextTagSelectionState;
   inspectionState: TextTagInspectionState;
+  liveOccurrences: LiveTextTagOccurrence[];
   disabled: boolean;
   onError: (message: string) => void;
 }
@@ -40,6 +42,7 @@ export function NoteTextTagManager({
   noteEditorRef,
   selectionState,
   inspectionState,
+  liveOccurrences,
   disabled,
   onError,
 }: NoteTextTagManagerProps) {
@@ -182,6 +185,8 @@ export function NoteTextTagManager({
 
   const hasInspectionTarget =
     !selectionState.hasSelection && inspectionState.activeOccurrence !== null;
+  const isDefaultState =
+    !selectionState.hasSelection && inspectionState.activeOccurrence === null;
 
   const canApplyTag =
     !disabled &&
@@ -198,12 +203,47 @@ export function NoteTextTagManager({
       !selectionState.hasMixedOrInvalidSelection) ||
       hasInspectionTarget);
 
+  const currentNoteTags = useMemo(() => {
+    const tagCatalogById = new Map(tagCatalog.map((tag) => [tag.id, tag]));
+    const dedupedTags = new Map<
+      number,
+      {
+        id: number;
+        name: string;
+        color: string;
+      }
+    >();
+
+    for (const occurrence of liveOccurrences) {
+      if (dedupedTags.has(occurrence.tagId)) {
+        continue;
+      }
+
+      const matchedTag = tagCatalogById.get(occurrence.tagId);
+      dedupedTags.set(occurrence.tagId, {
+        id: occurrence.tagId,
+        name: matchedTag?.name ?? `标签 #${occurrence.tagId}`,
+        color: normalizeTagColor(matchedTag?.color ?? occurrence.colorSnapshot),
+      });
+    }
+
+    return Array.from(dedupedTags.values()).sort((left, right) =>
+      left.name.localeCompare(right.name, "zh-CN"),
+    );
+  }, [liveOccurrences, tagCatalog]);
+
+  const headerTitle = selectionState.hasSelection
+    ? "添加标签"
+    : hasInspectionTarget
+      ? "替换标签"
+      : "当前文件已有标签";
+
   return (
     <section className={styles.manager}>
       <div className={styles.header}>
         <div>
           <p className={styles.label}>正文标签</p>
-          <h4 className={styles.title}>给当前选中内容打标签</h4>
+          <h4 className={styles.title}>{headerTitle}</h4>
         </div>
       </div>
 
@@ -344,10 +384,6 @@ export function NoteTextTagManager({
             </button>
           </div>
 
-          <p className={styles.stateText}>
-            已激活这段标签文字。点击下面任一标签可直接替换，或清除当前标签。
-          </p>
-
           {resolvedInspectionTag && !resolvedInspectionTag.available ? (
             <p className={styles.warningText}>
               当前激活的标签已不在标签目录中，仍可清除；若要替换，请从现有目录里重新选择标签。
@@ -406,8 +442,33 @@ export function NoteTextTagManager({
             )}
           </section>
         </>
+      ) : isDefaultState ? (
+        currentNoteTags.length === 0 ? (
+          <p className={styles.stateText}>当前文件暂无正文标签</p>
+        ) : (
+          <ul className={styles.indexList}>
+            {currentNoteTags.map((tag) => (
+              <li key={tag.id} className={styles.indexItem}>
+                <span
+                  className={`${styles.tagButton} ${styles.indexChip}`}
+                  style={{
+                    color: tag.color,
+                    borderColor: `${tag.color}38`,
+                    backgroundColor: `${tag.color}12`,
+                  }}
+                >
+                  <span
+                    className={styles.tagDot}
+                    style={{ backgroundColor: tag.color }}
+                  />
+                  <span className={styles.tagName}>{tag.name}</span>
+                </span>
+              </li>
+            ))}
+          </ul>
+        )
       ) : (
-        <p className={styles.stateText}>选中文字后可添加标签。</p>
+        <p className={styles.stateText}>当前状态暂不支持标签操作。</p>
       )}
     </section>
   );

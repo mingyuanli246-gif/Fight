@@ -94,6 +94,35 @@
   gap: 10px;
 }
 
+.indexList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.indexItem {
+  display: flex;
+  align-items: center;
+  min-height: 36px;
+  padding: 0;
+}
+
+.indexChip {
+  cursor: default;
+  pointer-events: none;
+  user-select: none;
+}
+
+.indexChip:hover,
+.indexChip:active,
+.indexChip:focus {
+  transform: none;
+  box-shadow: none;
+}
+
 .tagButton {
   display: inline-flex;
   align-items: center;

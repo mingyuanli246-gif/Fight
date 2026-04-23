@@ -45,6 +45,7 @@ import {
 } from "./resourceCommands";
 import type {
   Folder,
+  LiveTextTagOccurrence,
   Note,
   NoteOpenRequest,
   NoteOpenTarget,
@@ -393,6 +394,9 @@ export const NotebookWorkspace = forwardRef<
     useState<TextTagSelectionState>(() => createEmptyTextTagSelectionState());
   const [textTagInspectionState, setTextTagInspectionState] =
     useState<TextTagInspectionState>(() => createEmptyTextTagInspectionState());
+  const [textTagOccurrences, setTextTagOccurrences] = useState<
+    LiveTextTagOccurrence[]
+  >([]);
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const [initializationError, setInitializationError] = useState<string | null>(
     null,
@@ -1278,6 +1282,7 @@ export const NotebookWorkspace = forwardRef<
           highlightRequest={highlightRequest}
           textTagSelectionState={textTagSelectionState}
           textTagInspectionState={textTagInspectionState}
+          textTagOccurrences={textTagOccurrences}
           noteEditorRef={noteEditorRef}
           reviewManagerRef={reviewManagerRef}
           onReturnHome={() => {
@@ -1325,6 +1330,7 @@ export const NotebookWorkspace = forwardRef<
           }}
           onTextTagSelectionStateChange={setTextTagSelectionState}
           onTextTagInspectionStateChange={setTextTagInspectionState}
+          onTextTagOccurrencesChange={setTextTagOccurrences}
           onError={setErrorMessage}
         />
       )}

@@ -4,7 +4,12 @@ import {
   type NoteReviewPlanManagerRef,
 } from "../review/NoteReviewPlanManager";
 import type { RefObject } from "react";
-import type { Note, TextTagInspectionState, TextTagSelectionState } from "./types";
+import type {
+  LiveTextTagOccurrence,
+  Note,
+  TextTagInspectionState,
+  TextTagSelectionState,
+} from "./types";
 import { PanelCollapseIcon, PanelExpandIcon } from "./NotebookUiIcons";
 import styles from "./NotebookWorkspaceShell.module.css";
 import type { NoteEditorPaneRef } from "./NoteEditorPane";
@@ -16,6 +21,7 @@ interface NotebookRightPanelProps {
   noteEditorRef: RefObject<NoteEditorPaneRef | null>;
   textTagSelectionState: TextTagSelectionState;
   textTagInspectionState: TextTagInspectionState;
+  textTagOccurrences: LiveTextTagOccurrence[];
   reviewManagerRef: RefObject<NoteReviewPlanManagerRef | null>;
   onToggleCollapsed: () => void;
   onError: (message: string) => void;
@@ -28,6 +34,7 @@ export function NotebookRightPanel({
   noteEditorRef,
   textTagSelectionState,
   textTagInspectionState,
+  textTagOccurrences,
   reviewManagerRef,
   onToggleCollapsed,
   onError,
@@ -70,6 +77,7 @@ export function NotebookRightPanel({
               noteEditorRef={noteEditorRef}
               selectionState={textTagSelectionState}
               inspectionState={textTagInspectionState}
+              liveOccurrences={textTagOccurrences}
               disabled={disabled}
               onError={onError}
             />

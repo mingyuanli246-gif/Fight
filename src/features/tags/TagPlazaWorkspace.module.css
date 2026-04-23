@@ -220,6 +220,7 @@
 
 .tagItemTitle,
 .noteTitle,
+.previewText,
 .emptyTitle,
 .statusTitle,
 .errorTitle {
@@ -365,6 +366,14 @@
   transform: scale(1.05);
   z-index: 1;
   background: rgba(248, 250, 252, 0.98);
+}
+
+.previewText {
+  display: -webkit-box;
+  overflow: hidden;
+  line-height: 1.65;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
 }
 
 .tagItemActive::after,

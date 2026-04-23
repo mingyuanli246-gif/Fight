@@ -67,10 +67,16 @@ export interface TextTagSelectionState {
   hasMixedOrInvalidSelection: boolean;
 }
 
+export interface TextTagAnchorHint {
+  clientX: number;
+  clientY: number;
+}
+
 export interface TextTagInspectionState {
   activeOccurrence: LiveTextTagOccurrence | null;
   isPopoverOpen: boolean;
   popoverAnchorKey: string | null;
+  anchorHint: TextTagAnchorHint | null;
 }
 
 export interface LiveTextTagOccurrence {
@@ -125,6 +131,14 @@ export interface TaggedNoteResult {
   notebookName: string;
   folderName: string | null;
   updatedAt: string;
+}
+
+export interface TagContentPreviewResult {
+  noteId: number;
+  notebookId: number;
+  folderId: number | null;
+  title: string;
+  previewText: string;
 }
 
 export interface NoteOpenRequest {

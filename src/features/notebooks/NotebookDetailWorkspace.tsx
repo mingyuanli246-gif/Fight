@@ -5,6 +5,7 @@ import { NotebookRightPanel } from "./NotebookRightPanel";
 import type { NoteReviewPlanManagerRef } from "../review/NoteReviewPlanManager";
 import type {
   Folder,
+  LiveTextTagOccurrence,
   Note,
   Notebook,
   NotebookHighlightRequest,
@@ -27,6 +28,7 @@ interface NotebookDetailWorkspaceProps {
   highlightRequest: NotebookHighlightRequest | null;
   textTagSelectionState: TextTagSelectionState;
   textTagInspectionState: TextTagInspectionState;
+  textTagOccurrences: LiveTextTagOccurrence[];
   noteEditorRef: RefObject<NoteEditorPaneRef | null>;
   reviewManagerRef: RefObject<NoteReviewPlanManagerRef | null>;
   onReturnHome: () => void;
@@ -47,6 +49,7 @@ interface NotebookDetailWorkspaceProps {
   onNoteUpdated: (note: Note) => void;
   onTextTagSelectionStateChange: (state: TextTagSelectionState) => void;
   onTextTagInspectionStateChange: (state: TextTagInspectionState) => void;
+  onTextTagOccurrencesChange: (occurrences: LiveTextTagOccurrence[]) => void;
   onError: (message: string) => void;
 }
 
@@ -63,6 +66,7 @@ export function NotebookDetailWorkspace({
   highlightRequest,
   textTagSelectionState,
   textTagInspectionState,
+  textTagOccurrences,
   noteEditorRef,
   reviewManagerRef,
   onReturnHome,
@@ -79,6 +83,7 @@ export function NotebookDetailWorkspace({
   onNoteUpdated,
   onTextTagSelectionStateChange,
   onTextTagInspectionStateChange,
+  onTextTagOccurrencesChange,
   onError,
 }: NotebookDetailWorkspaceProps) {
   return (
@@ -120,6 +125,7 @@ export function NotebookDetailWorkspace({
               onNoteUpdated={onNoteUpdated}
               onTextTagSelectionStateChange={onTextTagSelectionStateChange}
               onTextTagInspectionStateChange={onTextTagInspectionStateChange}
+              onTextTagOccurrencesChange={onTextTagOccurrencesChange}
               onError={onError}
             />
           ) : (
@@ -148,6 +154,7 @@ export function NotebookDetailWorkspace({
           noteEditorRef={noteEditorRef}
           textTagSelectionState={textTagSelectionState}
           textTagInspectionState={textTagInspectionState}
+          textTagOccurrences={textTagOccurrences}
           reviewManagerRef={reviewManagerRef}
           onToggleCollapsed={onToggleRightPanel}
           onError={onError}

@@ -399,6 +399,7 @@ function createEmptyTextTagInspectionStateInternal(): TextTagInspectionState {
     activeOccurrence: null,
     isPopoverOpen: false,
     popoverAnchorKey: null,
+    anchorHint: null,
   };
 }
 
@@ -579,6 +580,9 @@ export function getTextTagInspectionStateSignature(
     activeOccurrence.snippetText,
     inspectionState.isPopoverOpen ? "1" : "0",
     inspectionState.popoverAnchorKey ?? "",
+    inspectionState.anchorHint
+      ? `${inspectionState.anchorHint.clientX}:${inspectionState.anchorHint.clientY}`
+      : "",
   ].join("::");
 }
 

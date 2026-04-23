@@ -52,6 +52,52 @@ function createRectFromOccurrence(editor: Editor, from: number, to: number) {
   } as DOMRect;
 }
 
+function getOccurrenceClientRects(editor: Editor, from: number, to: number) {
+  try {
+    const start = editor.view.domAtPos(from);
+    const end = editor.view.domAtPos(to);
+    const range = document.createRange();
+    range.setStart(start.node, start.offset);
+    range.setEnd(end.node, end.offset);
+
+    const rects = Array.from(range.getClientRects()).filter(
+      (rect) => rect.width > 0 && rect.height > 0,
+    );
+
+    if (rects.length > 0) {
+      return rects;
+    }
+  } catch {
+    // 回退到现有 union rect 策略。
+  }
+
+  return [createRectFromOccurrence(editor, from, to)];
+}
+
+function getDistanceToRect(rect: DOMRect, clientX: number, clientY: number) {
+  const dx =
+    clientX < rect.left ? rect.left - clientX : clientX > rect.right ? clientX - rect.right : 0;
+  const dy =
+    clientY < rect.top ? rect.top - clientY : clientY > rect.bottom ? clientY - rect.bottom : 0;
+  return Math.hypot(dx, dy);
+}
+
+function getPreferredAnchorRect(
+  rects: DOMRect[],
+  anchorHint: TextTagInspectionState["anchorHint"],
+) {
+  if (!anchorHint || rects.length <= 1) {
+    return rects[0] ?? null;
+  }
+
+  return rects.reduce((closest, rect) =>
+    getDistanceToRect(rect, anchorHint.clientX, anchorHint.clientY) <
+    getDistanceToRect(closest, anchorHint.clientX, anchorHint.clientY)
+      ? rect
+      : closest,
+  );
+}
+
 export function TextTagRemarkPopover({
   editor,
   inspectionState,
@@ -70,12 +116,20 @@ export function TextTagRemarkPopover({
       return null;
     }
 
+    const preferredRect = getPreferredAnchorRect(
+      getOccurrenceClientRects(editor, activeOccurrence.from, activeOccurrence.to),
+      inspectionState.anchorHint,
+    );
+
+    if (!preferredRect) {
+      return null;
+    }
+
     return {
       contextElement: editor.view.dom as HTMLElement,
-      getBoundingClientRect: () =>
-        createRectFromOccurrence(editor, activeOccurrence.from, activeOccurrence.to),
+      getBoundingClientRect: () => preferredRect,
     };
-  }, [editor, activeOccurrence, open]);
+  }, [editor, activeOccurrence, inspectionState.anchorHint, open]);
 
   const { refs, floatingStyles } = useFloating({
     open,

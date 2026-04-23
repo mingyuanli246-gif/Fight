@@ -7,9 +7,10 @@ import {
   type RefObject,
 } from "react";
 import {
+  countTagUsageNotes,
   createTag,
   deleteTag,
-  listNotesByTag,
+  listTagContentPreviews,
   listTagsWithCounts,
   renameTag,
 } from "../notebooks/repository";
@@ -18,17 +19,20 @@ import {
   TAG_COLOR_PALETTE,
   normalizeTagColor,
 } from "../notebooks/tagColors";
+import { validateTagName } from "../notebooks/tagNameValidation";
 import type {
   NoteOpenTarget,
-  TaggedNoteResult,
+  TagContentPreviewResult,
   TagWithCount,
 } from "../notebooks/types";
 import styles from "./TagPlazaWorkspace.module.css";
 
-const MAX_TAG_NAME_LENGTH = 10;
 const CONTEXT_MENU_WIDTH = 188;
 const CONTEXT_MENU_HEIGHT = 128;
 const CONTEXT_MENU_MARGIN = 12;
+const DELETE_BLOCKED_MESSAGE_PATTERN =
+  /^该标签仍被\s+(\d+)\s+个文件使用，需先移除正文中的标签后才能删除。?$/;
+const EMPTY_PREVIEW_TEXT = "该标签所在正文暂无可预览内容";
 
 interface TagPlazaWorkspaceProps {
   onOpenNote: (target: NoteOpenTarget) => void;
@@ -38,6 +42,12 @@ interface ContextMenuState {
   tagId: number;
   x: number;
   y: number;
+}
+
+interface DeleteDialogState {
+  tag: TagWithCount;
+  mode: "confirm" | "blocked";
+  usageNoteCount: number;
 }
 
 interface ColorPickerProps {
@@ -57,41 +67,9 @@ function getErrorMessage(error: unknown) {
   return "标签操作失败，请稍后重试。";
 }
 
-function formatDate(value: string) {
-  return new Date(value.replace(" ", "T")).toLocaleString("zh-CN", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-function buildPath(note: TaggedNoteResult) {
-  return `${note.notebookName} / ${note.folderName ?? "未归类"}`;
-}
-
-function getValidatedTagName(rawValue: string) {
-  const name = rawValue.trim();
-
-  if (!name) {
-    return {
-      name,
-      error: "标签名不能为空。",
-    };
-  }
-
-  if (Array.from(name).length > MAX_TAG_NAME_LENGTH) {
-    return {
-      name,
-      error: `标签名最多 ${MAX_TAG_NAME_LENGTH} 个字。`,
-    };
-  }
-
-  return {
-    name,
-    error: null,
-  };
+function parseDeleteBlockedUsageCount(error: unknown) {
+  const match = getErrorMessage(error).match(DELETE_BLOCKED_MESSAGE_PATTERN);
+  return match ? Number.parseInt(match[1] ?? "", 10) : null;
 }
 
 function getClampedContextMenuPosition(x: number, y: number) {
@@ -164,11 +142,13 @@ function ColorPicker({
 export function TagPlazaWorkspace({ onOpenNote }: TagPlazaWorkspaceProps) {
   const [tags, setTags] = useState<TagWithCount[]>([]);
   const [selectedTagId, setSelectedTagId] = useState<number | null>(null);
-  const [taggedNotes, setTaggedNotes] = useState<TaggedNoteResult[]>([]);
+  const [tagContentPreviews, setTagContentPreviews] = useState<
+    TagContentPreviewResult[]
+  >([]);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isInitializing, setIsInitializing] = useState(true);
   const [isBusy, setIsBusy] = useState(false);
-  const [isLoadingNotes, setIsLoadingNotes] = useState(false);
+  const [isLoadingPreviews, setIsLoadingPreviews] = useState(false);
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
   const [createValue, setCreateValue] = useState("");
   const [createSelectedColor, setCreateSelectedColor] = useState(DEFAULT_TAG_COLOR);
@@ -179,7 +159,8 @@ export function TagPlazaWorkspace({ onOpenNote }: TagPlazaWorkspaceProps) {
   const [renameValue, setRenameValue] = useState("");
   const [renameSelectedColor, setRenameSelectedColor] = useState(DEFAULT_TAG_COLOR);
   const [isRenamePaletteOpen, setIsRenamePaletteOpen] = useState(false);
-  const [deleteDialogTag, setDeleteDialogTag] = useState<TagWithCount | null>(null);
+  const [deleteDialogState, setDeleteDialogState] =
+    useState<DeleteDialogState | null>(null);
   const requestVersionRef = useRef(0);
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
   const createColorPickerRef = useRef<HTMLDivElement | null>(null);
@@ -244,7 +225,7 @@ export function TagPlazaWorkspace({ onOpenNote }: TagPlazaWorkspaceProps) {
         setErrorMessage(getErrorMessage(error));
         setTags([]);
         setSelectedTagId(null);
-        setTaggedNotes([]);
+        setTagContentPreviews([]);
       } finally {
         setIsInitializing(false);
       }
@@ -256,32 +237,32 @@ export function TagPlazaWorkspace({ onOpenNote }: TagPlazaWorkspaceProps) {
     const requestVersion = requestVersionRef.current;
 
     if (selectedTagId === null) {
-      setTaggedNotes([]);
-      setIsLoadingNotes(false);
+      setTagContentPreviews([]);
+      setIsLoadingPreviews(false);
       return;
     }
 
-    setIsLoadingNotes(true);
+    setIsLoadingPreviews(true);
 
     void (async () => {
       try {
-        const nextNotes = await listNotesByTag(selectedTagId);
+        const nextPreviews = await listTagContentPreviews(selectedTagId);
 
         if (requestVersion !== requestVersionRef.current) {
           return;
         }
 
-        setTaggedNotes(nextNotes);
+        setTagContentPreviews(nextPreviews);
       } catch (error) {
         if (requestVersion !== requestVersionRef.current) {
           return;
         }
 
-        setTaggedNotes([]);
+        setTagContentPreviews([]);
         setErrorMessage(getErrorMessage(error));
       } finally {
         if (requestVersion === requestVersionRef.current) {
-          setIsLoadingNotes(false);
+          setIsLoadingPreviews(false);
         }
       }
     })();
@@ -299,10 +280,13 @@ export function TagPlazaWorkspace({ onOpenNote }: TagPlazaWorkspaceProps) {
       setContextMenu(null);
     }
 
-    if (deleteDialogTag && !tags.some((tag) => tag.id === deleteDialogTag.id)) {
-      setDeleteDialogTag(null);
+    if (
+      deleteDialogState &&
+      !tags.some((tag) => tag.id === deleteDialogState.tag.id)
+    ) {
+      setDeleteDialogState(null);
     }
-  }, [contextMenu, deleteDialogTag, renamingTagId, tags]);
+  }, [contextMenu, deleteDialogState, renamingTagId, tags]);
 
   useEffect(() => {
     function handleWindowPointerDown(event: MouseEvent) {
@@ -347,7 +331,7 @@ export function TagPlazaWorkspace({ onOpenNote }: TagPlazaWorkspaceProps) {
       }
 
       setContextMenu(null);
-      setDeleteDialogTag(null);
+      setDeleteDialogState(null);
       closeRenameEditor();
       closeCreateDialog();
     }
@@ -376,7 +360,9 @@ export function TagPlazaWorkspace({ onOpenNote }: TagPlazaWorkspaceProps) {
   }
 
   async function handleCreateTagSubmit() {
-    const { name, error } = getValidatedTagName(createValue);
+    const { name, error } = validateTagName(createValue, {
+      existingNames: tags.map((tag) => tag.name),
+    });
 
     if (error) {
       setCreateDialogError(error);
@@ -391,7 +377,11 @@ export function TagPlazaWorkspace({ onOpenNote }: TagPlazaWorkspaceProps) {
   }
 
   async function handleRenameTagSubmit(tag: TagWithCount) {
-    const { name, error } = getValidatedTagName(renameValue);
+    const { name, error } = validateTagName(renameValue, {
+      existingNames: tags
+        .filter((candidate) => candidate.id !== tag.id)
+        .map((candidate) => candidate.name),
+    });
 
     if (error) {
       setErrorMessage(error);
@@ -406,11 +396,49 @@ export function TagPlazaWorkspace({ onOpenNote }: TagPlazaWorkspaceProps) {
   }
 
   async function handleDeleteTagConfirm(tag: TagWithCount) {
-    await runMutation(async () => {
+    setErrorMessage(null);
+    setIsBusy(true);
+
+    try {
       await deleteTag(tag.id);
-      setDeleteDialogTag(null);
+      setDeleteDialogState(null);
       await refreshTags(null);
-    });
+    } catch (error) {
+      const usageNoteCount = parseDeleteBlockedUsageCount(error);
+
+      if (usageNoteCount !== null) {
+        setDeleteDialogState({
+          tag,
+          mode: "blocked",
+          usageNoteCount,
+        });
+        return;
+      }
+
+      setErrorMessage(getErrorMessage(error));
+      throw error;
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function handleRequestDeleteTag(tag: TagWithCount) {
+    setContextMenu(null);
+    setErrorMessage(null);
+    setIsBusy(true);
+
+    try {
+      const usageNoteCount = await countTagUsageNotes(tag.id);
+      setDeleteDialogState({
+        tag,
+        mode: usageNoteCount > 0 ? "blocked" : "confirm",
+        usageNoteCount,
+      });
+    } catch (error) {
+      setErrorMessage(getErrorMessage(error));
+    } finally {
+      setIsBusy(false);
+    }
   }
 
   function handleContextMenuOpen(
@@ -420,7 +448,7 @@ export function TagPlazaWorkspace({ onOpenNote }: TagPlazaWorkspaceProps) {
     event.preventDefault();
     handleSelectTag(tag.id);
     closeRenameEditor();
-    setDeleteDialogTag(null);
+    setDeleteDialogState(null);
     setCreateDialogError(null);
     setContextMenu({
       tagId: tag.id,
@@ -430,7 +458,7 @@ export function TagPlazaWorkspace({ onOpenNote }: TagPlazaWorkspaceProps) {
 
   function handleStartRename(tag: TagWithCount) {
     setContextMenu(null);
-    setDeleteDialogTag(null);
+    setDeleteDialogState(null);
     handleSelectTag(tag.id);
     setRenameValue(tag.name);
     setRenameSelectedColor(normalizeTagColor(tag.color));
@@ -477,7 +505,7 @@ export function TagPlazaWorkspace({ onOpenNote }: TagPlazaWorkspaceProps) {
                       type="text"
                       className={styles.inlineNameInput}
                       value={renameValue}
-                      maxLength={20}
+                      maxLength={24}
                       autoFocus
                       onChange={(event) =>
                         setRenameValue(event.currentTarget.value)
@@ -546,7 +574,7 @@ export function TagPlazaWorkspace({ onOpenNote }: TagPlazaWorkspaceProps) {
     return (
       <div className={styles.statusCard}>
         <strong className={styles.statusTitle}>正在读取标签广场</strong>
-        <p className={styles.statusText}>正在连接标签表并载入关联文件。</p>
+        <p className={styles.statusText}>正在连接标签表并载入关联内容预览。</p>
       </div>
     );
   }
@@ -580,7 +608,7 @@ export function TagPlazaWorkspace({ onOpenNote }: TagPlazaWorkspaceProps) {
                 onClick={() => {
                   setContextMenu(null);
                   closeRenameEditor();
-                  setDeleteDialogTag(null);
+                  setDeleteDialogState(null);
                   setCreateDialogError(null);
                   setCreateSelectedColor(DEFAULT_TAG_COLOR);
                   setIsCreatePaletteOpen(false);
@@ -601,7 +629,7 @@ export function TagPlazaWorkspace({ onOpenNote }: TagPlazaWorkspaceProps) {
         <section className={styles.panel}>
           <header className={styles.panelHeader}>
             <div className={styles.panelHeaderBar}>
-              <h3 className={styles.panelTitle}>关联文件</h3>
+              <h3 className={styles.panelTitle}>关联内容预览</h3>
             </div>
           </header>
 
@@ -610,23 +638,23 @@ export function TagPlazaWorkspace({ onOpenNote }: TagPlazaWorkspaceProps) {
               <div className={`${styles.emptyBlock} ${styles.emptyBlockCompact}`}>
                 <p className={styles.emptyTitle}>先选择一个标签</p>
                 <p className={styles.emptyText}>
-                  点击左侧标签后，这里会显示对应的关联文件列表。
+                  点击左侧标签后，这里会显示对应的正文内容预览。
                 </p>
               </div>
-            ) : isLoadingNotes ? (
+            ) : isLoadingPreviews ? (
               <div className={`${styles.emptyBlock} ${styles.emptyBlockCompact}`}>
-                <p className={styles.emptyTitle}>正在读取关联文件…</p>
+                <p className={styles.emptyTitle}>正在读取关联内容预览…</p>
               </div>
-            ) : taggedNotes.length === 0 ? (
+            ) : tagContentPreviews.length === 0 ? (
               <div className={`${styles.emptyBlock} ${styles.emptyBlockCompact}`}>
-                <p className={styles.emptyTitle}>这个标签下还没有文件</p>
+                <p className={styles.emptyTitle}>这个标签还没有关联内容</p>
                 <p className={styles.emptyText}>
-                  你可以先回到笔记本，在文件正文区把这个标签绑定到具体 note。
+                  你可以先回到笔记本，在正文里给一段内容打上这个标签。
                 </p>
               </div>
             ) : (
               <ul className={styles.noteList}>
-                {taggedNotes.map((note) => (
+                {tagContentPreviews.map((note) => (
                   <li key={note.noteId}>
                     <button
                       type="button"
@@ -638,11 +666,10 @@ export function TagPlazaWorkspace({ onOpenNote }: TagPlazaWorkspaceProps) {
                         })
                       }
                     >
-                      <span className={styles.noteTitle}>{note.title}</span>
-                      <span className={styles.notePath}>{buildPath(note)}</span>
-                      <span className={styles.noteMeta}>
-                        更新时间：{formatDate(note.updatedAt)}
+                      <span className={styles.previewText}>
+                        {note.previewText.trim() || EMPTY_PREVIEW_TEXT}
                       </span>
+                      <span className={styles.notePath}>{note.title}</span>
                     </button>
                   </li>
                 ))}
@@ -663,7 +690,7 @@ export function TagPlazaWorkspace({ onOpenNote }: TagPlazaWorkspaceProps) {
         >
           <div className={styles.dialogCard}>
             <h3 className={styles.dialogTitle}>创建标签</h3>
-            <p className={styles.dialogText}>输入标签名称，最多 10 个字。</p>
+            <p className={styles.dialogText}>输入标签名称，最多 6 个单位。</p>
             <div className={styles.dialogInputRow}>
               <ColorPicker
                 selectedColor={createSelectedColor}
@@ -682,7 +709,7 @@ export function TagPlazaWorkspace({ onOpenNote }: TagPlazaWorkspaceProps) {
                 type="text"
                 className={styles.dialogInput}
                 value={createValue}
-                maxLength={20}
+                maxLength={24}
                 autoFocus
                 placeholder="输入标签名称"
                 onChange={(event) => {
@@ -733,41 +760,47 @@ export function TagPlazaWorkspace({ onOpenNote }: TagPlazaWorkspaceProps) {
         </div>
       ) : null}
 
-      {deleteDialogTag ? (
+      {deleteDialogState ? (
         <div
           className={styles.dialogOverlay}
           onMouseDown={(event) => {
             if (event.target === event.currentTarget) {
-              setDeleteDialogTag(null);
+              setDeleteDialogState(null);
             }
           }}
         >
           <div className={styles.dialogCard}>
-            <h3 className={styles.dialogTitle}>删除标签</h3>
+            <h3 className={styles.dialogTitle}>
+              {deleteDialogState.mode === "blocked" ? "暂时无法删除标签" : "删除标签"}
+            </h3>
             <p className={styles.dialogText}>
-              确定删除“{deleteDialogTag.name}”吗？删除后不会影响文件本身。
+              {deleteDialogState.mode === "blocked"
+                ? `该标签仍被 ${deleteDialogState.usageNoteCount} 个文件使用，需先移除正文中的标签后才能删除。`
+                : `确定删除“${deleteDialogState.tag.name}”吗？删除后不会影响文件本身。`}
             </p>
             <div className={styles.dialogActions}>
               <button
                 type="button"
                 className={styles.secondaryButton}
-                onClick={() => setDeleteDialogTag(null)}
+                onClick={() => setDeleteDialogState(null)}
                 disabled={isBusy}
               >
-                取消
+                {deleteDialogState.mode === "blocked" ? "知道了" : "取消"}
               </button>
-              <button
-                type="button"
-                className={styles.dangerButton}
-                onClick={() => {
-                  void handleDeleteTagConfirm(deleteDialogTag).catch(
-                    () => undefined,
-                  );
-                }}
-                disabled={isBusy}
-              >
-                确认删除
-              </button>
+              {deleteDialogState.mode === "confirm" ? (
+                <button
+                  type="button"
+                  className={styles.dangerButton}
+                  onClick={() => {
+                    void handleDeleteTagConfirm(deleteDialogState.tag).catch(
+                      () => undefined,
+                    );
+                  }}
+                  disabled={isBusy}
+                >
+                  确认删除
+                </button>
+              ) : null}
             </div>
           </div>
         </div>
@@ -790,8 +823,7 @@ export function TagPlazaWorkspace({ onOpenNote }: TagPlazaWorkspaceProps) {
             type="button"
             className={`${styles.contextMenuItem} ${styles.contextMenuItemDanger}`}
             onClick={() => {
-              setContextMenu(null);
-              setDeleteDialogTag(contextMenuTag);
+              void handleRequestDeleteTag(contextMenuTag);
             }}
           >
             删除

@@ -10,7 +10,7 @@ export function TagPlazaPage({ onOpenNote }: TagPlazaPageProps) {
   return (
     <section className={styles.page}>
       <header className={styles.header}>
-        <h2 className={styles.title}>标签工作区与关联文件视图</h2>
+        <h2 className={styles.title}>标签工作区与关联内容预览</h2>
       </header>
 
       <TagPlazaWorkspace onOpenNote={onOpenNote} />
