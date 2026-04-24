@@ -99,6 +99,8 @@ const DEFAULT_EDITOR_FONT_SIZE = 16;
 const LEGACY_DEFAULT_EDITOR_FONT_SIZE = 14;
 const LONG_TEXT_TAG_WIDTH_RATIO_THRESHOLD = 0.74;
 
+type TextTagClickFeedbackMode = "pulse" | "sweep" | "settle";
+
 export interface NoteEditorPaneRef {
   flushPendingSave: () => Promise<boolean>;
   hasUnsavedChanges: () => boolean;
@@ -233,23 +235,29 @@ function getAvailableLineWidth(editorRoot: HTMLElement) {
   return contentWidth > 0 ? contentWidth : null;
 }
 
-function shouldPulseTextTag(target: Element, editorRoot: HTMLElement | null) {
+function getTextTagClickFeedbackMode(
+  target: Element,
+  editorRoot: HTMLElement | null,
+): TextTagClickFeedbackMode {
   const clientRects = Array.from(target.getClientRects()).filter(
     (rect) => rect.width > 0 && rect.height > 0,
   );
 
+  // Wrapped tags degrade to settle; sweep is only for visually long single-line tags.
   if (clientRects.length > 1) {
-    return false;
+    return "settle";
   }
 
   const primaryRect = clientRects[0] ?? target.getBoundingClientRect();
   const availableLineWidth = editorRoot ? getAvailableLineWidth(editorRoot) : null;
 
   if (!availableLineWidth) {
-    return true;
+    return "pulse";
   }
 
-  return primaryRect.width / availableLineWidth <= LONG_TEXT_TAG_WIDTH_RATIO_THRESHOLD;
+  return primaryRect.width / availableLineWidth <= LONG_TEXT_TAG_WIDTH_RATIO_THRESHOLD
+    ? "pulse"
+    : "sweep";
 }
 
 export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>(
@@ -328,6 +336,7 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
     const textTagOccurrencesSignatureRef = useRef("<unset>");
     const textTagInspectionPulseVariantRef = useRef<"A" | "B">("A");
     const textTagInspectionPulseTokenRef = useRef(0);
+    const textTagInspectionEffectTokenRef = useRef(0);
     const mathBridgeRef = useRef<EditorMathBridge>({
       onEditMathRequest() {
         // 运行时由当前组件覆写。
@@ -401,7 +410,7 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
     function setTextTagInspectionOccurrence(
       occurrence: TextTagInspectionState["activeOccurrence"],
       options?: {
-        pulse?: boolean;
+        feedbackMode?: TextTagClickFeedbackMode;
         isPopoverOpen?: boolean;
         anchorHint?: TextTagInspectionState["anchorHint"];
       },
@@ -411,25 +420,41 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
         : false;
 
       if (occurrence) {
-        const nextPulseToken = options?.pulse
+        const nextFeedbackMode = options?.feedbackMode ?? null;
+        const nextPulseToken = nextFeedbackMode === "pulse"
           ? textTagInspectionPulseTokenRef.current + 1
           : 0;
-        const nextPulseVariant = options?.pulse
+        const nextPulseVariant = nextFeedbackMode === "pulse"
           ? textTagInspectionPulseVariantRef.current === "A"
             ? "B"
             : "A"
           : textTagInspectionPulseVariantRef.current;
+        const nextEffectVariant =
+          nextFeedbackMode === "sweep"
+            ? "sweep"
+            : nextFeedbackMode === "settle"
+              ? "settle"
+              : null;
+        const nextEffectToken = nextEffectVariant
+          ? textTagInspectionEffectTokenRef.current + 1
+          : 0;
 
-        if (options?.pulse) {
+        if (nextFeedbackMode === "pulse") {
           textTagInspectionPulseTokenRef.current = nextPulseToken;
+        }
+
+        if (nextEffectVariant) {
+          textTagInspectionEffectTokenRef.current = nextEffectToken;
         }
 
         textTagInspectionPulseVariantRef.current = nextPulseVariant;
         setActiveTextTagOccurrence(
           editorRef.current,
           occurrence.key,
-          options?.pulse ? nextPulseVariant : null,
+          nextFeedbackMode === "pulse" ? nextPulseVariant : null,
           nextPulseToken,
+          nextEffectVariant,
+          nextEffectToken,
         );
       } else {
         clearActiveTextTagOccurrence(editorRef.current);
@@ -596,7 +621,10 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
           }
 
           const occurrence = findTextTagOccurrenceAtPosition(view.state.doc, position);
-          const shouldPulse = shouldPulseTextTag(target, view.dom as HTMLElement);
+          const feedbackMode = getTextTagClickFeedbackMode(
+            target,
+            view.dom as HTMLElement,
+          );
           const anchorHint = {
             clientX: event.clientX,
             clientY: event.clientY,
@@ -617,7 +645,7 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
 
               if (didFlush) {
                 setTextTagInspectionOccurrence(occurrence, {
-                  pulse: shouldPulse,
+                  feedbackMode,
                   isPopoverOpen: true,
                   anchorHint,
                 });
@@ -627,7 +655,7 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
           }
 
           setTextTagInspectionOccurrence(occurrence, {
-            pulse: shouldPulse,
+            feedbackMode,
             isPopoverOpen: true,
             anchorHint,
           });

@@ -76,6 +76,8 @@ type TextTagActivationMeta =
       occurrenceKey: string;
       pulseClassName: string | null;
       pulseToken: number;
+      effectClassName: string | null;
+      effectToken: number;
     }
   | {
       type: "clear";
@@ -85,11 +87,15 @@ type TextTagActivationState = {
   occurrenceKey: string | null;
   pulseClassName: string | null;
   pulseToken: number;
+  effectClassName: string | null;
+  effectToken: number;
 };
 
 const TEXT_TAG_ACTIVE_CLASS = "textTagActive";
 const TEXT_TAG_PULSE_CLASS_A = "textTagPulseA";
 const TEXT_TAG_PULSE_CLASS_B = "textTagPulseB";
+const TEXT_TAG_LIQUID_SWEEP_CLASS = "textTagLiquidSweep";
+const TEXT_TAG_LONG_SETTLE_CLASS = "textTagLongSettle";
 const TEXT_TAG_ACTIVATION_PLUGIN_KEY = new PluginKey<TextTagActivationState>(
   "textTagActivation",
 );
@@ -1088,6 +1094,8 @@ const TextTagActivationExtension = Extension.create({
             occurrenceKey: null,
             pulseClassName: null,
             pulseToken: 0,
+            effectClassName: null,
+            effectToken: 0,
           }),
           apply(tr, pluginState) {
             const meta = tr.getMeta(
@@ -1103,6 +1111,8 @@ const TextTagActivationExtension = Extension.create({
                 occurrenceKey: null,
                 pulseClassName: null,
                 pulseToken: 0,
+                effectClassName: null,
+                effectToken: 0,
               };
             }
 
@@ -1110,6 +1120,8 @@ const TextTagActivationExtension = Extension.create({
               occurrenceKey: meta.occurrenceKey,
               pulseClassName: meta.pulseClassName,
               pulseToken: meta.pulseToken,
+              effectClassName: meta.effectClassName,
+              effectToken: meta.effectToken,
             };
           },
         },
@@ -1133,6 +1145,7 @@ const TextTagActivationExtension = Extension.create({
             const className = [
               TEXT_TAG_ACTIVE_CLASS,
               pluginState.pulseClassName,
+              pluginState.effectClassName,
             ]
               .filter(Boolean)
               .join(" ");
@@ -1140,6 +1153,22 @@ const TextTagActivationExtension = Extension.create({
               pluginState.pulseClassName && pluginState.pulseToken > 0
                 ? pluginState.pulseToken
                 : null;
+            const effectToken =
+              pluginState.effectClassName && pluginState.effectToken > 0
+                ? pluginState.effectToken
+                : null;
+            const effectName =
+              pluginState.effectClassName === TEXT_TAG_LIQUID_SWEEP_CLASS
+                ? "sweep"
+                : pluginState.effectClassName === TEXT_TAG_LONG_SETTLE_CLASS
+                  ? "settle"
+                  : null;
+            const replayToken =
+              pulseToken !== null
+                ? `pulse:${pulseToken}`
+                : effectToken !== null
+                  ? `effect:${effectToken}`
+                  : null;
 
             return DecorationSet.create(state.doc, [
               Decoration.inline(
@@ -1150,12 +1179,18 @@ const TextTagActivationExtension = Extension.create({
                   ...(pulseToken === null
                     ? {}
                     : { "data-text-tag-pulse-token": String(pulseToken) }),
+                  ...(effectToken === null
+                    ? {}
+                    : { "data-text-tag-effect-token": String(effectToken) }),
+                  ...(effectName === null
+                    ? {}
+                    : { "data-text-tag-effect": effectName }),
                 },
                 {
                   key:
-                    pulseToken === null
+                    replayToken === null
                       ? `text-tag-active:${pluginState.occurrenceKey}`
-                      : `text-tag-active:${pluginState.occurrenceKey}:${pulseToken}`,
+                      : `text-tag-active:${pluginState.occurrenceKey}:${replayToken}`,
                 },
               ),
             ]);
@@ -1371,6 +1406,8 @@ export function setActiveTextTagOccurrence(
   occurrenceKey: string,
   pulseVariant: "A" | "B" | null = null,
   pulseToken = 0,
+  effectVariant: "sweep" | "settle" | null = null,
+  effectToken = 0,
 ) {
   if (!editor) {
     return;
@@ -1387,6 +1424,13 @@ export function setActiveTextTagOccurrence(
             ? TEXT_TAG_PULSE_CLASS_B
             : null,
       pulseToken,
+      effectClassName:
+        effectVariant === "sweep"
+          ? TEXT_TAG_LIQUID_SWEEP_CLASS
+          : effectVariant === "settle"
+            ? TEXT_TAG_LONG_SETTLE_CLASS
+            : null,
+      effectToken,
     } satisfies TextTagActivationMeta),
   );
 }

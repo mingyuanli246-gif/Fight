@@ -370,32 +370,93 @@
 
 .proseMirrorRoot [data-note-tag="true"],
 .editorDocument [data-note-tag="true"] {
+  position: relative;
   color: inherit;
   background:
     linear-gradient(
       180deg,
-      color-mix(in srgb, var(--note-tag-color, #ff3b30) 12%, transparent) 0%,
-      color-mix(in srgb, var(--note-tag-color, #ff3b30) 18%, transparent) 100%
+      color-mix(in srgb, var(--note-tag-color, #ff3b30) 10%, transparent) 0%,
+      color-mix(in srgb, var(--note-tag-color, #ff3b30) 13%, transparent) 100%
     );
-  border-radius: 0.28em;
-  box-shadow: inset 0 -2px 0
-    color-mix(in srgb, var(--note-tag-color, #ff3b30) 56%, transparent);
+  border-radius: 0.18em;
+  box-shadow: inset 0 -1px 0
+    color-mix(in srgb, var(--note-tag-color, #ff3b30) 28%, transparent);
   padding: 0 0.08em;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
+@supports selector(:has(*)) {
+  .proseMirrorRoot [data-note-tag="true"]:has(:global(.textTagActive)),
+  .editorDocument [data-note-tag="true"]:has(:global(.textTagActive)) {
+    background:
+      linear-gradient(
+        180deg,
+        color-mix(in srgb, var(--note-tag-color, #ff3b30) 14%, transparent) 0%,
+        color-mix(in srgb, var(--note-tag-color, #ff3b30) 16%, transparent) 100%
+      );
+    box-shadow: none;
+  }
+
+  .proseMirrorRoot [data-note-tag="true"]:has(:global(.textTagActive)) :global(.textTagActive),
+  .editorDocument [data-note-tag="true"]:has(:global(.textTagActive)) :global(.textTagActive) {
+    background: transparent;
+    border-radius: 0;
+    box-shadow: none;
+    text-shadow:
+      0 0 0.78em color-mix(in srgb, var(--note-tag-color, #ff3b30) 34%, transparent),
+      0 0 1.7em color-mix(in srgb, var(--note-tag-color, #ff3b30) 19%, transparent),
+      0 0 3.05em color-mix(in srgb, var(--note-tag-color, #ff3b30) 10%, transparent);
+  }
+
+  .proseMirrorRoot
+    [data-note-tag="true"]:has(:global(.textTagActive.textTagPulseA))
+    :global(.textTagPulseA),
+  .proseMirrorRoot
+    [data-note-tag="true"]:has(:global(.textTagActive.textTagPulseB))
+    :global(.textTagPulseB),
+  .editorDocument
+    [data-note-tag="true"]:has(:global(.textTagActive.textTagPulseA))
+    :global(.textTagPulseA),
+  .editorDocument
+    [data-note-tag="true"]:has(:global(.textTagActive.textTagPulseB))
+    :global(.textTagPulseB) {
+    position: relative;
+    z-index: 1;
+  }
+
+  .proseMirrorRoot [data-note-tag="true"]:has(:global(.textTagActive.textTagLiquidSweep)),
+  .proseMirrorRoot [data-note-tag="true"]:has(:global(.textTagActive.textTagLongSettle)),
+  .editorDocument [data-note-tag="true"]:has(:global(.textTagActive.textTagLiquidSweep)),
+  .editorDocument [data-note-tag="true"]:has(:global(.textTagActive.textTagLongSettle)) {
+    animation: textTagLongSettle 340ms ease-out both;
+  }
+
+  .proseMirrorRoot [data-note-tag="true"]:has(:global(.textTagActive.textTagLiquidSweep))
+    :global(.textTagLiquidSweep),
+  .proseMirrorRoot [data-note-tag="true"]:has(:global(.textTagActive.textTagLongSettle))
+    :global(.textTagLongSettle),
+  .editorDocument [data-note-tag="true"]:has(:global(.textTagActive.textTagLiquidSweep))
+    :global(.textTagLiquidSweep),
+  .editorDocument [data-note-tag="true"]:has(:global(.textTagActive.textTagLongSettle))
+    :global(.textTagLongSettle) {
+    position: relative;
+    z-index: 1;
+    will-change: filter, text-shadow;
+    animation: textTagLongSettleGlow 340ms ease-out both;
+  }
 }
 
 .proseMirrorRoot :global(.textTagActive),
-.editorDocument :global(.textTagActive) {
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--note-tag-color, #ff3b30) 16%, transparent) 0%,
-      color-mix(in srgb, var(--note-tag-color, #ff3b30) 24%, transparent) 100%
-    );
-  box-shadow:
-    inset 0 -2px 0
-      color-mix(in srgb, var(--note-tag-color, #ff3b30) 68%, transparent),
-    0 0 0 1px color-mix(in srgb, var(--note-tag-color, #ff3b30) 14%, transparent),
-    0 5px 14px color-mix(in srgb, var(--note-tag-color, #ff3b30) 8%, transparent);
+.editorDocument :global(.textTagActive),
+.proseMirrorRoot :global(.textTagLiquidSweep),
+.editorDocument :global(.textTagLiquidSweep),
+.proseMirrorRoot :global(.textTagLongSettle),
+.editorDocument :global(.textTagLongSettle) {
+  background: transparent;
+  border-radius: 0;
+  box-shadow: none;
+  text-shadow: none;
 }
 
 .proseMirrorRoot :global(.textTagPulseA),
@@ -492,11 +553,67 @@
   }
 }
 
+@keyframes textTagLongSettle {
+  0% {
+    background:
+      linear-gradient(
+        180deg,
+        color-mix(in srgb, var(--note-tag-color, #ff3b30) 16%, transparent) 0%,
+        color-mix(in srgb, var(--note-tag-color, #ff3b30) 18%, transparent) 100%
+      );
+    box-shadow: none;
+    text-shadow:
+      0 0 0.88em color-mix(in srgb, var(--note-tag-color, #ff3b30) 34%, transparent),
+      0 0 1.95em color-mix(in srgb, var(--note-tag-color, #ff3b30) 20%, transparent),
+      0 0 3.4em color-mix(in srgb, var(--note-tag-color, #ff3b30) 10%, transparent);
+  }
+
+  100% {
+    background:
+      linear-gradient(
+        180deg,
+        color-mix(in srgb, var(--note-tag-color, #ff3b30) 14%, transparent) 0%,
+        color-mix(in srgb, var(--note-tag-color, #ff3b30) 16%, transparent) 100%
+      );
+    box-shadow: none;
+    text-shadow:
+      0 0 0.8em color-mix(in srgb, var(--note-tag-color, #ff3b30) 32%, transparent),
+      0 0 1.8em color-mix(in srgb, var(--note-tag-color, #ff3b30) 18%, transparent),
+      0 0 3.2em color-mix(in srgb, var(--note-tag-color, #ff3b30) 9%, transparent);
+  }
+}
+
+@keyframes textTagLongSettleGlow {
+  0% {
+    filter: saturate(1.08) brightness(1.02);
+    text-shadow:
+      0 0 0.92em color-mix(in srgb, var(--note-tag-color, #ff3b30) 36%, transparent),
+      0 0 2em color-mix(in srgb, var(--note-tag-color, #ff3b30) 22%, transparent),
+      0 0 3.6em color-mix(in srgb, var(--note-tag-color, #ff3b30) 12%, transparent);
+  }
+
+  100% {
+    filter: none;
+    text-shadow:
+      0 0 0.78em color-mix(in srgb, var(--note-tag-color, #ff3b30) 34%, transparent),
+      0 0 1.7em color-mix(in srgb, var(--note-tag-color, #ff3b30) 19%, transparent),
+      0 0 3.05em color-mix(in srgb, var(--note-tag-color, #ff3b30) 10%, transparent);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
+  .proseMirrorRoot [data-note-tag="true"]:has(:global(.textTagActive.textTagLiquidSweep)),
+  .editorDocument [data-note-tag="true"]:has(:global(.textTagActive.textTagLiquidSweep)),
+  .proseMirrorRoot [data-note-tag="true"]:has(:global(.textTagActive.textTagLongSettle)),
+  .editorDocument [data-note-tag="true"]:has(:global(.textTagActive.textTagLongSettle)),
   .proseMirrorRoot :global(.textTagPulseA),
   .proseMirrorRoot :global(.textTagPulseB),
+  .proseMirrorRoot :global(.textTagLiquidSweep),
+  .proseMirrorRoot :global(.textTagLongSettle),
   .editorDocument :global(.textTagPulseA),
-  .editorDocument :global(.textTagPulseB) {
+  .editorDocument :global(.textTagPulseB),
+  .editorDocument :global(.textTagLiquidSweep),
+  .editorDocument :global(.textTagLongSettle) {
     animation: none;
     transform: none;
     filter: none;
