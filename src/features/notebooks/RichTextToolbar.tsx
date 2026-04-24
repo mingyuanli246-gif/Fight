@@ -1,10 +1,6 @@
-import { useEditorState, type Editor } from "@tiptap/react";
+import type { Editor } from "@tiptap/react";
 import { useEffect, useState, type ReactNode } from "react";
 import { EDITOR_CAPABILITIES } from "./editorCapabilities";
-import {
-  getSelectedNoteImageDisplaySize,
-  setSelectedNoteImageDisplaySize,
-} from "./editorCommands";
 import styles from "./NoteEditorSurface.module.css";
 
 interface RichTextToolbarProps {
@@ -252,18 +248,12 @@ export function RichTextToolbar({
     };
   }, [editor]);
 
-  const selectedImageDisplaySize = useEditorState({
-    editor,
-    selector: ({ editor: currentEditor }) =>
-      getSelectedNoteImageDisplaySize(currentEditor),
-  });
   const isUnavailable = disabled || editor === null;
   const canUndoEditor =
     editor?.can().chain().focus().undo().run() ?? false;
   const canRedoEditor =
     editor?.can().chain().focus().redo().run() ?? false;
   const isCentered = editor?.isActive({ textAlign: "center" }) ?? false;
-  const hasSelectedImage = selectedImageDisplaySize !== null;
   const blockButtons: ToolbarButtonDescriptor[] = [
     {
       key: "heading-1",
@@ -418,47 +408,6 @@ export function RichTextToolbar({
     });
   }
 
-  const imageSizeButtons: ToolbarButtonDescriptor[] = hasSelectedImage
-    ? [
-        {
-          key: "image-size-small",
-          label: "小图",
-          active: selectedImageDisplaySize === "small",
-          disabled: isUnavailable,
-          onClick() {
-            setSelectedNoteImageDisplaySize(editor, "small");
-          },
-        },
-        {
-          key: "image-size-medium",
-          label: "中图",
-          active: selectedImageDisplaySize === "medium",
-          disabled: isUnavailable,
-          onClick() {
-            setSelectedNoteImageDisplaySize(editor, "medium");
-          },
-        },
-        {
-          key: "image-size-large",
-          label: "大图",
-          active: selectedImageDisplaySize === "large",
-          disabled: isUnavailable,
-          onClick() {
-            setSelectedNoteImageDisplaySize(editor, "large");
-          },
-        },
-        {
-          key: "image-size-default",
-          label: "默认",
-          active: selectedImageDisplaySize === "default",
-          disabled: isUnavailable,
-          onClick() {
-            setSelectedNoteImageDisplaySize(editor, "default");
-          },
-        },
-      ]
-    : [];
-
   const historyButtons: ToolbarButtonDescriptor[] = [
     {
       key: "undo",
@@ -485,7 +434,6 @@ export function RichTextToolbar({
     listButtons,
     alignmentButtons,
     insertionButtons,
-    imageSizeButtons,
     historyButtons,
   ].filter((group) => group.length > 0);
 

@@ -824,6 +824,8 @@
   width: 100%;
   margin: 1.1em 0;
   cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .noteImageNode[data-note-image-display-size="small"] {
@@ -842,17 +844,56 @@
   filter: none;
 }
 
+.noteImageNode:global(.ProseMirror-selectednode) {
+  outline: none;
+}
+
 .noteImageFrame {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  max-inline-size: min(100%, var(--note-image-max-inline-size));
+  min-height: 0;
+  padding: 2px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 16px;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.noteImageNode[data-note-image-width-px] .noteImageFrame {
+  max-inline-size: 100%;
+}
+
+.noteImageSelected .noteImageFrame {
+  border-color: rgba(96, 165, 250, 0.34);
+  box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.08);
+  overflow: visible;
+}
+
+.noteImageResizing .noteImageFrame {
+  border-color: rgba(59, 130, 246, 0.42);
+}
+
+.noteImageMediaContainer {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   max-inline-size: min(100%, var(--note-image-max-inline-size));
   min-height: 0;
-  padding: 0;
-  background: transparent;
-  border: 0;
-  border-radius: 0;
+  border-radius: 14px;
   overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.noteImageNode[data-note-image-width-px] .noteImageMediaContainer {
+  width: 100%;
+  max-inline-size: 100%;
 }
 
 .noteImageFrameError {
@@ -861,10 +902,6 @@
   background: rgba(254, 242, 242, 0.92);
   border: 1px solid rgba(248, 113, 113, 0.3);
   border-radius: 18px;
-}
-
-.noteImageSelected .noteImageElement {
-  box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.2);
 }
 
 .noteImageElement {
@@ -876,6 +913,48 @@
   max-block-size: min(70vh, 640px);
   border-radius: 14px;
   object-fit: contain;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
+}
+
+.noteImageNode[data-note-image-width-px] .noteImageElement {
+  width: 100%;
+  max-inline-size: 100%;
+}
+
+.noteImageResizeHandle {
+  position: absolute;
+  right: -5px;
+  bottom: -5px;
+  display: block;
+  width: 12px;
+  height: 12px;
+  padding: 0;
+  cursor: nwse-resize;
+  background: rgba(59, 130, 246, 0.85);
+  border: 2px solid rgba(255, 255, 255, 0.96);
+  border-radius: 999px;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.16);
+  opacity: 0;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.noteImageSelected .noteImageResizeHandle {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.noteImageResizing,
+.noteImageResizing * {
+  cursor: nwse-resize;
+}
+
+.noteImageNode::selection,
+.noteImageNode *::selection {
+  background: transparent;
 }
 
 .noteImageLoading {

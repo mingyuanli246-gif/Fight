@@ -1,6 +1,7 @@
 import { mergeAttributes, Node } from "@tiptap/core";
 import type { NodeViewRendererProps } from "@tiptap/core";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
+import { NodeSelection } from "@tiptap/pm/state";
 import {
   MISSING_RESOURCE_MESSAGE,
   resolveLocalResourcePath,
@@ -11,6 +12,8 @@ export const NOTE_IMAGE_NODE_NAME = "noteImage";
 const NOTE_IMAGE_ATTRIBUTE = "data-note-image";
 const NOTE_IMAGE_RESOURCE_ATTRIBUTE = "data-resource-path";
 const NOTE_IMAGE_DISPLAY_SIZE_ATTRIBUTE = "data-display-size";
+const NOTE_IMAGE_WIDTH_PX_ATTRIBUTE = "data-width-px";
+const MIN_NOTE_IMAGE_WIDTH_PX = 120;
 
 export const NOTE_IMAGE_DISPLAY_SIZES = [
   "default",
@@ -35,6 +38,21 @@ export function normalizeNoteImageDisplaySize(
   }
 
   return DEFAULT_NOTE_IMAGE_DISPLAY_SIZE;
+}
+
+function normalizeNoteImageWidthPx(value: unknown) {
+  const numericValue =
+    typeof value === "number"
+      ? value
+      : typeof value === "string"
+        ? Number.parseFloat(value)
+        : Number.NaN;
+
+  if (!Number.isFinite(numericValue) || numericValue <= 0) {
+    return null;
+  }
+
+  return Math.round(numericValue);
 }
 
 interface NoteImageNodeOptions {
@@ -63,13 +81,212 @@ function createImageFallback(
 function createNoteImageNodeView(props: NodeViewRendererProps) {
   const dom = document.createElement("div");
   const frame = document.createElement("div");
+  const mediaContainer = document.createElement("div");
+  const resizeHandle = document.createElement("button");
   let currentNode = props.node;
   let renderVersion = 0;
+  let dragState:
+    | {
+        pointerId: number;
+        startClientX: number;
+        startWidth: number;
+        maxWidth: number;
+        latestWidth: number;
+      }
+    | null = null;
 
   dom.contentEditable = "false";
   dom.classList.add(styles.noteImageNode);
   frame.classList.add(styles.noteImageFrame);
+  mediaContainer.classList.add(styles.noteImageMediaContainer);
+  resizeHandle.type = "button";
+  resizeHandle.classList.add(styles.noteImageResizeHandle);
+  resizeHandle.setAttribute("aria-label", "调整图片大小");
+  frame.append(mediaContainer, resizeHandle);
   dom.append(frame);
+
+  function getEditorContentWidth() {
+    const editorRoot = props.editor.view.dom;
+    const rootStyles = window.getComputedStyle(editorRoot);
+    const horizontalPadding =
+      Number.parseFloat(rootStyles.paddingLeft) +
+      Number.parseFloat(rootStyles.paddingRight);
+    const contentWidth = editorRoot.clientWidth - horizontalPadding;
+
+    return Math.max(MIN_NOTE_IMAGE_WIDTH_PX, contentWidth || frame.clientWidth);
+  }
+
+  function readFrameWidth() {
+    const rectWidth = frame.getBoundingClientRect().width;
+
+    if (rectWidth > 0) {
+      return rectWidth;
+    }
+
+    const widthPx = normalizeNoteImageWidthPx(currentNode.attrs.widthPx);
+
+    return widthPx ?? Math.min(getEditorContentWidth(), 560);
+  }
+
+  function setFrameWidth(widthPx: number | null) {
+    if (widthPx === null) {
+      frame.style.width = "";
+      delete dom.dataset.noteImageWidthPx;
+      return;
+    }
+
+    frame.style.width = `${widthPx}px`;
+    dom.dataset.noteImageWidthPx = String(widthPx);
+  }
+
+  function syncFrameWidth(node: ProseMirrorNode) {
+    setFrameWidth(normalizeNoteImageWidthPx(node.attrs.widthPx));
+  }
+
+  function selectCurrentNode() {
+    const position = props.getPos();
+
+    if (typeof position !== "number") {
+      return;
+    }
+
+    const { state, dispatch } = props.editor.view;
+    const selection = NodeSelection.create(state.doc, position);
+
+    if (!selection.eq(state.selection)) {
+      dispatch(state.tr.setSelection(selection));
+    }
+
+    props.editor.view.focus();
+  }
+
+  function clampWidth(widthPx: number, maxWidth: number) {
+    return Math.round(
+      Math.min(Math.max(widthPx, MIN_NOTE_IMAGE_WIDTH_PX), maxWidth),
+    );
+  }
+
+  function commitWidth(widthPx: number) {
+    const position = props.getPos();
+
+    if (typeof position !== "number") {
+      return;
+    }
+
+    const { state, dispatch } = props.editor.view;
+    const nodeAtPosition = state.doc.nodeAt(position);
+
+    if (!nodeAtPosition || nodeAtPosition.type !== currentNode.type) {
+      return;
+    }
+
+    const normalizedWidth = normalizeNoteImageWidthPx(widthPx);
+    const currentWidth = normalizeNoteImageWidthPx(nodeAtPosition.attrs.widthPx);
+
+    if (normalizedWidth === null || normalizedWidth === currentWidth) {
+      syncFrameWidth(nodeAtPosition);
+      return;
+    }
+
+    const tr = state.tr.setNodeMarkup(position, undefined, {
+      ...nodeAtPosition.attrs,
+      widthPx: normalizedWidth,
+    });
+
+    dispatch(tr);
+  }
+
+  function handleResizeMove(event: PointerEvent) {
+    if (!dragState || event.pointerId !== dragState.pointerId) {
+      return;
+    }
+
+    event.preventDefault();
+
+    const nextWidth = clampWidth(
+      dragState.startWidth + event.clientX - dragState.startClientX,
+      dragState.maxWidth,
+    );
+
+    dragState.latestWidth = nextWidth;
+    setFrameWidth(nextWidth);
+  }
+
+  function finishResize(event: PointerEvent) {
+    if (!dragState || event.pointerId !== dragState.pointerId) {
+      return;
+    }
+
+    event.preventDefault();
+    if (resizeHandle.hasPointerCapture(event.pointerId)) {
+      resizeHandle.releasePointerCapture(event.pointerId);
+    }
+
+    const finalWidth = dragState.latestWidth;
+    dragState = null;
+    dom.classList.remove(styles.noteImageResizing);
+    commitWidth(finalWidth);
+  }
+
+  function cancelResize(event: PointerEvent) {
+    if (!dragState || event.pointerId !== dragState.pointerId) {
+      return;
+    }
+
+    if (resizeHandle.hasPointerCapture(event.pointerId)) {
+      resizeHandle.releasePointerCapture(event.pointerId);
+    }
+    dragState = null;
+    dom.classList.remove(styles.noteImageResizing);
+    syncFrameWidth(currentNode);
+  }
+
+  function preventNativeImageInteraction(event: Event) {
+    event.preventDefault();
+  }
+
+  dom.addEventListener("pointerdown", (event) => {
+    if (event.target === resizeHandle || event.button !== 0) {
+      return;
+    }
+
+    event.preventDefault();
+    selectCurrentNode();
+  });
+
+  dom.addEventListener("mousedown", (event) => {
+    if (event.target !== resizeHandle) {
+      event.preventDefault();
+    }
+  });
+
+  resizeHandle.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    selectCurrentNode();
+
+    const maxWidth = getEditorContentWidth();
+    const startWidth = clampWidth(readFrameWidth(), maxWidth);
+
+    dragState = {
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startWidth,
+      maxWidth,
+      latestWidth: startWidth,
+    };
+    setFrameWidth(startWidth);
+    dom.classList.add(styles.noteImageResizing);
+    resizeHandle.setPointerCapture(event.pointerId);
+  });
+
+  resizeHandle.addEventListener("pointermove", handleResizeMove);
+  resizeHandle.addEventListener("pointerup", finishResize);
+  resizeHandle.addEventListener("pointercancel", cancelResize);
 
   function paint(node: ProseMirrorNode) {
     currentNode = node;
@@ -81,14 +298,15 @@ function createNoteImageNodeView(props: NodeViewRendererProps) {
 
     dom.dataset.noteImageResourcePath = resourcePath;
     dom.dataset.noteImageDisplaySize = displaySize;
+    syncFrameWidth(node);
     frame.classList.remove(styles.noteImageFrameError);
-    frame.classList.remove(styles.noteImageFallback);
-    frame.innerHTML = "";
+    mediaContainer.classList.remove(styles.noteImageFallback);
+    mediaContainer.innerHTML = "";
 
     const loadingText = document.createElement("span");
     loadingText.className = styles.noteImageLoading;
     loadingText.textContent = "正在加载图片…";
-    frame.append(loadingText);
+    mediaContainer.append(loadingText);
 
     void resolveLocalResourcePath(resourcePath).then((result) => {
       if (currentVersion !== renderVersion) {
@@ -102,15 +320,15 @@ function createNoteImageNodeView(props: NodeViewRendererProps) {
         });
         frame.classList.add(styles.noteImageFrameError);
         createImageFallback(
-          frame,
+          mediaContainer,
           "图片资源不可用",
           result.status === "invalid" ? result.message : MISSING_RESOURCE_MESSAGE,
         );
         return;
       }
 
-      frame.innerHTML = "";
-      frame.classList.remove(styles.noteImageFallback);
+      mediaContainer.innerHTML = "";
+      mediaContainer.classList.remove(styles.noteImageFallback);
       const image = document.createElement("img");
       image.className = styles.noteImageElement;
       image.alt = alt || "笔记图片";
@@ -118,6 +336,8 @@ function createNoteImageNodeView(props: NodeViewRendererProps) {
       image.loading = "lazy";
       image.decoding = "async";
       image.draggable = false;
+      image.addEventListener("dragstart", preventNativeImageInteraction);
+      image.addEventListener("mousedown", preventNativeImageInteraction);
       image.addEventListener("error", () => {
         if (currentVersion !== renderVersion) {
           return;
@@ -128,10 +348,10 @@ function createNoteImageNodeView(props: NodeViewRendererProps) {
           assetUrl: result.assetUrl,
         });
         frame.classList.add(styles.noteImageFrameError);
-        createImageFallback(frame, "图片资源不可用", MISSING_RESOURCE_MESSAGE);
+        createImageFallback(mediaContainer, "图片资源不可用", MISSING_RESOURCE_MESSAGE);
       });
 
-      frame.append(image);
+      mediaContainer.append(image);
     }).catch((error) => {
       if (currentVersion !== renderVersion) {
         return;
@@ -142,7 +362,7 @@ function createNoteImageNodeView(props: NodeViewRendererProps) {
         error,
       });
       frame.classList.add(styles.noteImageFrameError);
-      createImageFallback(frame, "图片资源不可用", MISSING_RESOURCE_MESSAGE);
+      createImageFallback(mediaContainer, "图片资源不可用", MISSING_RESOURCE_MESSAGE);
     });
   }
 
@@ -160,14 +380,16 @@ function createNoteImageNodeView(props: NodeViewRendererProps) {
       const nextDisplaySize = normalizeNoteImageDisplaySize(
         updatedNode.attrs.displaySize,
       );
+      const nextWidthPx = normalizeNoteImageWidthPx(updatedNode.attrs.widthPx);
       const currentResourcePath = String(currentNode.attrs.resourcePath ?? "");
 
       currentNode = updatedNode;
       dom.dataset.noteImageResourcePath = nextResourcePath;
       dom.dataset.noteImageDisplaySize = nextDisplaySize;
+      setFrameWidth(nextWidthPx);
 
       if (nextResourcePath === currentResourcePath) {
-        const existingImage = frame.querySelector("img");
+        const existingImage = mediaContainer.querySelector("img");
 
         if (existingImage instanceof HTMLImageElement) {
           existingImage.alt = nextAlt || "笔记图片";
@@ -237,6 +459,22 @@ export const NoteImage = Node.create<NoteImageNodeOptions>({
           ),
         }),
       },
+      widthPx: {
+        default: null,
+        parseHTML: (element) =>
+          element instanceof HTMLElement
+            ? normalizeNoteImageWidthPx(
+                element.getAttribute(NOTE_IMAGE_WIDTH_PX_ATTRIBUTE),
+              )
+            : null,
+        renderHTML: (attributes) => {
+          const widthPx = normalizeNoteImageWidthPx(attributes.widthPx);
+
+          return widthPx === null
+            ? {}
+            : { [NOTE_IMAGE_WIDTH_PX_ATTRIBUTE]: String(widthPx) };
+        },
+      },
     };
   },
 
@@ -255,6 +493,9 @@ export const NoteImage = Node.create<NoteImageNodeOptions>({
             displaySize: normalizeNoteImageDisplaySize(
               element.getAttribute(NOTE_IMAGE_DISPLAY_SIZE_ATTRIBUTE),
             ),
+            widthPx: normalizeNoteImageWidthPx(
+              element.getAttribute(NOTE_IMAGE_WIDTH_PX_ATTRIBUTE),
+            ),
           };
         },
       },
@@ -271,6 +512,13 @@ export const NoteImage = Node.create<NoteImageNodeOptions>({
         [NOTE_IMAGE_DISPLAY_SIZE_ATTRIBUTE]: normalizeNoteImageDisplaySize(
           node.attrs.displaySize,
         ),
+        ...(normalizeNoteImageWidthPx(node.attrs.widthPx) === null
+          ? {}
+          : {
+              [NOTE_IMAGE_WIDTH_PX_ATTRIBUTE]: String(
+                normalizeNoteImageWidthPx(node.attrs.widthPx),
+              ),
+            }),
       }),
     ];
   },
