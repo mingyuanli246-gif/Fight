@@ -223,6 +223,169 @@ function getFeedbackModeFromTagElement(tagElement: HTMLElement) {
   return "pulse";
 }
 
+function groupVisualLineCenters(rects: DOMRect[], tolerance = 4) {
+  const lineCenters: number[] = [];
+
+  for (const rect of rects) {
+    const centerY = (rect.top + rect.bottom) / 2;
+    const matchedLine = lineCenters.some(
+      (lineCenter) => Math.abs(lineCenter - centerY) <= tolerance,
+    );
+
+    if (!matchedLine) {
+      lineCenters.push(centerY);
+    }
+  }
+
+  return lineCenters;
+}
+
+function serializeRect(rect: DOMRect | null) {
+  return rect
+    ? {
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        width: rect.width,
+        height: rect.height,
+      }
+    : null;
+}
+
+function serializeRects(rects: DOMRect[]) {
+  return rects.map((rect) => serializeRect(rect));
+}
+
+function getOccurrenceRangeForDebug(
+  editor: Editor,
+  from: number,
+  to: number,
+) {
+  try {
+    const start = editor.view.domAtPos(from);
+    const end = editor.view.domAtPos(to);
+    const range = document.createRange();
+    range.setStart(start.node, start.offset);
+    range.setEnd(end.node, end.offset);
+    return {
+      range,
+      rangeError: null,
+    };
+  } catch (error) {
+    return {
+      range: null,
+      rangeError: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+function logTextTagPopoverDebug(params: {
+  editor: Editor;
+  occurrence: NonNullable<TextTagInspectionState["activeOccurrence"]>;
+  tagElement: HTMLElement | null;
+  editorRoot: HTMLElement;
+  anchorRect: DOMRect;
+  boundaryRect: DOMRect;
+  preferredAnchorCenterX: number | null;
+}) {
+  const {
+    editor,
+    occurrence,
+    tagElement,
+    editorRoot,
+    anchorRect,
+    boundaryRect,
+    preferredAnchorCenterX,
+  } = params;
+  const tagText = tagElement?.textContent ?? "";
+  const tagClientRects = tagElement
+    ? Array.from(tagElement.getClientRects()).filter(
+        (rect) => rect.width > 0 && rect.height > 0,
+      )
+    : [];
+  const { range, rangeError } = getOccurrenceRangeForDebug(
+    editor,
+    occurrence.from,
+    occurrence.to,
+  );
+  const rangeText = range?.toString() ?? "";
+  const rangeClientRects = range
+    ? Array.from(range.getClientRects()).filter(
+        (rect) => rect.width > 0 && rect.height > 0,
+      )
+    : [];
+  const groupedLineCenters = groupVisualLineCenters(rangeClientRects);
+  const groupedLineCount = groupedLineCenters.length;
+  const isMultilineOccurrence = groupedLineCount > 1;
+  const fallbackCenterX = anchorRect.left + anchorRect.width / 2;
+  const editorRootRect = editorRoot.getBoundingClientRect();
+  const editorRootCenterX = editorRootRect.left + editorRootRect.width / 2;
+  const resolvedPreferredAnchorCenterX =
+    isMultilineOccurrence && Number.isFinite(editorRootCenterX)
+      ? editorRootCenterX
+      : preferredAnchorCenterX;
+  const anchorCenterX = resolvedPreferredAnchorCenterX ?? fallbackCenterX;
+  const halfPopoverWidth = POPOVER_WIDTH / 2;
+  const minCenter = boundaryRect.left + POPOVER_EDGE_PADDING + halfPopoverWidth;
+  const maxCenter = boundaryRect.right - POPOVER_EDGE_PADDING - halfPopoverWidth;
+  const finalAnchorCenterX =
+    minCenter > maxCenter
+      ? boundaryRect.left + boundaryRect.width / 2
+      : clamp(anchorCenterX, minCenter, maxCenter);
+  const anchorSource =
+    !editorRoot
+      ? "missing-editor-root-fallback"
+      : rangeError
+        ? "range-create-failed-fallback"
+        : resolvedPreferredAnchorCenterX !== null && isMultilineOccurrence
+          ? "multiline-range-editor-center"
+          : tagClientRects.length <= 1
+            ? "short-tag-fallback"
+            : groupedLineCount <= 1
+              ? "range-single-line-fallback"
+              : "unknown-fallback";
+
+  if (import.meta.env.DEV) {
+    console.log("[text-tag-popover-debug]", {
+      key: occurrence.key,
+      from: occurrence.from,
+      to: occurrence.to,
+      blockId: occurrence.blockId,
+      startOffset: occurrence.startOffset,
+      endOffset: occurrence.endOffset,
+      snippetText: occurrence.snippetText,
+      snippetLength: occurrence.snippetText.length,
+      tagText,
+      tagTextLength: tagText.length,
+      tagRect: serializeRect(tagElement?.getBoundingClientRect() ?? null),
+      tagClientRects: serializeRects(tagClientRects),
+      tagClientRectCount: tagClientRects.length,
+      rangeCreated: range !== null,
+      rangeError,
+      rangeText,
+      rangeTextLength: rangeText.length,
+      rangeClientRects: serializeRects(rangeClientRects),
+      rangeClientRectCount: rangeClientRects.length,
+      groupedLineCenters,
+      groupedLineCount,
+      isMultilineOccurrence,
+      fallbackCenterX,
+      preferredAnchorCenterX: resolvedPreferredAnchorCenterX,
+      finalAnchorCenterX,
+      editorRootRect: serializeRect(editorRootRect),
+      editorRootCenterX,
+      anchorRect: serializeRect(anchorRect),
+      boundaryRect: serializeRect(boundaryRect),
+      anchorSource,
+    });
+  }
+
+  return {
+    preferredAnchorCenterX: resolvedPreferredAnchorCenterX,
+  };
+}
+
 function getAnchorRect(
   editor: Editor,
   occurrence: NonNullable<TextTagInspectionState["activeOccurrence"]>,
@@ -231,11 +394,24 @@ function getAnchorRect(
   const tagElement = getOccurrenceTagElement(editor, occurrence.from, occurrence.to);
 
   if (!tagElement) {
+    const anchorRect = createRectFromOccurrence(editor, occurrence.from, occurrence.to);
+    const boundaryRect = getVisibleBoundaryRect(editorRoot).rect;
+    const debugAnchor = logTextTagPopoverDebug({
+      editor,
+      occurrence,
+      tagElement: null,
+      editorRoot,
+      anchorRect,
+      boundaryRect,
+      preferredAnchorCenterX: null,
+    });
+
     return {
-      anchorRect: createRectFromOccurrence(editor, occurrence.from, occurrence.to),
-      boundaryRect: getVisibleBoundaryRect(editorRoot).rect,
+      anchorRect,
+      boundaryRect,
       scrollContainer: getScrollableAncestor(editorRoot),
       isVisible: true,
+      anchorCenterX: debugAnchor.preferredAnchorCenterX,
     };
   }
 
@@ -246,12 +422,22 @@ function getAnchorRect(
       : getClosestBlockContainerRect(tagElement, editorRoot);
   const { rect: boundaryRect, scrollContainer } = getVisibleBoundaryRect(editorRoot);
   const isVisible = intersectRects(anchorRect, boundaryRect) !== null;
+  const debugAnchor = logTextTagPopoverDebug({
+    editor,
+    occurrence,
+    tagElement,
+    editorRoot,
+    anchorRect,
+    boundaryRect,
+    preferredAnchorCenterX: null,
+  });
 
   return {
     anchorRect,
     boundaryRect,
     scrollContainer,
     isVisible,
+    anchorCenterX: debugAnchor.preferredAnchorCenterX,
   };
 }
 
@@ -259,8 +445,13 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
 }
 
-function createClampedReferenceRect(anchorRect: DOMRect, boundaryRect: DOMRect) {
-  const anchorCenterX = anchorRect.left + anchorRect.width / 2;
+function createClampedReferenceRect(
+  anchorRect: DOMRect,
+  boundaryRect: DOMRect,
+  preferredAnchorCenterX: number | null = null,
+) {
+  const anchorCenterX =
+    preferredAnchorCenterX ?? anchorRect.left + anchorRect.width / 2;
   const halfPopoverWidth = POPOVER_WIDTH / 2;
   const minCenter = boundaryRect.left + POPOVER_EDGE_PADDING + halfPopoverWidth;
   const maxCenter = boundaryRect.right - POPOVER_EDGE_PADDING - halfPopoverWidth;
@@ -348,6 +539,7 @@ export function TextTagRemarkPopover({
     const preferredRect = createClampedReferenceRect(
       anchorData.anchorRect,
       anchorData.boundaryRect,
+      anchorData.anchorCenterX,
     );
 
     return {
@@ -393,6 +585,7 @@ export function TextTagRemarkPopover({
         ref={refs.setFloating}
         style={floatingStyles}
         className={styles.popover}
+        data-text-tag-remark-popover="true"
       >
         <div className={styles.header}>
           <p className={styles.title}>批注</p>

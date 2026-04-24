@@ -239,7 +239,7 @@ export function NoteTextTagManager({
       : "当前文件已有标签";
 
   return (
-    <section className={styles.manager}>
+    <section className={styles.manager} data-text-tag-manager="true">
       <div className={styles.header}>
         <div>
           <p className={styles.label}>正文标签</p>

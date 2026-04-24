@@ -107,6 +107,7 @@ export interface NoteEditorPaneRef {
   getTextTagSelectionState: () => TextTagSelectionState;
   applyTextTag: (tagId: number, colorSnapshot: string) => boolean;
   clearTextTag: () => boolean;
+  clearTextTagInspection: () => void;
 }
 
 interface NoteEditorPaneProps {
@@ -1135,6 +1136,15 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
           }
 
           return didClear;
+        },
+        clearTextTagInspection: () => {
+          const inspectionState = textTagInspectionStateRef.current;
+
+          if (!inspectionState.activeOccurrence && !inspectionState.isPopoverOpen) {
+            return;
+          }
+
+          setTextTagInspectionOccurrence(null);
         },
       }),
       [note.id],

@@ -72,6 +72,13 @@ const RESTORE_BLOCKED_MESSAGE =
 const HOME_SORT_STORAGE_KEY = "notebooks.home.sort";
 const RIGHT_PANEL_COLLAPSED_STORAGE_KEY =
   "notebooks.detail.right-panel-collapsed";
+const TEXT_TAG_ACTIVE_KEEP_SELECTOR = [
+  '[data-text-tag-remark-popover="true"]',
+  '[data-text-tag-manager="true"]',
+  '[data-note-tag="true"]',
+  '[data-right-panel-toggle="true"]',
+].join(",");
+const TEXT_TAG_EDITOR_CONTENT_SELECTOR = ".ProseMirror";
 
 interface DeleteTarget {
   kind: "notebook" | "folder" | "note";
@@ -331,6 +338,18 @@ function isEditableElement(target: EventTarget | null) {
   );
 }
 
+function getEventTargetElement(target: EventTarget | null) {
+  if (target instanceof Element) {
+    return target;
+  }
+
+  if (target instanceof Node) {
+    return target.parentElement;
+  }
+
+  return null;
+}
+
 interface NotebookWorkspaceProps {
   openRequest: NoteOpenRequest | null;
   onConsumeOpenRequest: (requestId: number) => void;
@@ -417,6 +436,9 @@ export const NotebookWorkspace = forwardRef<
   const leavePromptResolverRef = useRef<((value: boolean) => void) | null>(null);
   const notebookOrderSaveTokenRef = useRef(0);
   const treeOrderSaveTokenRef = useRef(0);
+  const hasActiveTextTagInspection = Boolean(
+    textTagInspectionState.activeOccurrence || textTagInspectionState.isPopoverOpen,
+  );
 
   const sortedNotebooks = useMemo(
     () => sortNotebooks(notebooks, homeSort),
@@ -1188,6 +1210,55 @@ export const NotebookWorkspace = forwardRef<
     selectedEntity,
     shellMode,
   ]);
+
+  useEffect(() => {
+    function clearTextTagInspectionIfActive() {
+      if (!hasActiveTextTagInspection) {
+        return;
+      }
+
+      noteEditorRef.current?.clearTextTagInspection();
+    }
+
+    function handleWindowPointerDown(event: PointerEvent) {
+      if (!hasActiveTextTagInspection) {
+        return;
+      }
+
+      const target = getEventTargetElement(event.target);
+
+      if (!target) {
+        clearTextTagInspectionIfActive();
+        return;
+      }
+
+      if (target.closest(TEXT_TAG_ACTIVE_KEEP_SELECTOR)) {
+        return;
+      }
+
+      if (target.closest(TEXT_TAG_EDITOR_CONTENT_SELECTOR)) {
+        return;
+      }
+
+      clearTextTagInspectionIfActive();
+    }
+
+    function handleWindowKeyDown(event: KeyboardEvent) {
+      if (event.key !== "Escape") {
+        return;
+      }
+
+      clearTextTagInspectionIfActive();
+    }
+
+    window.addEventListener("pointerdown", handleWindowPointerDown);
+    window.addEventListener("keydown", handleWindowKeyDown);
+
+    return () => {
+      window.removeEventListener("pointerdown", handleWindowPointerDown);
+      window.removeEventListener("keydown", handleWindowKeyDown);
+    };
+  }, [hasActiveTextTagInspection]);
 
   if (isInitializing) {
     return (

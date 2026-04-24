@@ -47,6 +47,7 @@ export function NotebookRightPanel({
           className={`${styles.iconButton} ${styles.rightCollapsedButton}`}
           onClick={onToggleCollapsed}
           aria-label="展开右侧功能区"
+          data-right-panel-toggle="true"
         >
           <PanelExpandIcon className={styles.buttonIcon} />
         </button>
@@ -65,6 +66,7 @@ export function NotebookRightPanel({
           className={styles.iconButton}
           onClick={onToggleCollapsed}
           aria-label="折叠右侧功能区"
+          data-right-panel-toggle="true"
         >
           <PanelCollapseIcon className={styles.buttonIcon} />
         </button>
