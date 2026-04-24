@@ -46,6 +46,15 @@ export interface NoteReviewPlanManagerRef {
 
 const EMPTY_REVIEW_DATES: string[] = [];
 
+function getMillisecondsUntilNextLocalMidnight() {
+  const now = new Date();
+  const nextMidnight = new Date(now);
+  nextMidnight.setDate(now.getDate() + 1);
+  nextMidnight.setHours(0, 0, 1, 0);
+
+  return Math.max(1000, nextMidnight.getTime() - now.getTime());
+}
+
 function getErrorMessage(error: unknown) {
   if (error instanceof Error) {
     return error.message;
@@ -160,6 +169,8 @@ export const NoteReviewPlanManager = forwardRef<
   const lastDirtyRef = useRef(false);
   const editScopeRef = useRef<HTMLDivElement | null>(null);
   const managerRef = useRef<HTMLElement | null>(null);
+  const hasPendingChangesRef = useRef(false);
+  const pendingMidnightRefreshRef = useRef(false);
   const editingIndex = editSession?.index ?? null;
 
   const savedDates = savedSchedule?.dates ?? EMPTY_REVIEW_DATES;
@@ -176,6 +187,10 @@ export const NoteReviewPlanManager = forwardRef<
     currentEditingValue !== null &&
     isEditDraftChanged(editDraft, currentEditingValue);
   const hasPendingChanges = isDirty || hasPendingEditChange;
+
+  useEffect(() => {
+    hasPendingChangesRef.current = hasPendingChanges;
+  }, [hasPendingChanges]);
 
   const loadSchedule = useCallback(async (expectedNoteId: number, requestVersion: number) => {
     try {
@@ -223,8 +238,30 @@ export const NoteReviewPlanManager = forwardRef<
     }
   }, [onError]);
 
+  const reloadCurrentSchedule = useCallback((showLoading: boolean) => {
+    const expectedNoteId = activeNoteIdRef.current;
+    requestVersionRef.current += 1;
+    const requestVersion = requestVersionRef.current;
+
+    if (showLoading) {
+      setIsLoading(true);
+    }
+
+    void loadSchedule(expectedNoteId, requestVersion);
+  }, [loadSchedule]);
+
+  const flushPendingMidnightRefresh = useCallback(() => {
+    if (!pendingMidnightRefreshRef.current) {
+      return;
+    }
+
+    pendingMidnightRefreshRef.current = false;
+    reloadCurrentSchedule(true);
+  }, [reloadCurrentSchedule]);
+
   useEffect(() => {
     activeNoteIdRef.current = noteId;
+    pendingMidnightRefreshRef.current = false;
     requestVersionRef.current += 1;
     const requestVersion = requestVersionRef.current;
     hasLoadedRef.current = false;
@@ -238,6 +275,38 @@ export const NoteReviewPlanManager = forwardRef<
     setDraftDates([]);
     void loadSchedule(noteId, requestVersion);
   }, [loadSchedule, noteId]);
+
+  useEffect(() => {
+    let timeoutId: number | null = null;
+    let disposed = false;
+
+    function scheduleNextRefresh() {
+      timeoutId = window.setTimeout(() => {
+        if (disposed) {
+          return;
+        }
+
+        if (hasPendingChangesRef.current) {
+          pendingMidnightRefreshRef.current = true;
+        } else {
+          pendingMidnightRefreshRef.current = false;
+          reloadCurrentSchedule(false);
+        }
+
+        scheduleNextRefresh();
+      }, getMillisecondsUntilNextLocalMidnight());
+    }
+
+    scheduleNextRefresh();
+
+    return () => {
+      disposed = true;
+
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
+    };
+  }, [noteId, reloadCurrentSchedule]);
 
   useEffect(() => {
     if (!hasLoadedRef.current) {
@@ -517,14 +586,17 @@ export const NoteReviewPlanManager = forwardRef<
     setEditSession(null);
     setEditDraft(null);
     setErrorMessage(null);
+    flushPendingMidnightRefresh();
   }
 
   const savePendingChanges = useCallback(async () => {
     if (!isScheduleActive) {
+      flushPendingMidnightRefresh();
       return true;
     }
 
     if (!hasPendingChanges && editSession === null) {
+      flushPendingMidnightRefresh();
       return true;
     }
 
@@ -569,6 +641,7 @@ export const NoteReviewPlanManager = forwardRef<
         setEditDraft(null);
         setErrorMessage(null);
         lastDirtyRef.current = false;
+        flushPendingMidnightRefresh();
         return true;
       }
 
@@ -585,6 +658,7 @@ export const NoteReviewPlanManager = forwardRef<
       setEditDraft(null);
       setErrorMessage(null);
       lastDirtyRef.current = false;
+      flushPendingMidnightRefresh();
       return true;
     } catch (error) {
       if (activeNoteIdRef.current === expectedNoteId) {
@@ -602,6 +676,7 @@ export const NoteReviewPlanManager = forwardRef<
   }, [
     draftDates,
     editSession,
+    flushPendingMidnightRefresh,
     hasPendingChanges,
     isScheduleActive,
     noteId,

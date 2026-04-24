@@ -1,16 +1,8 @@
-import type Database from "@tauri-apps/plugin-sql";
 import { invoke } from "@tauri-apps/api/core";
 import { getNotebookDatabase } from "../notebooks/db";
 import type { NoteReviewSchedule, TodayReviewTaskItem } from "./types";
 
 class ReviewValidationError extends Error {}
-
-type NoteReviewScheduleRow = {
-  noteId: number;
-  activatedAt: string;
-  updatedAt: string;
-  dueDate: string | null;
-};
 
 type TodayReviewTaskRow = TodayReviewTaskItem;
 
@@ -98,6 +90,16 @@ async function ensureReviewFeatureReadyCommand() {
   return invoke<void>("ensure_review_feature_ready_tx");
 }
 
+async function getNoteReviewScheduleCommand(noteId: number) {
+  return invoke<NoteReviewSchedule | null>("get_note_review_schedule_tx", {
+    noteId,
+  });
+}
+
+async function cleanupExpiredReviewSchedulesCommand() {
+  return invoke<void>("cleanup_expired_review_schedules_tx");
+}
+
 async function activateNoteReviewScheduleCommand(noteId: number) {
   return invoke<NoteReviewSchedule>("activate_note_review_schedule_tx", {
     noteId,
@@ -132,31 +134,6 @@ function toLocalDateKey(date: Date) {
   return `${year}-${month}-${day}`;
 }
 
-async function selectOne<T>(
-  database: Database,
-  query: string,
-  bindValues: unknown[],
-  missingMessage: string,
-) {
-  const rows = await database.select<T[]>(query, bindValues);
-  const item = rows[0];
-
-  if (!item) {
-    throw new ReviewValidationError(missingMessage);
-  }
-
-  return item;
-}
-
-async function ensureNoteExists(database: Database, noteId: number) {
-  await selectOne<{ id: number }>(
-    database,
-    "SELECT id FROM notes WHERE id = $1",
-    [noteId],
-    "目标文件不存在。",
-  );
-}
-
 export async function ensureReviewFeatureReady() {
   await getNotebookDatabase();
 
@@ -175,44 +152,14 @@ export async function ensureReviewFeatureReady() {
 export async function getNoteReviewSchedule(noteId: number) {
   return withReviewError("读取复习计划", async () => {
     await ensureReviewFeatureReady();
-    const database = await getNotebookDatabase();
-    await ensureNoteExists(database, noteId);
+    return getNoteReviewScheduleCommand(noteId);
+  });
+}
 
-    const rows = await database.select<NoteReviewScheduleRow[]>(
-      `
-        SELECT
-          note_review_bindings.note_id AS noteId,
-          note_review_bindings.start_date AS activatedAt,
-          note_review_bindings.updated_at AS updatedAt,
-          review_tasks.due_date AS dueDate
-        FROM note_review_bindings
-        LEFT JOIN review_tasks
-          ON review_tasks.note_id = note_review_bindings.note_id
-         AND review_tasks.plan_id = note_review_bindings.plan_id
-        WHERE note_review_bindings.note_id = $1
-        ORDER BY review_tasks.due_date ASC, review_tasks.step_index ASC, review_tasks.id ASC
-      `,
-      [noteId],
-    );
-
-    if (rows.length === 0) {
-      return null;
-    }
-
-    const dates = rows
-      .map((row) => row.dueDate)
-      .filter((date): date is string => Boolean(date));
-
-    if (dates.length === 0) {
-      return null;
-    }
-
-    return {
-      noteId: rows[0].noteId,
-      activatedAt: rows[0].activatedAt,
-      updatedAt: rows[0].updatedAt,
-      dates,
-    } satisfies NoteReviewSchedule;
+export async function cleanupExpiredReviewSchedules() {
+  return withReviewError("清理过期复习计划", async () => {
+    await ensureReviewFeatureReady();
+    await cleanupExpiredReviewSchedulesCommand();
   });
 }
 

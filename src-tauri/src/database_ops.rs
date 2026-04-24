@@ -1464,6 +1464,113 @@ fn clear_review_schedule_for_note(transaction: &Connection, note_id: i64) -> Res
     Ok(())
 }
 
+fn collect_empty_review_binding_note_ids(
+    connection: &Connection,
+    note_id: Option<i64>,
+) -> Result<BTreeSet<i64>, String> {
+    let mut note_ids = BTreeSet::new();
+
+    if let Some(note_id) = note_id {
+        let mut statement = connection
+            .prepare(
+                "
+                  SELECT note_review_bindings.note_id
+                  FROM note_review_bindings
+                  WHERE note_review_bindings.note_id = ?1
+                    AND NOT EXISTS (
+                      SELECT 1
+                      FROM review_tasks
+                      WHERE review_tasks.note_id = note_review_bindings.note_id
+                        AND review_tasks.plan_id = note_review_bindings.plan_id
+                    )
+                ",
+            )
+            .map_err(|error| to_command_error("读取空复习绑定", error))?;
+        let rows = statement
+            .query_map([note_id], |row| row.get::<_, i64>(0))
+            .map_err(|error| to_command_error("读取空复习绑定", error))?;
+
+        for row in rows {
+            note_ids.insert(row.map_err(|error| to_command_error("读取空复习绑定", error))?);
+        }
+
+        return Ok(note_ids);
+    }
+
+    let mut statement = connection
+        .prepare(
+            "
+              SELECT note_review_bindings.note_id
+              FROM note_review_bindings
+              WHERE NOT EXISTS (
+                SELECT 1
+                FROM review_tasks
+                WHERE review_tasks.note_id = note_review_bindings.note_id
+                  AND review_tasks.plan_id = note_review_bindings.plan_id
+              )
+            ",
+        )
+        .map_err(|error| to_command_error("读取空复习绑定", error))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, i64>(0))
+        .map_err(|error| to_command_error("读取空复习绑定", error))?;
+
+    for row in rows {
+        note_ids.insert(row.map_err(|error| to_command_error("读取空复习绑定", error))?);
+    }
+
+    Ok(note_ids)
+}
+
+fn cleanup_expired_review_schedules(
+    transaction: &Connection,
+    note_id: Option<i64>,
+    today: &str,
+) -> Result<(), String> {
+    if let Some(note_id) = note_id {
+        transaction
+            .execute(
+                "DELETE FROM review_tasks WHERE note_id = ?1 AND due_date < ?2",
+                params![note_id, today],
+            )
+            .map_err(|error| to_command_error("清理过期复习任务", error))?;
+    } else {
+        transaction
+            .execute("DELETE FROM review_tasks WHERE due_date < ?1", [today])
+            .map_err(|error| to_command_error("清理过期复习任务", error))?;
+    }
+
+    let empty_binding_note_ids = collect_empty_review_binding_note_ids(transaction, note_id)?;
+
+    for empty_note_id in empty_binding_note_ids {
+        transaction
+            .execute(
+                "DELETE FROM note_review_bindings WHERE note_id = ?1",
+                [empty_note_id],
+            )
+            .map_err(|error| to_command_error("清理空复习绑定", error))?;
+        update_review_schedule_dirty_note_id(transaction, empty_note_id, false)?;
+    }
+
+    Ok(())
+}
+
+fn cleanup_expired_review_schedules_in_transaction(
+    connection: &mut Connection,
+    note_id: Option<i64>,
+    today: &str,
+) -> Result<(), String> {
+    let transaction = connection
+        .transaction()
+        .map_err(|error| to_command_error("开启清理过期复习计划事务", error))?;
+
+    cleanup_expired_review_schedules(&transaction, note_id, today)?;
+
+    transaction
+        .commit()
+        .map_err(|error| to_command_error("提交清理过期复习计划事务", error))
+}
+
 fn write_note_review_schedule(
     transaction: &Connection,
     note_id: i64,
@@ -1646,7 +1753,7 @@ fn ensure_review_feature_ready_internal(connection: &mut Connection) -> Result<(
 
     let dirty_note_ids = get_review_schedule_dirty_note_ids(connection)?;
     if dirty_note_ids.is_empty() {
-        return Ok(());
+        return cleanup_expired_review_schedules_in_transaction(connection, None, &today);
     }
 
     let transaction = connection
@@ -1661,10 +1768,40 @@ fn ensure_review_feature_ready_internal(connection: &mut Connection) -> Result<(
         reset_note_review_schedule_to_default(&transaction, note_id, &today)?;
     }
 
+    cleanup_expired_review_schedules(&transaction, None, &today)?;
     set_review_schedule_dirty_note_ids(&transaction, &BTreeSet::new())?;
     transaction
         .commit()
         .map_err(|error| to_command_error("提交恢复默认复习计划事务", error))
+}
+
+fn get_note_review_schedule_tx_internal(
+    connection: &mut Connection,
+    note_id: i64,
+) -> Result<Option<NoteReviewScheduleRecord>, String> {
+    ensure_review_feature_ready_internal(connection)?;
+
+    let today = today_local_date_key();
+    let transaction = connection
+        .transaction()
+        .map_err(|error| to_command_error("开启读取复习计划事务", error))?;
+
+    ensure_note_exists(&transaction, note_id)?;
+    cleanup_expired_review_schedules(&transaction, Some(note_id), &today)?;
+    let schedule = fetch_note_review_schedule(&transaction, note_id)?;
+
+    transaction
+        .commit()
+        .map_err(|error| to_command_error("提交读取复习计划事务", error))?;
+
+    Ok(schedule)
+}
+
+fn cleanup_expired_review_schedules_tx_internal(connection: &mut Connection) -> Result<(), String> {
+    ensure_review_feature_ready_internal(connection)?;
+
+    let today = today_local_date_key();
+    cleanup_expired_review_schedules_in_transaction(connection, None, &today)
 }
 
 fn activate_note_review_schedule_tx_internal(
@@ -3464,6 +3601,21 @@ pub fn ensure_review_feature_ready_tx(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn get_note_review_schedule_tx(
+    app: AppHandle,
+    note_id: i64,
+) -> Result<Option<NoteReviewScheduleRecord>, String> {
+    let mut connection = open_database_connection(&app)?;
+    get_note_review_schedule_tx_internal(&mut connection, note_id)
+}
+
+#[tauri::command]
+pub fn cleanup_expired_review_schedules_tx(app: AppHandle) -> Result<(), String> {
+    let mut connection = open_database_connection(&app)?;
+    cleanup_expired_review_schedules_tx_internal(&mut connection)
+}
+
+#[tauri::command]
 pub fn activate_note_review_schedule_tx(
     app: AppHandle,
     note_id: i64,
@@ -3684,26 +3836,28 @@ mod tests {
     use super::{
         activate_note_review_schedule_tx_internal, add_days, add_tag_to_note_by_name_tx_internal,
         bind_review_plan_to_note_tx_internal, cleanup_candidate_unreferenced_managed_resources,
-        cleanup_unreferenced_managed_resources_internal, clear_note_review_schedule_tx_internal,
-        clear_notebook_cover_image_tx_internal, collect_managed_resource_paths_for_folder_subtree,
+        cleanup_expired_review_schedules, cleanup_unreferenced_managed_resources_internal,
+        clear_note_review_schedule_tx_internal, clear_notebook_cover_image_tx_internal,
+        collect_managed_resource_paths_for_folder_subtree,
         collect_managed_resource_paths_for_notebook, create_folder_tx_internal,
         create_note_tx_internal, create_notebook_tx_internal, create_review_plan_tx_internal,
         delete_folder_tx_internal, delete_note_tx_internal, delete_notebook_tx_internal,
         delete_review_plan_tx_internal, ensure_app_meta_table, ensure_note_search_ready_internal,
         ensure_note_search_table, ensure_notebook_tree_constraints_tx_internal,
         ensure_review_feature_ready_internal, extract_indexable_plain_text,
-        extract_note_image_resource_paths, move_note_tx_internal, normalize_tag_color,
-        save_note_content_with_tags_tx_internal,
+        extract_note_image_resource_paths, get_note_review_schedule_tx_internal,
+        get_review_schedule_dirty_note_ids, move_note_tx_internal, normalize_tag_color,
         rebuild_note_search_index_internal, rename_review_plan_tx_internal,
         reorder_folders_tx_internal, reorder_notebooks_tx_internal,
-        save_note_review_schedule_tx_internal, set_note_review_schedule_dirty_tx_internal,
-        set_review_task_completed_tx_internal, today_local_date_key,
-        update_notebook_cover_image_tx_internal, APP_META_KEY_REVIEW_FEATURE_REBUILD_V1_DONE,
-        APP_META_KEY_REVIEW_SCHEDULE_DIRTY_NOTE_IDS, DEFAULT_REVIEW_PLAN_NAME, DEFAULT_TAG_COLOR,
-        NoteTagOccurrenceInput,
+        save_note_content_with_tags_tx_internal, save_note_review_schedule_tx_internal,
+        set_note_review_schedule_dirty_tx_internal, set_review_task_completed_tx_internal,
+        today_local_date_key, update_notebook_cover_image_tx_internal,
+        update_review_schedule_dirty_note_id, NoteTagOccurrenceInput,
+        APP_META_KEY_REVIEW_FEATURE_REBUILD_V1_DONE, APP_META_KEY_REVIEW_SCHEDULE_DIRTY_NOTE_IDS,
+        DEFAULT_REVIEW_PLAN_NAME, DEFAULT_TAG_COLOR,
     };
     use chrono::Local;
-    use rusqlite::Connection;
+    use rusqlite::{params, Connection};
     use std::fs;
     use std::path::Path;
     use tempfile::tempdir;
@@ -3819,6 +3973,68 @@ mod tests {
         ensure_app_meta_table(&connection).expect("ensure app_meta");
         ensure_note_search_table(&connection).expect("ensure note_search");
         connection
+    }
+
+    fn insert_basic_review_note(connection: &Connection) {
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', NULL)",
+                [],
+            )
+            .expect("insert note");
+    }
+
+    fn default_review_plan_id(connection: &Connection) -> i64 {
+        connection
+            .query_row(
+                "SELECT id FROM review_plans WHERE name = ?1 LIMIT 1",
+                [DEFAULT_REVIEW_PLAN_NAME],
+                |row| row.get(0),
+            )
+            .expect("read default review plan id")
+    }
+
+    fn insert_review_binding_with_tasks(
+        connection: &Connection,
+        note_id: i64,
+        plan_id: i64,
+        start_date: &str,
+        dates: &[String],
+    ) {
+        connection
+            .execute(
+                "INSERT INTO note_review_bindings (note_id, plan_id, start_date) VALUES (?1, ?2, ?3)",
+                params![note_id, plan_id, start_date],
+            )
+            .expect("insert review binding");
+
+        for (index, due_date) in dates.iter().enumerate() {
+            connection
+                .execute(
+                    "
+                      INSERT INTO review_tasks (
+                        note_id,
+                        plan_id,
+                        due_date,
+                        step_index,
+                        is_completed,
+                        completed_at
+                      )
+                      VALUES (?1, ?2, ?3, ?4, 0, NULL)
+                    ",
+                    params![note_id, plan_id, due_date, (index as i64) + 1],
+                )
+                .expect("insert review task");
+        }
     }
 
     fn ensure_test_resource_dirs(root: &Path) {
@@ -5076,6 +5292,154 @@ mod tests {
         assert_eq!(binding_count, 0);
         assert_eq!(task_count, 0);
         assert_eq!(dirty_marker, "[]");
+    }
+
+    #[test]
+    fn cleanup_expired_review_schedules_keeps_today_and_future_tasks() {
+        let mut connection = test_connection();
+        insert_basic_review_note(&connection);
+        ensure_review_feature_ready_internal(&mut connection).expect("ensure review ready");
+
+        let today = today_local_date_key();
+        let yesterday = Local::now()
+            .date_naive()
+            .checked_sub_days(chrono::Days::new(1))
+            .expect("yesterday")
+            .format("%Y-%m-%d")
+            .to_string();
+        let tomorrow = add_days(&today, 1).expect("tomorrow");
+        let plan_id = default_review_plan_id(&connection);
+        insert_review_binding_with_tasks(
+            &connection,
+            1,
+            plan_id,
+            &today,
+            &[yesterday, today.clone(), tomorrow.clone()],
+        );
+        update_review_schedule_dirty_note_id(&connection, 1, true).expect("mark dirty");
+
+        cleanup_expired_review_schedules(&connection, Some(1), &today).expect("cleanup expired");
+
+        let due_dates: Vec<String> = connection
+            .prepare("SELECT due_date FROM review_tasks WHERE note_id = 1 ORDER BY due_date ASC")
+            .expect("prepare due dates")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query due dates")
+            .map(|row| row.expect("read due date"))
+            .collect();
+        let binding_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM note_review_bindings WHERE note_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count binding");
+        let dirty_note_ids =
+            get_review_schedule_dirty_note_ids(&connection).expect("read dirty markers");
+
+        assert_eq!(due_dates, vec![today, tomorrow]);
+        assert_eq!(binding_count, 1);
+        assert!(dirty_note_ids.contains(&1));
+    }
+
+    #[test]
+    fn cleanup_expired_review_schedules_removes_binding_when_no_tasks_remain() {
+        let mut connection = test_connection();
+        insert_basic_review_note(&connection);
+        ensure_review_feature_ready_internal(&mut connection).expect("ensure review ready");
+
+        let today = today_local_date_key();
+        let yesterday = Local::now()
+            .date_naive()
+            .checked_sub_days(chrono::Days::new(1))
+            .expect("yesterday")
+            .format("%Y-%m-%d")
+            .to_string();
+        let plan_id = default_review_plan_id(&connection);
+        insert_review_binding_with_tasks(&connection, 1, plan_id, &today, &[yesterday]);
+        update_review_schedule_dirty_note_id(&connection, 1, true).expect("mark dirty");
+
+        cleanup_expired_review_schedules(&connection, Some(1), &today).expect("cleanup expired");
+
+        let task_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM review_tasks WHERE note_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count tasks");
+        let binding_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM note_review_bindings WHERE note_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count bindings");
+        let dirty_note_ids =
+            get_review_schedule_dirty_note_ids(&connection).expect("read dirty markers");
+
+        assert_eq!(task_count, 0);
+        assert_eq!(binding_count, 0);
+        assert!(!dirty_note_ids.contains(&1));
+    }
+
+    #[test]
+    fn get_note_review_schedule_cleans_empty_binding_and_returns_none() {
+        let mut connection = test_connection();
+        insert_basic_review_note(&connection);
+        ensure_review_feature_ready_internal(&mut connection).expect("ensure review ready");
+
+        let today = today_local_date_key();
+        let plan_id = default_review_plan_id(&connection);
+        connection
+            .execute(
+                "INSERT INTO note_review_bindings (note_id, plan_id, start_date) VALUES (?1, ?2, ?3)",
+                params![1, plan_id, today],
+            )
+            .expect("insert empty binding");
+
+        let schedule =
+            get_note_review_schedule_tx_internal(&mut connection, 1).expect("read schedule");
+        let binding_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM note_review_bindings WHERE note_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count bindings");
+
+        assert_eq!(schedule, None);
+        assert_eq!(binding_count, 0);
+    }
+
+    #[test]
+    fn get_note_review_schedule_returns_cleaned_valid_dates() {
+        let mut connection = test_connection();
+        insert_basic_review_note(&connection);
+        ensure_review_feature_ready_internal(&mut connection).expect("ensure review ready");
+
+        let today = today_local_date_key();
+        let yesterday = Local::now()
+            .date_naive()
+            .checked_sub_days(chrono::Days::new(1))
+            .expect("yesterday")
+            .format("%Y-%m-%d")
+            .to_string();
+        let tomorrow = add_days(&today, 1).expect("tomorrow");
+        let plan_id = default_review_plan_id(&connection);
+        insert_review_binding_with_tasks(
+            &connection,
+            1,
+            plan_id,
+            &today,
+            &[yesterday, today.clone(), tomorrow.clone()],
+        );
+
+        let schedule = get_note_review_schedule_tx_internal(&mut connection, 1)
+            .expect("read cleaned schedule")
+            .expect("schedule should remain");
+
+        assert_eq!(schedule.dates, vec![today, tomorrow]);
     }
 
     #[test]
