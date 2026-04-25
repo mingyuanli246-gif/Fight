@@ -102,9 +102,11 @@ function isRepositoryValidationMessage(message: string) {
     "封面路径不能为空。",
     "资源路径无效。",
     "目标笔记本不存在。",
+    "目标笔记本不能是当前笔记本。",
     "目标文件夹不存在。",
     "目标文件夹不属于当前笔记本。",
     "目标文件不存在。",
+    "目标文件不在文件夹中。",
     "目标插入位置无效。",
     "目标标签不存在。",
     "笔记本顺序数据不完整。",
@@ -254,6 +256,20 @@ async function moveNoteCommand(
     targetFolderId,
     targetIndex,
   });
+}
+
+async function moveFolderToNotebookTopCommand(
+  folderId: number,
+  targetNotebookId: number,
+) {
+  return invoke<Folder>("move_folder_to_notebook_top_tx", {
+    folderId,
+    targetNotebookId,
+  });
+}
+
+async function duplicateNoteAboveCommand(noteId: number) {
+  return invoke<Note>("duplicate_note_above_tx", { noteId });
 }
 
 async function addTagToNoteByNameCommand(noteId: number, name: string) {
@@ -748,6 +764,27 @@ export async function listFoldersByNotebook(notebookId: number) {
   });
 }
 
+export async function listAllFolders() {
+  return withRepositoryError("读取全部文件夹", async () => {
+    const database = await getNotebookDatabase();
+
+    return database.select<Folder[]>(
+      `
+        SELECT
+          id,
+          notebook_id AS notebookId,
+          parent_folder_id AS parentFolderId,
+          name,
+          sort_order AS sortOrder,
+          created_at AS createdAt,
+          updated_at AS updatedAt
+        FROM folders
+        ${FOLDER_ORDER}
+      `,
+    );
+  });
+}
+
 export async function createFolder(notebookId: number, name: string) {
   return withRepositoryError("创建文件夹", async () => {
     await getNotebookDatabase();
@@ -849,6 +886,23 @@ export async function moveNote(
 ) {
   return withRepositoryError("保存文件排序", async () => {
     return moveNoteCommand(noteId, targetFolderId, targetIndex);
+  });
+}
+
+export async function moveFolderToNotebookTop(
+  folderId: number,
+  targetNotebookId: number,
+) {
+  return withRepositoryError("移动文件夹", async () => {
+    await getNotebookDatabase();
+    return moveFolderToNotebookTopCommand(folderId, targetNotebookId);
+  });
+}
+
+export async function duplicateNoteAbove(noteId: number) {
+  return withRepositoryError("复制文件", async () => {
+    await getNotebookDatabase();
+    return duplicateNoteAboveCommand(noteId);
   });
 }
 

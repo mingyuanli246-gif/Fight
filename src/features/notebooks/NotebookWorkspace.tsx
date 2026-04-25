@@ -18,11 +18,14 @@ import {
   deleteFolder,
   deleteNote,
   deleteNotebook,
+  duplicateNoteAbove,
   getNoteById,
   initializeNotebookDatabase,
+  listAllFolders,
   listFoldersByNotebook,
   listNotesByNotebook,
   listNotebooks,
+  moveFolderToNotebookTop,
   moveNote,
   renameFolder,
   renameNote,
@@ -326,6 +329,39 @@ function applyLocalNoteMove(
   return sortNotesByFolderAndOrder(nextNotes);
 }
 
+function collectFolderSubtreeIds(rootFolderId: number, folders: Folder[]) {
+  const childFoldersByParent = new Map<number, Folder[]>();
+
+  for (const folder of folders) {
+    if (folder.parentFolderId === null) {
+      continue;
+    }
+
+    const current = childFoldersByParent.get(folder.parentFolderId) ?? [];
+    current.push(folder);
+    childFoldersByParent.set(folder.parentFolderId, current);
+  }
+
+  const subtreeIds = new Set<number>();
+  const pendingFolderIds = [rootFolderId];
+
+  while (pendingFolderIds.length > 0) {
+    const folderId = pendingFolderIds.pop();
+
+    if (folderId === undefined || subtreeIds.has(folderId)) {
+      continue;
+    }
+
+    subtreeIds.add(folderId);
+
+    for (const childFolder of childFoldersByParent.get(folderId) ?? []) {
+      pendingFolderIds.push(childFolder.id);
+    }
+  }
+
+  return subtreeIds;
+}
+
 function isEditableElement(target: EventTarget | null) {
   if (!(target instanceof HTMLElement)) {
     return false;
@@ -390,6 +426,7 @@ export const NotebookWorkspace = forwardRef<
 ) {
   const [notebooks, setNotebooks] = useState<Notebook[]>([]);
   const [folders, setFolders] = useState<Folder[]>([]);
+  const [allFolders, setAllFolders] = useState<Folder[]>([]);
   const [notes, setNotes] = useState<Note[]>([]);
   const [selectedNotebookId, setSelectedNotebookId] = useState<number | null>(
     null,
@@ -590,6 +627,7 @@ export const NotebookWorkspace = forwardRef<
       setHomeSelectedNotebookId(null);
       setSelectedEntity(null);
       setFolders([]);
+      setAllFolders([]);
       setNotes([]);
       return;
     }
@@ -603,9 +641,10 @@ export const NotebookWorkspace = forwardRef<
           ? selectedNotebookId
           : notebookList[0].id;
 
-    const [folderList, noteList] = await Promise.all([
+    const [folderList, noteList, allFolderList] = await Promise.all([
       listFoldersByNotebook(nextNotebookId),
       listNotesByNotebook(nextNotebookId),
+      listAllFolders(),
     ]);
 
     setSelectedNotebookId(nextNotebookId);
@@ -616,6 +655,7 @@ export const NotebookWorkspace = forwardRef<
         : nextNotebookId,
     );
     setFolders(folderList);
+    setAllFolders(allFolderList);
     setNotes(noteList);
     setSelectedEntity(
       resolveSelection(nextNotebookId, folderList, noteList, preferredSelection),
@@ -637,6 +677,7 @@ export const NotebookWorkspace = forwardRef<
       setInitializationError(getErrorMessage(error));
       setNotebooks([]);
       setFolders([]);
+      setAllFolders([]);
       setNotes([]);
       setSelectedNotebookId(null);
       setHomeSelectedNotebookId(null);
@@ -891,6 +932,94 @@ export const NotebookWorkspace = forwardRef<
         setIsTreeOrderSaving(false);
       }
     }
+  }
+
+  async function prepareNoteTreeMutation(noteId: number) {
+    if (selectedNote?.id !== noteId) {
+      return true;
+    }
+
+    return prepareLeave("section-change");
+  }
+
+  async function prepareFolderTreeMutation(folderId: number) {
+    if (selectedNote === null || selectedNote.folderId === null) {
+      return true;
+    }
+
+    const subtreeIds = collectFolderSubtreeIds(folderId, allFolders);
+
+    if (!subtreeIds.has(selectedNote.folderId)) {
+      return true;
+    }
+
+    return prepareLeave("section-change");
+  }
+
+  async function handleDuplicateNote(note: Note) {
+    if (selectedNotebookId === null) {
+      throw new Error("请先选择笔记本，再复制文件。");
+    }
+
+    if (!(await prepareNoteTreeMutation(note.id))) {
+      return;
+    }
+
+    const preferredSelection = selectedEntity;
+
+    return runMutation(async () => {
+      await duplicateNoteAbove(note.id);
+      await syncWorkspace(selectedNotebookId, preferredSelection);
+    });
+  }
+
+  async function handleMoveNoteToFolderTop(note: Note, targetFolder: Folder) {
+    if (selectedNotebookId === null) {
+      throw new Error("请先选择笔记本，再移动文件。");
+    }
+
+    if (!(await prepareNoteTreeMutation(note.id))) {
+      return;
+    }
+
+    const fallbackSelection =
+      note.folderId !== null && folders.some((folder) => folder.id === note.folderId)
+        ? ({ kind: "folder", id: note.folderId } as const)
+        : ({ kind: "notebook", id: selectedNotebookId } as const);
+
+    return runMutation(async () => {
+      await moveNote(note.id, targetFolder.id, 0);
+      setHighlightRequest(null);
+      setReturnDestination(null);
+      await syncWorkspace(selectedNotebookId, fallbackSelection);
+    });
+  }
+
+  async function handleMoveFolderToNotebookTop(
+    folder: Folder,
+    targetNotebook: Notebook,
+  ) {
+    if (selectedNotebookId === null) {
+      throw new Error("请先选择笔记本，再移动文件夹。");
+    }
+
+    if (folder.notebookId === targetNotebook.id) {
+      return;
+    }
+
+    if (!(await prepareFolderTreeMutation(folder.id))) {
+      return;
+    }
+
+    return runMutation(async () => {
+      await moveFolderToNotebookTop(folder.id, targetNotebook.id);
+      setHighlightRequest(null);
+      setReturnDestination(null);
+      await syncWorkspace(selectedNotebookId, {
+        kind: "notebook",
+        id: selectedNotebookId,
+      });
+    });
   }
 
   async function handleEnterNotebook(notebookId: number) {
@@ -1342,7 +1471,9 @@ export const NotebookWorkspace = forwardRef<
       ) : (
         <NotebookDetailWorkspace
           notebook={currentNotebook}
+          notebooks={sortedNotebooks}
           folders={folders}
+          allFolders={allFolders}
           notes={notes}
           selectedEntity={selectedEntity}
           selectedNote={selectedNote}
@@ -1380,6 +1511,15 @@ export const NotebookWorkspace = forwardRef<
               title: "确定删除这个文件吗",
             })
           }
+          onDuplicateNote={(note) => {
+            void handleDuplicateNote(note);
+          }}
+          onMoveNoteToFolderTop={(note, targetFolder) => {
+            void handleMoveNoteToFolderTop(note, targetFolder);
+          }}
+          onMoveFolderToNotebookTop={(folder, targetNotebook) => {
+            void handleMoveFolderToNotebookTop(folder, targetNotebook);
+          }}
           onReorderFolders={handleReorderFolders}
           onMoveNote={handleMoveNote}
           onToggleRightPanel={() =>

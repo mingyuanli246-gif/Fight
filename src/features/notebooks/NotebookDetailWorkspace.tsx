@@ -17,7 +17,9 @@ import styles from "./NotebookWorkspaceShell.module.css";
 
 interface NotebookDetailWorkspaceProps {
   notebook: Notebook | null;
+  notebooks: Notebook[];
   folders: Folder[];
+  allFolders: Folder[];
   notes: Note[];
   selectedEntity: SelectedEntity | null;
   selectedNote: Note | null;
@@ -39,6 +41,9 @@ interface NotebookDetailWorkspaceProps {
   onRenameNote: (id: number, title: string) => Promise<void>;
   onRequestDeleteFolder: (folder: Folder) => void;
   onRequestDeleteNote: (note: Note) => void;
+  onDuplicateNote: (note: Note) => void;
+  onMoveNoteToFolderTop: (note: Note, targetFolder: Folder) => void;
+  onMoveFolderToNotebookTop: (folder: Folder, targetNotebook: Notebook) => void;
   onReorderFolders: (orderedFolderIds: number[]) => Promise<void>;
   onMoveNote: (
     noteId: number,
@@ -55,7 +60,9 @@ interface NotebookDetailWorkspaceProps {
 
 export function NotebookDetailWorkspace({
   notebook,
+  notebooks,
   folders,
+  allFolders,
   notes,
   selectedEntity,
   selectedNote,
@@ -77,6 +84,9 @@ export function NotebookDetailWorkspace({
   onRenameNote,
   onRequestDeleteFolder,
   onRequestDeleteNote,
+  onDuplicateNote,
+  onMoveNoteToFolderTop,
+  onMoveFolderToNotebookTop,
   onReorderFolders,
   onMoveNote,
   onToggleRightPanel,
@@ -95,7 +105,9 @@ export function NotebookDetailWorkspace({
       >
         <NotebookTreePane
           notebook={notebook}
+          notebooks={notebooks}
           folders={folders}
+          allFolders={allFolders}
           notes={notes}
           selectedEntity={selectedEntity}
           activeFolderId={activeFolderId}
@@ -109,6 +121,9 @@ export function NotebookDetailWorkspace({
           onRenameNote={onRenameNote}
           onRequestDeleteFolder={onRequestDeleteFolder}
           onRequestDeleteNote={onRequestDeleteNote}
+          onDuplicateNote={onDuplicateNote}
+          onMoveNoteToFolderTop={onMoveNoteToFolderTop}
+          onMoveFolderToNotebookTop={onMoveFolderToNotebookTop}
           onReorderFolders={onReorderFolders}
           onMoveNote={onMoveNote}
         />

@@ -79,6 +79,7 @@ interface NotebookGridCardProps {
   isSelected: boolean;
   isEditing: boolean;
   disabled: boolean;
+  menuDisabled: boolean;
   dragEnabled: boolean;
   isDragging: boolean;
   showTailInsertionBand: boolean;
@@ -90,6 +91,7 @@ interface NotebookGridCardProps {
   onStartRename: (notebook: Notebook) => void;
   onOpenNotebook: (notebookId: number) => void;
   onOpenContextMenu: (event: ReactMouseEvent<HTMLElement>) => void;
+  onOpenActionMenu: (notebookId: number, anchorRect: DOMRect) => void;
   shouldSuppressNotebookOpen: () => boolean;
   onShellRefChange: (notebookId: number, node: HTMLDivElement | null) => void;
 }
@@ -113,6 +115,8 @@ const SORT_OPTIONS: Array<{ value: NotebookHomeSort; label: string }> = [
 const NOTEBOOK_ROW_GROUP_THRESHOLD = 18;
 const NOTEBOOK_VERTICAL_GAP_BUFFER = 34;
 const NOTEBOOK_EDGE_BUFFER = 12;
+const CONTEXT_MENU_MIN_WIDTH = 180;
+const CONTEXT_MENU_VIEWPORT_MARGIN = 12;
 
 function getNotebookFallbackBackground(notebook: Notebook) {
   const seed = (notebook.id + notebook.name.length) % COVER_FALLBACKS.length;
@@ -217,6 +221,7 @@ function NotebookGridCard({
   isSelected,
   isEditing,
   disabled,
+  menuDisabled,
   dragEnabled,
   isDragging,
   showTailInsertionBand,
@@ -228,6 +233,7 @@ function NotebookGridCard({
   onStartRename,
   onOpenNotebook,
   onOpenContextMenu,
+  onOpenActionMenu,
   shouldSuppressNotebookOpen,
   onShellRefChange,
 }: NotebookGridCardProps) {
@@ -288,31 +294,60 @@ function NotebookGridCard({
         {...attributes}
         {...listeners}
       >
-        <button
-          type="button"
-          className={styles.notebookCover}
-          onClick={() => {
-            if (shouldSuppressNotebookOpen()) {
-              return;
-            }
+        <div className={styles.notebookCover}>
+          <button
+            type="button"
+            className={styles.notebookCoverOpenButton}
+            onClick={() => {
+              if (shouldSuppressNotebookOpen()) {
+                return;
+              }
 
-            onOpenNotebook(notebook.id);
-          }}
-          disabled={disabled}
-        >
-          <ManagedResourceImage
-            resourcePath={notebook.coverImagePath}
-            alt={`${notebook.name} 封面`}
-            imageClassName={styles.notebookCoverImage}
-            fallbackClassName={styles.notebookCoverFallback}
-            loadingClassName={styles.notebookCoverFallback}
-            fallbackTitle=""
-            fallbackMessage=""
-            fallbackStyle={{
-              background: getNotebookFallbackBackground(notebook),
+              onOpenNotebook(notebook.id);
             }}
-          />
-        </button>
+            disabled={disabled}
+            aria-label={`打开笔记本：${notebook.name}`}
+          >
+            <ManagedResourceImage
+              resourcePath={notebook.coverImagePath}
+              alt={`${notebook.name} 封面`}
+              imageClassName={styles.notebookCoverImage}
+              fallbackClassName={styles.notebookCoverFallback}
+              loadingClassName={styles.notebookCoverFallback}
+              fallbackTitle=""
+              fallbackMessage=""
+              fallbackStyle={{
+                background: getNotebookFallbackBackground(notebook),
+              }}
+            />
+          </button>
+          <button
+            type="button"
+            className={styles.notebookCoverMenuButton}
+            aria-label={`${notebook.name} 操作菜单`}
+            disabled={menuDisabled || isEditing}
+            onPointerDown={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+            }}
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+
+              if (menuDisabled || isEditing) {
+                return;
+              }
+
+              onOpenActionMenu(notebook.id, event.currentTarget.getBoundingClientRect());
+            }}
+          >
+            <span className={styles.notebookCoverMenuDots} aria-hidden="true">
+              <span />
+              <span />
+              <span />
+            </span>
+          </button>
+        </div>
 
         <div className={styles.notebookCardMeta}>
           <div className={styles.notebookCardNameRow}>
@@ -712,6 +747,29 @@ export function NotebookHomeWorkspace({
     return performance.now() - lastDragCompletedAtRef.current < 180;
   }
 
+  function openNotebookContextMenu(notebookId: number, x: number, y: number) {
+    onSelectNotebook(notebookId);
+    setContextMenu({
+      notebookId,
+      x,
+      y,
+    });
+    setIsSortMenuOpen(false);
+  }
+
+  function openNotebookActionMenu(notebookId: number, anchorRect: DOMRect) {
+    const maxX =
+      window.innerWidth - CONTEXT_MENU_MIN_WIDTH - CONTEXT_MENU_VIEWPORT_MARGIN;
+    const preferredX = anchorRect.right - CONTEXT_MENU_MIN_WIDTH;
+    const x = Math.max(
+      CONTEXT_MENU_VIEWPORT_MARGIN,
+      Math.min(preferredX, maxX),
+    );
+    const y = Math.max(CONTEXT_MENU_VIEWPORT_MARGIN, anchorRect.bottom + 8);
+
+    openNotebookContextMenu(notebookId, x, y);
+  }
+
   function resolveDropIndicator(
     event: Pick<DragMoveEvent | DragOverEvent | DragEndEvent, "active" | "over">,
   ) {
@@ -995,6 +1053,7 @@ export function NotebookHomeWorkspace({
                 isSelected={notebook.id === selectedNotebookId}
                 isEditing={notebook.id === editingNotebookId}
                 disabled={disabled}
+                menuDisabled={disabled || dragBusy || isCreating}
                 dragEnabled={isDragEnabled && notebook.id !== editingNotebookId}
                 isDragging={notebook.id === activeNotebookId}
                 showTailInsertionBand={
@@ -1014,14 +1073,9 @@ export function NotebookHomeWorkspace({
                 onOpenNotebook={onOpenNotebook}
                 onOpenContextMenu={(event) => {
                   event.preventDefault();
-                  onSelectNotebook(notebook.id);
-                  setContextMenu({
-                    notebookId: notebook.id,
-                    x: event.clientX,
-                    y: event.clientY,
-                  });
-                  setIsSortMenuOpen(false);
+                  openNotebookContextMenu(notebook.id, event.clientX, event.clientY);
                 }}
+                onOpenActionMenu={openNotebookActionMenu}
                 shouldSuppressNotebookOpen={shouldSuppressNotebookOpen}
                 onShellRefChange={setNotebookShellRef}
               />

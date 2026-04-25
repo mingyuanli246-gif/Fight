@@ -590,6 +590,37 @@ fn fetch_top_level_folder_ids(
     Ok(folder_ids)
 }
 
+fn fetch_folder_sibling_ids(
+    connection: &Connection,
+    notebook_id: i64,
+    parent_folder_id: Option<i64>,
+) -> Result<Vec<i64>, String> {
+    let mut statement = connection
+        .prepare(
+            "
+              SELECT id
+              FROM folders
+              WHERE notebook_id = ?1
+                AND ((?2 IS NULL AND parent_folder_id IS NULL) OR parent_folder_id = ?2)
+              ORDER BY sort_order ASC, created_at ASC, id ASC
+            ",
+        )
+        .map_err(|error| to_command_error("读取文件夹顺序", error))?;
+
+    let rows = statement
+        .query_map(params![notebook_id, parent_folder_id], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(|error| to_command_error("读取文件夹顺序", error))?;
+
+    let mut folder_ids = Vec::new();
+    for row in rows {
+        folder_ids.push(row.map_err(|error| to_command_error("读取文件夹顺序", error))?);
+    }
+
+    Ok(folder_ids)
+}
+
 fn fetch_note_ids_by_folder(connection: &Connection, folder_id: i64) -> Result<Vec<i64>, String> {
     let mut statement = connection
         .prepare(
@@ -612,6 +643,32 @@ fn fetch_note_ids_by_folder(connection: &Connection, folder_id: i64) -> Result<V
     }
 
     Ok(note_ids)
+}
+
+fn fetch_note_titles_by_folder(
+    connection: &Connection,
+    folder_id: i64,
+) -> Result<BTreeSet<String>, String> {
+    let mut statement = connection
+        .prepare(
+            "
+              SELECT title
+              FROM notes
+              WHERE folder_id = ?1
+            ",
+        )
+        .map_err(|error| to_command_error("读取文件标题", error))?;
+
+    let rows = statement
+        .query_map([folder_id], |row| row.get::<_, String>(0))
+        .map_err(|error| to_command_error("读取文件标题", error))?;
+
+    let mut titles = BTreeSet::new();
+    for row in rows {
+        titles.insert(row.map_err(|error| to_command_error("读取文件标题", error))?);
+    }
+
+    Ok(titles)
 }
 
 fn assign_notebook_custom_sort_orders(
@@ -641,6 +698,26 @@ fn assign_folder_sort_orders(connection: &Connection, folder_ids: &[i64]) -> Res
                 "
                   UPDATE folders
                   SET parent_folder_id = NULL, sort_order = ?1
+                  WHERE id = ?2
+                ",
+                params![index as i64, folder_id],
+            )
+            .map_err(|error| to_command_error("写入文件夹顺序", error))?;
+    }
+
+    Ok(())
+}
+
+fn assign_folder_sibling_sort_orders(
+    connection: &Connection,
+    folder_ids: &[i64],
+) -> Result<(), String> {
+    for (index, folder_id) in folder_ids.iter().enumerate() {
+        connection
+            .execute(
+                "
+                  UPDATE folders
+                  SET sort_order = ?1
                   WHERE id = ?2
                 ",
                 params![index as i64, folder_id],
@@ -2073,7 +2150,7 @@ fn move_note_tx_internal(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| to_command_error("开启移动文件事务", error))?;
 
-    let (note_notebook_id, source_folder_id) = transaction
+    let (_source_notebook_id, source_folder_id) = transaction
         .query_row(
             "
               SELECT notebook_id, folder_id
@@ -2087,7 +2164,15 @@ fn move_note_tx_internal(
         .map_err(|error| to_command_error("读取目标文件", error))?
         .ok_or_else(|| "目标文件不存在。".to_string())?;
 
-    ensure_folder_belongs_to_notebook(&transaction, target_folder_id, note_notebook_id)?;
+    let target_notebook_id = transaction
+        .query_row(
+            "SELECT notebook_id FROM folders WHERE id = ?1 LIMIT 1",
+            [target_folder_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| to_command_error("读取目标文件夹", error))?
+        .ok_or_else(|| "目标文件夹不存在。".to_string())?;
 
     let mut target_note_ids = fetch_note_ids_by_folder(&transaction, target_folder_id)?;
 
@@ -2113,10 +2198,10 @@ fn move_note_tx_internal(
             .execute(
                 "
                   UPDATE notes
-                  SET folder_id = ?1
-                  WHERE id = ?2
+                  SET notebook_id = ?1, folder_id = ?2
+                  WHERE id = ?3
                 ",
-                params![target_folder_id, note_id],
+                params![target_notebook_id, target_folder_id, note_id],
             )
             .map_err(|error| to_command_error("更新文件归属", error))?;
 
@@ -2129,6 +2214,195 @@ fn move_note_tx_internal(
         .map_err(|error| to_command_error("提交移动文件事务", error))?;
 
     fetch_note_by_id(connection, note_id)
+}
+
+fn move_folder_to_notebook_top_tx_internal(
+    connection: &mut Connection,
+    folder_id: i64,
+    target_notebook_id: i64,
+) -> Result<FolderRecord, String> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| to_command_error("开启移动文件夹事务", error))?;
+
+    let (source_notebook_id, source_parent_folder_id) = transaction
+        .query_row(
+            "
+              SELECT notebook_id, parent_folder_id
+              FROM folders
+              WHERE id = ?1
+            ",
+            [folder_id],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?)),
+        )
+        .optional()
+        .map_err(|error| to_command_error("读取目标文件夹", error))?
+        .ok_or_else(|| "目标文件夹不存在。".to_string())?;
+
+    if source_notebook_id == target_notebook_id {
+        return Err("目标笔记本不能是当前笔记本。".to_string());
+    }
+
+    if !notebook_exists(&transaction, target_notebook_id)? {
+        return Err("目标笔记本不存在。".to_string());
+    }
+
+    let mut source_sibling_ids = fetch_folder_sibling_ids(
+        &transaction,
+        source_notebook_id,
+        source_parent_folder_id,
+    )?;
+    source_sibling_ids.retain(|current_id| *current_id != folder_id);
+    assign_folder_sibling_sort_orders(&transaction, &source_sibling_ids)?;
+
+    transaction
+        .execute(
+            "
+              UPDATE folders
+              SET sort_order = sort_order + 1
+              WHERE notebook_id = ?1 AND parent_folder_id IS NULL
+            ",
+            [target_notebook_id],
+        )
+        .map_err(|error| to_command_error("调整目标笔记本文件夹排序", error))?;
+
+    transaction
+        .execute(
+            "
+              WITH RECURSIVE folder_tree(id) AS (
+                SELECT id
+                FROM folders
+                WHERE id = ?1
+                UNION ALL
+                SELECT child.id
+                FROM folders AS child
+                INNER JOIN folder_tree ON child.parent_folder_id = folder_tree.id
+              )
+              UPDATE folders
+              SET notebook_id = ?2
+              WHERE id IN (SELECT id FROM folder_tree)
+            ",
+            params![folder_id, target_notebook_id],
+        )
+        .map_err(|error| to_command_error("更新文件夹归属", error))?;
+
+    transaction
+        .execute(
+            "
+              UPDATE folders
+              SET parent_folder_id = NULL, sort_order = 0
+              WHERE id = ?1
+            ",
+            [folder_id],
+        )
+        .map_err(|error| to_command_error("更新文件夹位置", error))?;
+
+    transaction
+        .execute(
+            "
+              WITH RECURSIVE folder_tree(id) AS (
+                SELECT id
+                FROM folders
+                WHERE id = ?1
+                UNION ALL
+                SELECT child.id
+                FROM folders AS child
+                INNER JOIN folder_tree ON child.parent_folder_id = folder_tree.id
+              )
+              UPDATE notes
+              SET notebook_id = ?2
+              WHERE folder_id IN (SELECT id FROM folder_tree)
+            ",
+            params![folder_id, target_notebook_id],
+        )
+        .map_err(|error| to_command_error("更新文件归属", error))?;
+
+    transaction
+        .commit()
+        .map_err(|error| to_command_error("提交移动文件夹事务", error))?;
+
+    fetch_folder_by_id(connection, folder_id)
+}
+
+fn duplicate_note_above_tx_internal(
+    connection: &mut Connection,
+    note_id: i64,
+) -> Result<NoteRecord, String> {
+    ensure_note_search_ready_internal(connection)?;
+
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| to_command_error("开启复制文件事务", error))?;
+
+    let (notebook_id, folder_id, sort_order, title, content_plaintext) = transaction
+        .query_row(
+            "
+              SELECT notebook_id, folder_id, sort_order, title, content_plaintext
+              FROM notes
+              WHERE id = ?1
+            ",
+            [note_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| to_command_error("读取目标文件", error))?
+        .ok_or_else(|| "目标文件不存在。".to_string())?;
+
+    let folder_id = folder_id.ok_or_else(|| "目标文件不在文件夹中。".to_string())?;
+    ensure_folder_belongs_to_notebook(&transaction, folder_id, notebook_id)?;
+
+    let existing_titles = fetch_note_titles_by_folder(&transaction, folder_id)?;
+    let duplicate_title = create_unique_name(&format!("{title} 副本"), &existing_titles);
+
+    transaction
+        .execute(
+            "
+              UPDATE notes
+              SET sort_order = sort_order + 1
+              WHERE folder_id = ?1 AND sort_order >= ?2
+            ",
+            params![folder_id, sort_order],
+        )
+        .map_err(|error| to_command_error("调整文件排序", error))?;
+
+    transaction
+        .execute(
+            "
+              INSERT INTO notes (notebook_id, folder_id, sort_order, title, content_plaintext)
+              VALUES (?1, ?2, ?3, ?4, ?5)
+            ",
+            params![
+                notebook_id,
+                folder_id,
+                sort_order,
+                &duplicate_title,
+                content_plaintext.as_deref()
+            ],
+        )
+        .map_err(|error| to_command_error("复制文件", error))?;
+
+    let duplicate_note_id = transaction.last_insert_rowid();
+    let stored_content = content_plaintext.unwrap_or_default();
+    upsert_note_search_entry(
+        &transaction,
+        duplicate_note_id,
+        &duplicate_title,
+        &stored_content,
+    )?;
+
+    transaction
+        .commit()
+        .map_err(|error| to_command_error("提交复制文件事务", error))?;
+
+    fetch_note_by_id(connection, duplicate_note_id)
 }
 
 fn fetch_review_plan_with_steps(
@@ -3595,6 +3869,22 @@ pub fn move_note_tx(
 }
 
 #[tauri::command]
+pub fn move_folder_to_notebook_top_tx(
+    app: AppHandle,
+    folder_id: i64,
+    target_notebook_id: i64,
+) -> Result<FolderRecord, String> {
+    let mut connection = open_database_connection(&app)?;
+    move_folder_to_notebook_top_tx_internal(&mut connection, folder_id, target_notebook_id)
+}
+
+#[tauri::command]
+pub fn duplicate_note_above_tx(app: AppHandle, note_id: i64) -> Result<NoteRecord, String> {
+    let mut connection = open_database_connection(&app)?;
+    duplicate_note_above_tx_internal(&mut connection, note_id)
+}
+
+#[tauri::command]
 pub fn ensure_review_feature_ready_tx(app: AppHandle) -> Result<(), String> {
     let mut connection = open_database_connection(&app)?;
     ensure_review_feature_ready_internal(&mut connection)
@@ -3842,12 +4132,14 @@ mod tests {
         collect_managed_resource_paths_for_notebook, create_folder_tx_internal,
         create_note_tx_internal, create_notebook_tx_internal, create_review_plan_tx_internal,
         delete_folder_tx_internal, delete_note_tx_internal, delete_notebook_tx_internal,
-        delete_review_plan_tx_internal, ensure_app_meta_table, ensure_note_search_ready_internal,
-        ensure_note_search_table, ensure_notebook_tree_constraints_tx_internal,
+        delete_review_plan_tx_internal, duplicate_note_above_tx_internal, ensure_app_meta_table,
+        ensure_note_search_ready_internal, ensure_note_search_table,
+        ensure_notebook_tree_constraints_tx_internal,
         ensure_review_feature_ready_internal, extract_indexable_plain_text,
         extract_note_image_resource_paths, get_note_review_schedule_tx_internal,
-        get_review_schedule_dirty_note_ids, move_note_tx_internal, normalize_tag_color,
-        rebuild_note_search_index_internal, rename_review_plan_tx_internal,
+        get_review_schedule_dirty_note_ids, move_folder_to_notebook_top_tx_internal,
+        move_note_tx_internal, normalize_tag_color, rebuild_note_search_index_internal,
+        rename_review_plan_tx_internal,
         reorder_folders_tx_internal, reorder_notebooks_tx_internal,
         save_note_content_with_tags_tx_internal, save_note_review_schedule_tx_internal,
         set_note_review_schedule_dirty_tx_internal, set_review_task_completed_tx_internal,
@@ -4895,6 +5187,300 @@ mod tests {
 
         assert_eq!(folder_a_rows, vec![(1, 0)]);
         assert_eq!(folder_b_rows, vec![(2, 0)]);
+    }
+
+    #[test]
+    fn move_note_path_can_move_across_notebooks() {
+        let mut connection = test_connection();
+        connection
+            .execute(
+                "INSERT INTO notebooks (name) VALUES ('测试本 A'), ('测试本 B')",
+                [],
+            )
+            .expect("insert notebooks");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '源文件夹', 0), (2, '目标文件夹', 0)",
+                [],
+            )
+            .expect("insert folders");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, sort_order, title, content_plaintext) VALUES (1, 1, 0, '文件一', NULL), (1, 1, 1, '文件二', NULL), (2, 2, 0, '目标已有文件', NULL)",
+                [],
+            )
+            .expect("insert notes");
+
+        let moved_note = move_note_tx_internal(&mut connection, 2, 2, 0).expect("move note");
+        assert_eq!(moved_note.notebook_id, 2);
+        assert_eq!(moved_note.folder_id, Some(2));
+        assert_eq!(moved_note.sort_order, 0);
+
+        let source_rows = connection
+            .prepare("SELECT id, sort_order FROM notes WHERE folder_id = 1 ORDER BY sort_order ASC, id ASC")
+            .expect("prepare source notes")
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))
+            .expect("query source notes")
+            .map(|row| row.expect("map source note"))
+            .collect::<Vec<_>>();
+        let target_rows = connection
+            .prepare("SELECT id, notebook_id, sort_order FROM notes WHERE folder_id = 2 ORDER BY sort_order ASC, id ASC")
+            .expect("prepare target notes")
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .expect("query target notes")
+            .map(|row| row.expect("map target note"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(source_rows, vec![(1, 0)]);
+        assert_eq!(target_rows, vec![(2, 2, 0), (3, 2, 1)]);
+    }
+
+    #[test]
+    fn move_folder_path_moves_subtree_to_target_notebook_top() {
+        let mut connection = test_connection();
+        connection
+            .execute(
+                "INSERT INTO notebooks (name) VALUES ('测试本 A'), ('测试本 B')",
+                [],
+            )
+            .expect("insert notebooks");
+        connection
+            .execute(
+                "
+                INSERT INTO folders (notebook_id, parent_folder_id, name, sort_order)
+                VALUES
+                  (1, NULL, '源前置文件夹', 0),
+                  (1, NULL, '根文件夹', 1),
+                  (1, 2, '子文件夹', 0),
+                  (1, NULL, '源后置文件夹', 2),
+                  (2, NULL, '目标已有文件夹', 0)
+                ",
+                [],
+            )
+            .expect("insert folders");
+        connection
+            .execute(
+                "
+                INSERT INTO notes (notebook_id, folder_id, sort_order, title, content_plaintext)
+                VALUES
+                  (1, 2, 0, '根文件', NULL),
+                  (1, 3, 0, '子文件', NULL),
+                  (2, 5, 0, '目标文件', NULL)
+                ",
+                [],
+            )
+            .expect("insert notes");
+
+        let moved_folder =
+            move_folder_to_notebook_top_tx_internal(&mut connection, 2, 2).expect("move folder");
+
+        assert_eq!(moved_folder.notebook_id, 2);
+        assert_eq!(moved_folder.parent_folder_id, None);
+        assert_eq!(moved_folder.sort_order, 0);
+
+        let source_folder_rows = connection
+            .prepare(
+                "SELECT id, sort_order FROM folders WHERE notebook_id = 1 AND parent_folder_id IS NULL ORDER BY sort_order ASC, id ASC",
+            )
+            .expect("prepare source folders")
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))
+            .expect("query source folders")
+            .map(|row| row.expect("map source folder"))
+            .collect::<Vec<_>>();
+        let target_folder_rows = connection
+            .prepare(
+                "SELECT id, parent_folder_id, sort_order FROM folders WHERE notebook_id = 2 ORDER BY sort_order ASC, id ASC",
+            )
+            .expect("prepare target folders")
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .expect("query target folders")
+            .map(|row| row.expect("map target folder"))
+            .collect::<Vec<_>>();
+        let moved_note_rows = connection
+            .prepare(
+                "SELECT id, notebook_id, folder_id FROM notes WHERE id IN (1, 2) ORDER BY id ASC",
+            )
+            .expect("prepare moved notes")
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            })
+            .expect("query moved notes")
+            .map(|row| row.expect("map moved note"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(source_folder_rows, vec![(1, 0), (4, 1)]);
+        assert_eq!(
+            target_folder_rows,
+            vec![(2, None, 0), (3, Some(2), 0), (5, None, 1)]
+        );
+        assert_eq!(moved_note_rows, vec![(1, 2, Some(2)), (2, 2, Some(3))]);
+    }
+
+    #[test]
+    fn move_folder_path_rejects_current_notebook() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '文件夹', 0)",
+                [],
+            )
+            .expect("insert folder");
+
+        let error = move_folder_to_notebook_top_tx_internal(&mut connection, 1, 1)
+            .expect_err("same notebook should fail");
+
+        assert_eq!(error, "目标笔记本不能是当前笔记本。");
+    }
+
+    #[test]
+    fn duplicate_note_above_copies_rich_content_and_skips_file_relations() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        let rich_content = concat!(
+            "<p data-block-id=\"blk_a\">",
+            "<span data-note-tag=\"true\" data-note-tag-id=\"1\" data-note-tag-color=\"#FF3B30\">重点</span>",
+            "公式 <span data-note-math=\"inline\" data-latex=\"E=mc^2\"></span>",
+            "</p>",
+            "<img data-note-image=\"true\" data-resource-path=\"resources/images/demo.png\" alt=\"流程图\" />",
+        );
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, sort_order, title, content_plaintext) VALUES (1, 1, 0, '前置文件', NULL), (1, 1, 1, '数学笔记', ?1), (1, 1, 2, '数学笔记 副本', NULL)",
+                [rich_content],
+            )
+            .expect("insert notes");
+        connection
+            .execute(
+                "INSERT INTO tags (name, color) VALUES ('重点', '#FF3B30')",
+                [],
+            )
+            .expect("insert tag");
+        connection
+            .execute("INSERT INTO note_tags (note_id, tag_id) VALUES (2, 1)", [])
+            .expect("insert note tag");
+        connection
+            .execute(
+                "INSERT INTO note_tag_occurrences (note_id, tag_id, block_id, start_offset, end_offset, node_type, snippet_text, sort_order) VALUES (2, 1, 'blk_a', 0, 2, 'paragraph', '重点', 0)",
+                [],
+            )
+            .expect("insert tag occurrence");
+        connection
+            .execute("INSERT INTO review_plans (name) VALUES ('测试计划')", [])
+            .expect("insert review plan");
+        connection
+            .execute(
+                "INSERT INTO note_review_bindings (note_id, plan_id, start_date) VALUES (2, 1, '2026-04-24')",
+                [],
+            )
+            .expect("insert review binding");
+        connection
+            .execute(
+                "INSERT INTO review_tasks (note_id, plan_id, due_date, step_index) VALUES (2, 1, '2026-04-24', 1)",
+                [],
+            )
+            .expect("insert review task");
+
+        let duplicate =
+            duplicate_note_above_tx_internal(&mut connection, 2).expect("duplicate note");
+
+        assert_eq!(duplicate.title, "数学笔记 副本 2");
+        assert_eq!(duplicate.folder_id, Some(1));
+        assert_eq!(duplicate.sort_order, 1);
+        assert_eq!(duplicate.content_plaintext.as_deref(), Some(rich_content));
+
+        let ordered_rows = connection
+            .prepare("SELECT id, title, sort_order FROM notes WHERE folder_id = 1 ORDER BY sort_order ASC, id ASC")
+            .expect("prepare ordered notes")
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .expect("query ordered notes")
+            .map(|row| row.expect("map ordered note"))
+            .collect::<Vec<_>>();
+        let search_row: (String, String) = connection
+            .query_row(
+                "SELECT title, body_plaintext FROM note_search WHERE rowid = ?1",
+                [duplicate.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read duplicate search row");
+        let copied_note_tags: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM note_tags WHERE note_id = ?1",
+                [duplicate.id],
+                |row| row.get(0),
+            )
+            .expect("count duplicate note tags");
+        let copied_occurrences: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM note_tag_occurrences WHERE note_id = ?1",
+                [duplicate.id],
+                |row| row.get(0),
+            )
+            .expect("count duplicate occurrences");
+        let copied_review_bindings: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM note_review_bindings WHERE note_id = ?1",
+                [duplicate.id],
+                |row| row.get(0),
+            )
+            .expect("count duplicate review bindings");
+        let copied_review_tasks: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM review_tasks WHERE note_id = ?1",
+                [duplicate.id],
+                |row| row.get(0),
+            )
+            .expect("count duplicate review tasks");
+
+        assert_eq!(
+            ordered_rows,
+            vec![
+                (1, "前置文件".to_string(), 0),
+                (4, "数学笔记 副本 2".to_string(), 1),
+                (2, "数学笔记".to_string(), 2),
+                (3, "数学笔记 副本".to_string(), 3),
+            ]
+        );
+        assert_eq!(search_row.0, "数学笔记 副本 2");
+        assert!(search_row.1.contains("重点公式"));
+        assert!(search_row.1.contains("E=mc^2"));
+        assert!(search_row.1.contains("流程图"));
+        assert_eq!(copied_note_tags, 0);
+        assert_eq!(copied_occurrences, 0);
+        assert_eq!(copied_review_bindings, 0);
+        assert_eq!(copied_review_tasks, 0);
     }
 
     #[test]

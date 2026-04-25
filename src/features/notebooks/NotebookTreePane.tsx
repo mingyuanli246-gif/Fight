@@ -33,6 +33,8 @@ import styles from "./NotebookWorkspaceShell.module.css";
 const AUTO_SCROLL_ACTIVATE_DELAY_MS = 180;
 const AUTO_SCROLL_EDGE_THRESHOLD_PX = 40;
 const AUTO_SCROLL_SPEED_PX_PER_SECOND = 260;
+const TREE_CONTEXT_MENU_MIN_WIDTH = 180;
+const TREE_CONTEXT_MENU_VIEWPORT_MARGIN = 12;
 
 interface RenameState {
   kind: "folder" | "note";
@@ -49,7 +51,9 @@ interface ContextMenuState {
 
 interface NotebookTreePaneProps {
   notebook: Notebook | null;
+  notebooks: Notebook[];
   folders: Folder[];
+  allFolders: Folder[];
   notes: Note[];
   selectedEntity: SelectedEntity | null;
   activeFolderId: number | null;
@@ -63,6 +67,9 @@ interface NotebookTreePaneProps {
   onRenameNote: (id: number, title: string) => Promise<void>;
   onRequestDeleteFolder: (folder: Folder) => void;
   onRequestDeleteNote: (note: Note) => void;
+  onDuplicateNote: (note: Note) => void;
+  onMoveNoteToFolderTop: (note: Note, targetFolder: Folder) => void;
+  onMoveFolderToNotebookTop: (folder: Folder, targetNotebook: Notebook) => void;
   onReorderFolders: (orderedFolderIds: number[]) => Promise<void>;
   onMoveNote: (
     noteId: number,
@@ -139,6 +146,7 @@ interface TreeFolderRowProps {
   isExpanded: boolean;
   isActive: boolean;
   isEditing: boolean;
+  isMenuOpen: boolean;
   disabled: boolean;
   dragEnabled: boolean;
   isDragging: boolean;
@@ -150,6 +158,7 @@ interface TreeFolderRowProps {
   onSelectFolder: () => void;
   onToggleFolder: () => void;
   onOpenContextMenu: (event: ReactMouseEvent<HTMLElement>) => void;
+  onOpenActionMenu: (anchorRect: DOMRect) => void;
   onStartRename: () => void;
 }
 
@@ -157,6 +166,7 @@ interface TreeNoteRowProps {
   note: Note;
   isActive: boolean;
   isEditing: boolean;
+  isMenuOpen: boolean;
   disabled: boolean;
   dragEnabled: boolean;
   isDragging: boolean;
@@ -167,6 +177,7 @@ interface TreeNoteRowProps {
   onCancelRename: () => void;
   onSelectNote: () => void;
   onOpenContextMenu: (event: ReactMouseEvent<HTMLElement>) => void;
+  onOpenActionMenu: (anchorRect: DOMRect) => void;
   onStartRename: () => void;
 }
 
@@ -259,12 +270,52 @@ function TreeDragPreview({
   );
 }
 
+function TreeItemActionButton({
+  label,
+  disabled,
+  onOpen,
+}: {
+  label: string;
+  disabled: boolean;
+  onOpen: (anchorRect: DOMRect) => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={styles.treeItemActionButton}
+      aria-label={label}
+      disabled={disabled}
+      onPointerDown={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      }}
+      onClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+
+        if (disabled) {
+          return;
+        }
+
+        onOpen(event.currentTarget.getBoundingClientRect());
+      }}
+    >
+      <span className={styles.treeItemActionDots} aria-hidden="true">
+        <span />
+        <span />
+        <span />
+      </span>
+    </button>
+  );
+}
+
 function TreeFolderRow({
   folder,
   noteCount,
   isExpanded,
   isActive,
   isEditing,
+  isMenuOpen,
   disabled,
   dragEnabled,
   isDragging,
@@ -276,6 +327,7 @@ function TreeFolderRow({
   onSelectFolder,
   onToggleFolder,
   onOpenContextMenu,
+  onOpenActionMenu,
   onStartRename,
 }: TreeFolderRowProps) {
   const { attributes, listeners, setNodeRef: setDraggableRef } = useDraggable({
@@ -344,35 +396,46 @@ function TreeFolderRow({
           </span>
         </div>
       ) : (
-        <button
-          ref={combineNodeRefs(setDraggableRef, setDroppableRef)}
-          type="button"
-          data-tree-drop-type="folder-row"
-          data-tree-folder-id={folder.id}
-          className={`${styles.treeRow} ${
-            isActive ? styles.treeRowActive : ""
-          } ${isDragging ? styles.treeDragSource : ""} ${
-            dropIndicatorSide === "before" ? styles.treeDropBefore : ""
-          } ${dropIndicatorSide === "after" ? styles.treeDropAfter : ""}`}
-          onContextMenu={onOpenContextMenu}
-          onClick={onSelectFolder}
-          disabled={disabled}
-          {...attributes}
-          {...listeners}
+        <div
+          className={`${styles.treeItemActionFrame} ${
+            isActive ? styles.treeItemActionFrameActive : ""
+          } ${isMenuOpen ? styles.treeItemActionFrameMenuOpen : ""}`}
         >
-          <span className={styles.treeLabelWrap}>
-            <span
-              className={styles.treeLabel}
-              onDoubleClick={(event) => {
-                event.stopPropagation();
-                onStartRename();
-              }}
-            >
-              {folder.name}
+          <button
+            ref={combineNodeRefs(setDraggableRef, setDroppableRef)}
+            type="button"
+            data-tree-drop-type="folder-row"
+            data-tree-folder-id={folder.id}
+            className={`${styles.treeRow} ${
+              isActive ? styles.treeRowActive : ""
+            } ${isDragging ? styles.treeDragSource : ""} ${
+              dropIndicatorSide === "before" ? styles.treeDropBefore : ""
+            } ${dropIndicatorSide === "after" ? styles.treeDropAfter : ""}`}
+            onContextMenu={onOpenContextMenu}
+            onClick={onSelectFolder}
+            disabled={disabled}
+            {...attributes}
+            {...listeners}
+          >
+            <span className={styles.treeLabelWrap}>
+              <span
+                className={styles.treeLabel}
+                onDoubleClick={(event) => {
+                  event.stopPropagation();
+                  onStartRename();
+                }}
+              >
+                {folder.name}
+              </span>
+              <span className={styles.treeMeta}>{noteCount} 个文件</span>
             </span>
-            <span className={styles.treeMeta}>{noteCount} 个文件</span>
-          </span>
-        </button>
+          </button>
+          <TreeItemActionButton
+            label={`${folder.name} 操作菜单`}
+            disabled={disabled}
+            onOpen={onOpenActionMenu}
+          />
+        </div>
       )}
     </div>
   );
@@ -382,6 +445,7 @@ function TreeNoteRow({
   note,
   isActive,
   isEditing,
+  isMenuOpen,
   disabled,
   dragEnabled,
   isDragging,
@@ -392,6 +456,7 @@ function TreeNoteRow({
   onCancelRename,
   onSelectNote,
   onOpenContextMenu,
+  onOpenActionMenu,
   onStartRename,
 }: TreeNoteRowProps) {
   const { attributes, listeners, setNodeRef: setDraggableRef } = useDraggable({
@@ -446,35 +511,46 @@ function TreeNoteRow({
   }
 
   return (
-    <button
-      ref={combineNodeRefs(setDraggableRef, setDroppableRef)}
-      type="button"
-      data-tree-drop-type="note-row"
-      data-tree-note-id={note.id}
-      data-tree-folder-id={note.folderId ?? undefined}
-      className={`${styles.treeNoteRow} ${
-        isActive ? styles.treeNoteRowActive : ""
-      } ${isDragging ? styles.treeDragSource : ""} ${
-        dropIndicatorSide === "before" ? styles.treeDropBefore : ""
-      } ${dropIndicatorSide === "after" ? styles.treeDropAfter : ""}`}
-      onContextMenu={onOpenContextMenu}
-      onClick={onSelectNote}
-      disabled={disabled}
-      {...attributes}
-      {...listeners}
+    <div
+      className={`${styles.treeItemActionFrame} ${
+        isActive ? styles.treeItemActionFrameActive : ""
+      } ${isMenuOpen ? styles.treeItemActionFrameMenuOpen : ""}`}
     >
-      <span className={styles.treeLabelWrap}>
-        <span
-          className={styles.treeLabel}
-          onDoubleClick={(event) => {
-            event.stopPropagation();
-            onStartRename();
-          }}
-        >
-          {note.title}
+      <button
+        ref={combineNodeRefs(setDraggableRef, setDroppableRef)}
+        type="button"
+        data-tree-drop-type="note-row"
+        data-tree-note-id={note.id}
+        data-tree-folder-id={note.folderId ?? undefined}
+        className={`${styles.treeNoteRow} ${
+          isActive ? styles.treeNoteRowActive : ""
+        } ${isDragging ? styles.treeDragSource : ""} ${
+          dropIndicatorSide === "before" ? styles.treeDropBefore : ""
+        } ${dropIndicatorSide === "after" ? styles.treeDropAfter : ""}`}
+        onContextMenu={onOpenContextMenu}
+        onClick={onSelectNote}
+        disabled={disabled}
+        {...attributes}
+        {...listeners}
+      >
+        <span className={styles.treeLabelWrap}>
+          <span
+            className={styles.treeLabel}
+            onDoubleClick={(event) => {
+              event.stopPropagation();
+              onStartRename();
+            }}
+          >
+            {note.title}
+          </span>
         </span>
-      </span>
-    </button>
+      </button>
+      <TreeItemActionButton
+        label={`${note.title} 操作菜单`}
+        disabled={disabled}
+        onOpen={onOpenActionMenu}
+      />
+    </div>
   );
 }
 
@@ -544,7 +620,9 @@ function EmptyFolderDropZone({
 
 export function NotebookTreePane({
   notebook,
+  notebooks,
   folders,
+  allFolders,
   notes,
   selectedEntity,
   activeFolderId,
@@ -558,6 +636,9 @@ export function NotebookTreePane({
   onRenameNote,
   onRequestDeleteFolder,
   onRequestDeleteNote,
+  onDuplicateNote,
+  onMoveNoteToFolderTop,
+  onMoveFolderToNotebookTop,
   onReorderFolders,
   onMoveNote,
 }: NotebookTreePaneProps) {
@@ -1006,6 +1087,21 @@ export function NotebookTreePane({
       x: position.x,
       y: position.y,
     });
+  }
+
+  function openContextMenuFromAnchor(
+    item: { kind: "folder"; value: Folder } | { kind: "note"; value: Note },
+    anchorRect: DOMRect,
+  ) {
+    const maxX =
+      window.innerWidth - TREE_CONTEXT_MENU_MIN_WIDTH - TREE_CONTEXT_MENU_VIEWPORT_MARGIN;
+    const x = Math.max(
+      TREE_CONTEXT_MENU_VIEWPORT_MARGIN,
+      Math.min(anchorRect.right - TREE_CONTEXT_MENU_MIN_WIDTH, maxX),
+    );
+    const y = Math.max(TREE_CONTEXT_MENU_VIEWPORT_MARGIN, anchorRect.bottom + 4);
+
+    openContextMenu(item, { x, y });
   }
 
   async function submitRename() {
@@ -1722,6 +1818,8 @@ export function NotebookTreePane({
                   selectedEntity?.kind === "folder" && selectedEntity.id === folder.id;
                 const isEditing =
                   renameState?.kind === "folder" && renameState.id === folder.id;
+                const isMenuOpen =
+                  contextMenu?.kind === "folder" && contextMenu.id === folder.id;
                 const emptyDropActive =
                   activeDragItem?.type === "note" &&
                   folderNotes.length === 0 &&
@@ -1744,6 +1842,7 @@ export function NotebookTreePane({
                       isExpanded={isExpanded}
                       isActive={isActive}
                       isEditing={isEditing}
+                      isMenuOpen={isMenuOpen}
                       disabled={disabled}
                       dragEnabled={dragEnabled && !isEditing}
                       isDragging={
@@ -1776,6 +1875,12 @@ export function NotebookTreePane({
                           { x: event.clientX, y: event.clientY },
                         );
                       }}
+                      onOpenActionMenu={(anchorRect) => {
+                        openContextMenuFromAnchor(
+                          { kind: "folder", value: folder },
+                          anchorRect,
+                        );
+                      }}
                       onStartRename={() =>
                         startRename("folder", folder.id, folder.name)
                       }
@@ -1790,6 +1895,8 @@ export function NotebookTreePane({
                               selectedEntity.id === note.id;
                             const isNoteEditing =
                               renameState?.kind === "note" && renameState.id === note.id;
+                            const isNoteMenuOpen =
+                              contextMenu?.kind === "note" && contextMenu.id === note.id;
                             const isLastNote = noteIndex === folderNotes.length - 1;
 
                             return (
@@ -1806,6 +1913,7 @@ export function NotebookTreePane({
                                   note={note}
                                   isActive={isNoteActive}
                                   isEditing={isNoteEditing}
+                                  isMenuOpen={isNoteMenuOpen}
                                   disabled={disabled}
                                   dragEnabled={dragEnabled && !isNoteEditing}
                                   isDragging={
@@ -1835,6 +1943,12 @@ export function NotebookTreePane({
                                     openContextMenu(
                                       { kind: "note", value: note },
                                       { x: event.clientX, y: event.clientY },
+                                    );
+                                  }}
+                                  onOpenActionMenu={(anchorRect) => {
+                                    openContextMenuFromAnchor(
+                                      { kind: "note", value: note },
+                                      anchorRect,
                                     );
                                   }}
                                   onStartRename={() =>
@@ -1892,22 +2006,36 @@ export function NotebookTreePane({
       </div>
       {contextMenuFolder ? (
         <ItemActionMenu
+          kind="folder"
           x={contextMenuX}
           y={contextMenuY}
+          notebooks={notebooks}
+          sourceNotebookId={contextMenuFolder.notebookId}
           onClose={() => setContextMenu(null)}
           onRename={() =>
             startRename("folder", contextMenuFolder.id, contextMenuFolder.name)
+          }
+          onMoveToNotebook={(targetNotebook) =>
+            onMoveFolderToNotebookTop(contextMenuFolder, targetNotebook)
           }
           onDelete={() => onRequestDeleteFolder(contextMenuFolder)}
         />
       ) : null}
       {contextMenuNote ? (
         <ItemActionMenu
+          kind="note"
           x={contextMenuX}
           y={contextMenuY}
+          notebooks={notebooks}
+          folders={allFolders}
+          currentFolderId={contextMenuNote.folderId}
           onClose={() => setContextMenu(null)}
           onRename={() =>
             startRename("note", contextMenuNote.id, contextMenuNote.title)
+          }
+          onDuplicate={() => onDuplicateNote(contextMenuNote)}
+          onMoveToFolder={(targetFolder) =>
+            onMoveNoteToFolderTop(contextMenuNote, targetFolder)
           }
           onDelete={() => onRequestDeleteNote(contextMenuNote)}
         />
