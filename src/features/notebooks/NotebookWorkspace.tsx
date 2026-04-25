@@ -1081,6 +1081,10 @@ export const NotebookWorkspace = forwardRef<
   }
 
   async function handleCreateNotebook(name: string) {
+    if (!(await prepareLeave("section-change"))) {
+      return;
+    }
+
     return runMutation(async () => {
       const notebook = await createNotebook(name);
       await syncWorkspace(notebook.id, { kind: "notebook", id: notebook.id });
@@ -1091,6 +1095,10 @@ export const NotebookWorkspace = forwardRef<
   async function handleCreateFolder() {
     if (selectedNotebookId === null) {
       throw new Error("请先选择笔记本，再创建文件夹。");
+    }
+
+    if (!(await prepareLeave("section-change"))) {
+      return;
     }
 
     return runMutation(async () => {
@@ -1112,6 +1120,10 @@ export const NotebookWorkspace = forwardRef<
       throw new Error("请先选择文件夹，再创建文件。");
     }
 
+    if (!(await prepareLeave("section-change"))) {
+      return;
+    }
+
     return runMutation(async () => {
       const defaultTitle = createUniqueName(
         "新文件",
@@ -1125,6 +1137,10 @@ export const NotebookWorkspace = forwardRef<
   }
 
   async function handleRenameNotebook(id: number, name: string) {
+    if (!(await prepareLeave("section-change"))) {
+      return;
+    }
+
     return runMutation(async () => {
       await renameNotebook(id, name);
       await syncWorkspace(id, { kind: "notebook", id });
@@ -1133,12 +1149,17 @@ export const NotebookWorkspace = forwardRef<
   }
 
   async function handleDeleteNotebook(id: number) {
-    return runMutation(async () => {
+    if (!(await prepareLeave("section-change"))) {
+      return false;
+    }
+
+    await runMutation(async () => {
       await deleteNotebook(id);
       await syncWorkspace();
       setShellMode("home");
       setHighlightRequest(null);
     });
+    return true;
   }
 
   async function handleSetNotebookCoverImage(id: number) {
@@ -1207,6 +1228,10 @@ export const NotebookWorkspace = forwardRef<
       throw new Error("请先选择笔记本，再修改文件夹。");
     }
 
+    if (!(await prepareLeave("section-change"))) {
+      return;
+    }
+
     return runMutation(async () => {
       await renameFolder(id, name);
       await syncWorkspace(selectedNotebookId, { kind: "folder", id });
@@ -1218,18 +1243,27 @@ export const NotebookWorkspace = forwardRef<
       throw new Error("请先选择笔记本，再删除文件夹。");
     }
 
-    return runMutation(async () => {
+    if (!(await prepareLeave("section-change"))) {
+      return false;
+    }
+
+    await runMutation(async () => {
       await deleteFolder(id);
       await syncWorkspace(selectedNotebookId, {
         kind: "notebook",
         id: selectedNotebookId,
       });
     });
+    return true;
   }
 
   async function handleRenameNote(id: number, title: string) {
     if (selectedNotebookId === null) {
       throw new Error("请先选择笔记本，再修改文件。");
+    }
+
+    if (!(await prepareLeave("section-change"))) {
+      return;
     }
 
     return runMutation(async () => {
@@ -1248,10 +1282,15 @@ export const NotebookWorkspace = forwardRef<
         ? ({ kind: "folder", id: selectedNote.folderId } as const)
         : ({ kind: "notebook", id: selectedNotebookId } as const);
 
-    return runMutation(async () => {
+    if (!(await prepareLeave("section-change"))) {
+      return false;
+    }
+
+    await runMutation(async () => {
       await deleteNote(id);
       await syncWorkspace(selectedNotebookId, fallbackSelection);
     });
+    return true;
   }
 
   async function handleConfirmDelete() {
@@ -1260,19 +1299,23 @@ export const NotebookWorkspace = forwardRef<
     }
 
     try {
+      let didDelete = false;
+
       if (deleteTarget.kind === "notebook") {
-        await handleDeleteNotebook(deleteTarget.id);
+        didDelete = await handleDeleteNotebook(deleteTarget.id);
       }
 
       if (deleteTarget.kind === "folder") {
-        await handleDeleteFolder(deleteTarget.id);
+        didDelete = await handleDeleteFolder(deleteTarget.id);
       }
 
       if (deleteTarget.kind === "note") {
-        await handleDeleteNote(deleteTarget.id);
+        didDelete = await handleDeleteNote(deleteTarget.id);
       }
 
-      setDeleteTarget(null);
+      if (didDelete) {
+        setDeleteTarget(null);
+      }
     } catch {
       // 错误由上层统一展示
     }

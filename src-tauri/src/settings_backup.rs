@@ -939,6 +939,55 @@ fn validate_database_file_for_schema(
     Ok(effective_schema_version)
 }
 
+fn is_safe_manifest_archive_name(value: &str) -> bool {
+    if value.is_empty()
+        || value.contains('/')
+        || value.contains('\\')
+        || Path::new(value).is_absolute()
+    {
+        return false;
+    }
+
+    let mut components = Path::new(value).components();
+    let Some(Component::Normal(component)) = components.next() else {
+        return false;
+    };
+
+    components.next().is_none() && component.to_string_lossy() == value
+}
+
+fn validate_manifest_archive_entry(
+    label: &str,
+    value: &str,
+    expected: &str,
+) -> Result<(), String> {
+    if !is_safe_manifest_archive_name(value) || value != expected {
+        return Err(format!("备份清单中的{label}无效。"));
+    }
+
+    Ok(())
+}
+
+fn validate_manifest_archive_paths(manifest: &BackupManifest) -> Result<(), String> {
+    validate_manifest_archive_entry(
+        "数据库文件路径",
+        &manifest.database_file,
+        DATABASE_FILE_NAME,
+    )?;
+    validate_manifest_archive_entry(
+        "设置文件路径",
+        &manifest.settings_file,
+        SETTINGS_FILE_NAME,
+    )?;
+    validate_manifest_archive_entry(
+        "资源目录路径",
+        &manifest.resource_directory,
+        RESOURCES_DIR_NAME,
+    )?;
+
+    Ok(())
+}
+
 fn read_manifest_from_archive(archive: &mut ZipArchive<File>) -> Result<BackupManifest, String> {
     let mut manifest_file = archive
         .by_name("manifest.json")
@@ -953,6 +1002,8 @@ fn read_manifest_from_archive(archive: &mut ZipArchive<File>) -> Result<BackupMa
     if manifest.format_version != BACKUP_FORMAT_VERSION {
         return Err("当前备份格式版本不受支持。".to_string());
     }
+
+    validate_manifest_archive_paths(&manifest)?;
 
     Ok(manifest)
 }
@@ -1643,9 +1694,10 @@ pub fn restore_backup(
 mod tests {
     use super::{
         add_resources_to_zip, build_created_backup_list_item, extract_backup_archive,
-        list_backup_items, resource_file_compression_method, rollback_restored_data,
-        validate_backup_archive, validate_backup_file, validate_database_file_for_schema,
-        zip_dir_options, zip_file_options, AppPaths, AppSettings, BackupErrorKind, BackupManifest,
+        list_backup_items, prepare_restore_rollback, resource_file_compression_method,
+        rollback_restored_data, validate_backup_archive, validate_backup_file,
+        validate_database_file_for_schema, validate_manifest_archive_paths, zip_dir_options,
+        zip_file_options, AppPaths, AppSettings, BackupErrorKind, BackupManifest,
         BackupValidationStatus, RestoreRollbackPaths, CURRENT_SCHEMA_VERSION,
     };
     use rusqlite::Connection;
@@ -1745,6 +1797,97 @@ mod tests {
             resource_directory: "resources".to_string(),
             settings_file: "app-settings.json".to_string(),
             note: String::new(),
+        }
+    }
+
+    #[test]
+    fn restore_manifest_accepts_legal_archive_paths() {
+        let manifest = create_valid_manifest(Some(CURRENT_SCHEMA_VERSION));
+
+        validate_manifest_archive_paths(&manifest).expect("valid manifest paths");
+    }
+
+    #[test]
+    fn restore_manifest_rejects_database_file_unsafe_paths() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let invalid_values = vec![
+            temp_dir
+                .path()
+                .join("fight-notes.db")
+                .to_string_lossy()
+                .to_string(),
+            "../fight-notes.db".to_string(),
+            "nested/fight-notes.db".to_string(),
+            "nested\\fight-notes.db".to_string(),
+        ];
+
+        for value in invalid_values {
+            let mut manifest = create_valid_manifest(Some(CURRENT_SCHEMA_VERSION));
+            manifest.database_file = value.clone();
+
+            let error = validate_manifest_archive_paths(&manifest)
+                .expect_err("unsafe database path should fail");
+
+            assert!(
+                error.contains("数据库文件路径"),
+                "unexpected error for {value}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn restore_manifest_rejects_settings_file_unsafe_paths() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let invalid_values = vec![
+            temp_dir
+                .path()
+                .join("app-settings.json")
+                .to_string_lossy()
+                .to_string(),
+            "../app-settings.json".to_string(),
+            "nested/app-settings.json".to_string(),
+            "nested\\app-settings.json".to_string(),
+        ];
+
+        for value in invalid_values {
+            let mut manifest = create_valid_manifest(Some(CURRENT_SCHEMA_VERSION));
+            manifest.settings_file = value.clone();
+
+            let error = validate_manifest_archive_paths(&manifest)
+                .expect_err("unsafe settings path should fail");
+
+            assert!(
+                error.contains("设置文件路径"),
+                "unexpected error for {value}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn restore_manifest_rejects_resource_directory_unsafe_paths() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let invalid_values = vec![
+            temp_dir
+                .path()
+                .join("resources")
+                .to_string_lossy()
+                .to_string(),
+            "../resources".to_string(),
+            "nested/resources".to_string(),
+            "nested\\resources".to_string(),
+        ];
+
+        for value in invalid_values {
+            let mut manifest = create_valid_manifest(Some(CURRENT_SCHEMA_VERSION));
+            manifest.resource_directory = value.clone();
+
+            let error = validate_manifest_archive_paths(&manifest)
+                .expect_err("unsafe resource directory should fail");
+
+            assert!(
+                error.contains("资源目录路径"),
+                "unexpected error for {value}: {error}"
+            );
         }
     }
 
@@ -2167,6 +2310,36 @@ mod tests {
 
         assert_eq!(error.kind, BackupErrorKind::ResourcesInvalid);
         assert_eq!(error.user_message(), "备份中的资源目录结构无效，无法恢复。");
+    }
+
+    #[test]
+    fn restore_interruption_probe_confirms_live_paths_are_missing_after_prepare_rollback() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let paths = create_test_paths(temp_dir.path());
+        fs::write(&paths.database, b"live-database").expect("write live database");
+        fs::write(&paths.settings, b"live-settings").expect("write live settings");
+        fs::create_dir_all(paths.resources.join("images")).expect("create resources");
+        fs::write(paths.resources.join("images/note.png"), b"live-image")
+            .expect("write live image");
+
+        let rollback_paths =
+            prepare_restore_rollback(&paths).expect("prepare restore rollback");
+
+        assert!(!paths.database.exists());
+        assert!(!paths.settings.exists());
+        assert!(!paths.resources.exists());
+        assert!(rollback_paths.database.exists());
+        assert!(rollback_paths.settings.exists());
+        assert!(rollback_paths.resources.exists());
+
+        rollback_restored_data(&paths, &rollback_paths).expect("manual rollback restores data");
+
+        assert_eq!(fs::read(&paths.database).expect("read database"), b"live-database");
+        assert_eq!(fs::read(&paths.settings).expect("read settings"), b"live-settings");
+        assert_eq!(
+            fs::read(paths.resources.join("images/note.png")).expect("read image"),
+            b"live-image"
+        );
     }
 
     #[test]
