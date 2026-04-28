@@ -40,10 +40,6 @@ export function NavigationRail({
         })}
       </nav>
 
-      <div className={styles.footer}>
-        <p className={styles.footerLabel}>当前阶段</p>
-        <p className={styles.footerValue}>稳定性封板与编辑器前置</p>
-      </div>
     </aside>
   );
 }

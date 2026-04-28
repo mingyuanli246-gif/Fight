@@ -108,25 +108,3 @@
   font-weight: 600;
   letter-spacing: 0.01em;
 }
-
-.footer {
-  margin-top: auto;
-  padding: 18px 12px 0;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
-}
-
-.footerLabel {
-  margin: 0 0 8px;
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  color: var(--color-rail-text-muted);
-  text-transform: uppercase;
-}
-
-.footerValue {
-  margin: 0;
-  font-size: 14px;
-  line-height: 1.6;
-  color: var(--color-rail-text);
-}

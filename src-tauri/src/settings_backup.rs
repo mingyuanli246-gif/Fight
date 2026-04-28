@@ -1,4 +1,4 @@
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, NaiveDate};
 use rusqlite::{Connection, OpenFlags};
 use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
@@ -23,8 +23,18 @@ const BACKUP_FORMAT_VERSION: u32 = 1;
 const CURRENT_SCHEMA_VERSION: u32 = 7;
 const STORED_RESOURCE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif"];
 const VALID_THEMES: &[&str] = &["blue", "pink", "red", "yellow"];
-const VALID_EDITOR_FONT_FAMILIES: &[&str] = &["modernSans", "elegantSerif", "systemDefault"];
-const VALID_RETENTION_COUNTS: &[u32] = &[3, 5, 10];
+const VALID_EDITOR_FONT_FAMILIES: &[&str] = &[
+    "modernSans",
+    "elegantSerif",
+    "systemDefault",
+    "sourceSans",
+    "sourceSerif",
+    "lxgwWenkai",
+    "pingfangSans",
+    "songtiReading",
+];
+const VALID_RETENTION_COUNTS: &[u32] = &[1, 3, 5];
+const VALID_BACKUP_FREQUENCY_DAYS: &[u32] = &[1, 3, 5, 7];
 const SCHEMA_V1_REQUIRED_TABLES: &[&str] = &["notebooks", "folders", "notes"];
 const SCHEMA_V2_REQUIRED_TABLES: &[&str] = &["note_search"];
 const SCHEMA_V3_REQUIRED_TABLES: &[&str] = &["tags", "note_tags"];
@@ -41,25 +51,44 @@ const SCHEMA_V7_REQUIRED_TABLES: &[&str] = &["note_tag_occurrences"];
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
+    #[serde(default = "default_theme")]
     pub theme: String,
     #[serde(default = "default_editor_font_family")]
     pub editor_font_family: String,
+    #[serde(default)]
     pub auto_backup_enabled: bool,
+    #[serde(default = "default_backup_retention_count")]
     pub backup_retention_count: u32,
+    #[serde(default = "default_backup_frequency_days")]
+    pub backup_frequency_days: u32,
+    #[serde(default)]
     pub last_auto_backup_date: Option<String>,
+}
+
+fn default_theme() -> String {
+    "blue".to_string()
 }
 
 fn default_editor_font_family() -> String {
     "modernSans".to_string()
 }
 
+fn default_backup_retention_count() -> u32 {
+    5
+}
+
+fn default_backup_frequency_days() -> u32 {
+    1
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            theme: "blue".to_string(),
+            theme: default_theme(),
             editor_font_family: default_editor_font_family(),
             auto_backup_enabled: false,
-            backup_retention_count: 5,
+            backup_retention_count: default_backup_retention_count(),
+            backup_frequency_days: default_backup_frequency_days(),
             last_auto_backup_date: None,
         }
     }
@@ -72,6 +101,7 @@ pub struct AppSettingsUpdate {
     pub editor_font_family: Option<String>,
     pub auto_backup_enabled: Option<bool>,
     pub backup_retention_count: Option<u32>,
+    pub backup_frequency_days: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -198,6 +228,7 @@ pub struct BackupOperationLock {
 enum BackupOperation {
     Backup,
     Restore,
+    Delete,
 }
 
 struct OperationGuard<'a> {
@@ -386,10 +417,34 @@ fn validate_retention_count(count: u32) -> Result<(), String> {
     }
 }
 
+fn validate_backup_frequency_days(days: u32) -> Result<(), String> {
+    if VALID_BACKUP_FREQUENCY_DAYS
+        .iter()
+        .any(|candidate| candidate == &days)
+    {
+        Ok(())
+    } else {
+        Err("自动备份频率无效。".to_string())
+    }
+}
+
+fn normalize_app_settings(mut settings: AppSettings) -> AppSettings {
+    if validate_retention_count(settings.backup_retention_count).is_err() {
+        settings.backup_retention_count = default_backup_retention_count();
+    }
+
+    if validate_backup_frequency_days(settings.backup_frequency_days).is_err() {
+        settings.backup_frequency_days = default_backup_frequency_days();
+    }
+
+    settings
+}
+
 fn validate_app_settings(settings: &AppSettings) -> Result<(), String> {
     validate_theme(&settings.theme)?;
     validate_editor_font_family(&settings.editor_font_family)?;
     validate_retention_count(settings.backup_retention_count)?;
+    validate_backup_frequency_days(settings.backup_frequency_days)?;
 
     if let Some(date) = &settings.last_auto_backup_date {
         if !is_valid_date_key(date) {
@@ -415,6 +470,9 @@ fn merge_app_settings(
         backup_retention_count: update
             .backup_retention_count
             .unwrap_or(current.backup_retention_count),
+        backup_frequency_days: update
+            .backup_frequency_days
+            .unwrap_or(current.backup_frequency_days),
         last_auto_backup_date: current.last_auto_backup_date.clone(),
     };
 
@@ -426,6 +484,7 @@ fn read_settings_from_path(path: &Path) -> Result<AppSettings, String> {
     let content = fs::read_to_string(path).map_err(|error| format!("读取应用设置失败：{error}"))?;
     let settings: AppSettings =
         serde_json::from_str(&content).map_err(|error| format!("解析应用设置失败：{error}"))?;
+    let settings = normalize_app_settings(settings);
     validate_app_settings(&settings)?;
     Ok(settings)
 }
@@ -487,6 +546,22 @@ fn format_today_key() -> String {
 
 fn is_valid_date_key(value: &str) -> bool {
     chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").is_ok()
+}
+
+fn has_auto_backup_interval_elapsed(
+    last_auto_backup_date: Option<&str>,
+    backup_frequency_days: u32,
+) -> Result<bool, String> {
+    let Some(last_auto_backup_date) = last_auto_backup_date else {
+        return Ok(true);
+    };
+
+    let last_date = NaiveDate::parse_from_str(last_auto_backup_date, "%Y-%m-%d")
+        .map_err(|_| "自动备份日期配置无效。".to_string())?;
+    let today = Local::now().date_naive();
+    let elapsed_days = today.signed_duration_since(last_date).num_days();
+
+    Ok(elapsed_days >= backup_frequency_days as i64)
 }
 
 fn current_timestamp_label() -> String {
@@ -1263,12 +1338,10 @@ fn validate_backup_archive(path: &Path) -> Result<ValidatedBackup, BackupError> 
     })
 }
 
-fn list_backup_items(paths: &AppPaths) -> Result<Vec<BackupListItem>, String> {
-    let mut items = Vec::new();
+fn collect_backup_file_paths(backups_dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut backup_files = Vec::new();
 
-    for entry in
-        fs::read_dir(&paths.backups).map_err(|error| format!("读取备份目录失败：{error}"))?
-    {
+    for entry in fs::read_dir(backups_dir).map_err(|error| format!("读取备份目录失败：{error}"))? {
         let entry = entry.map_err(|error| format!("读取备份目录失败：{error}"))?;
         let path = entry.path();
 
@@ -1280,41 +1353,15 @@ fn list_backup_items(paths: &AppPaths) -> Result<Vec<BackupListItem>, String> {
             continue;
         }
 
-        items.push(build_light_backup_list_item(&path));
+        backup_files.push(path);
     }
 
-    items.sort_by(|left, right| {
-        right
-            .created_at
-            .cmp(&left.created_at)
-            .then_with(|| right.file_name.cmp(&left.file_name))
-    });
-
-    Ok(items)
+    sort_backup_paths_newest_first(&mut backup_files);
+    Ok(backup_files)
 }
 
-fn validate_backup_file(paths: &AppPaths, file_name: &str) -> Result<BackupListItem, String> {
-    let backup_path = resolve_backup_file_path(paths, file_name)?;
-
-    Ok(match validate_backup_archive(&backup_path) {
-        Ok(validated) => build_validated_backup_list_item(&backup_path, validated),
-        Err(error) => build_invalid_backup_list_item(&backup_path, error),
-    })
-}
-
-fn prune_old_backups(backups_dir: &Path, retention_count: usize) -> Option<String> {
-    let mut backup_files = match fs::read_dir(backups_dir) {
-        Ok(entries) => entries
-            .filter_map(|entry| entry.ok())
-            .map(|entry| entry.path())
-            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("zip"))
-            .collect::<Vec<_>>(),
-        Err(error) => {
-            return Some(format!("读取备份目录失败：{error}"));
-        }
-    };
-
-    backup_files.sort_by(|left, right| {
+fn sort_backup_paths_newest_first(paths: &mut [PathBuf]) {
+    paths.sort_by(|left, right| {
         let left_modified = fs::metadata(left)
             .and_then(|metadata| metadata.modified())
             .ok();
@@ -1326,6 +1373,28 @@ fn prune_old_backups(backups_dir: &Path, retention_count: usize) -> Option<Strin
             .cmp(&left_modified)
             .then_with(|| right.cmp(left))
     });
+}
+
+fn list_backup_items(paths: &AppPaths) -> Result<Vec<BackupListItem>, String> {
+    let backup_files = collect_backup_file_paths(&paths.backups)?;
+
+    Ok(backup_files
+        .iter()
+        .map(|path| build_light_backup_list_item(path))
+        .collect())
+}
+
+fn validate_backup_file(paths: &AppPaths, file_name: &str) -> Result<BackupListItem, String> {
+    let backup_path = resolve_backup_file_path(paths, file_name)?;
+
+    Ok(match validate_backup_archive(&backup_path) {
+        Ok(validated) => build_validated_backup_list_item(&backup_path, validated),
+        Err(error) => build_invalid_backup_list_item(&backup_path, error),
+    })
+}
+
+fn prune_old_backups(backups_dir: &Path, retention_count: usize) -> Result<(), String> {
+    let backup_files = collect_backup_file_paths(backups_dir)?;
 
     let mut warnings = Vec::new();
 
@@ -1340,9 +1409,9 @@ fn prune_old_backups(backups_dir: &Path, retention_count: usize) -> Option<Strin
     }
 
     if warnings.is_empty() {
-        None
+        Ok(())
     } else {
-        Some(warnings.join("；"))
+        Err(warnings.join("；"))
     }
 }
 
@@ -1401,15 +1470,16 @@ fn create_backup_snapshot_without_lock<R: Runtime>(
     log_backup_perf_complete("create_backup.zip_write", zip_write_started_at);
 
     let result_started_at = Instant::now();
-    let warning = if prune_by_retention {
-        prune_old_backups(&paths.backups, settings.backup_retention_count as usize)
-    } else {
-        None
-    };
+    if prune_by_retention {
+        prune_old_backups(&paths.backups, settings.backup_retention_count as usize)?;
+    }
     let backup = build_created_backup_list_item(&backup_path, &manifest)?;
     log_backup_perf_complete("create_backup.result", result_started_at);
 
-    Ok(CreateBackupResult { backup, warning })
+    Ok(CreateBackupResult {
+        backup,
+        warning: None,
+    })
 }
 
 fn create_backup_internal<R: Runtime>(
@@ -1780,8 +1850,14 @@ pub fn load_app_settings(app: AppHandle) -> Result<AppSettings, String> {
 #[tauri::command]
 pub fn save_app_settings(app: AppHandle, update: AppSettingsUpdate) -> Result<AppSettings, String> {
     let (paths, current_settings) = ensure_app_environment(&app)?;
+    let should_prune_backups = update.backup_retention_count.is_some();
     let next_settings = merge_app_settings(&current_settings, update)?;
     write_settings_atomically(&paths.settings, &next_settings)?;
+
+    if should_prune_backups {
+        prune_old_backups(&paths.backups, next_settings.backup_retention_count as usize)?;
+    }
+
     Ok(next_settings)
 }
 
@@ -1801,7 +1877,8 @@ pub fn get_data_environment_info(app: AppHandle) -> Result<DataEnvironmentInfo, 
 
 #[tauri::command]
 pub fn list_backups(app: AppHandle) -> Result<Vec<BackupListItem>, String> {
-    let (paths, _) = ensure_app_environment(&app)?;
+    let (paths, settings) = ensure_app_environment(&app)?;
+    prune_old_backups(&paths.backups, settings.backup_retention_count as usize)?;
     list_backup_items(&paths)
 }
 
@@ -1845,6 +1922,19 @@ pub fn create_backup(
 }
 
 #[tauri::command]
+pub fn delete_backup(
+    app: AppHandle,
+    operation_lock: State<BackupOperationLock>,
+    file_name: String,
+) -> Result<(), String> {
+    let _guard = try_acquire_operation(&operation_lock, BackupOperation::Delete)?;
+    let (paths, _) = ensure_app_environment(&app)?;
+    let backup_path = resolve_backup_file_path(&paths, &file_name)?;
+
+    fs::remove_file(&backup_path).map_err(|error| format!("删除备份文件失败：{error}"))
+}
+
+#[tauri::command]
 pub fn maybe_run_auto_backup(
     app: AppHandle,
     operation_lock: State<BackupOperationLock>,
@@ -1867,10 +1957,12 @@ pub fn maybe_run_auto_backup(
         });
     }
 
-    let today = format_today_key();
-    if settings.last_auto_backup_date.as_deref() == Some(&today) {
+    if !has_auto_backup_interval_elapsed(
+        settings.last_auto_backup_date.as_deref(),
+        settings.backup_frequency_days,
+    )? {
         return Ok(AutoBackupResult {
-            status: "skipped-already-ran".to_string(),
+            status: "skipped-not-due".to_string(),
             backup: None,
             warning: None,
         });
@@ -1885,6 +1977,7 @@ pub fn maybe_run_auto_backup(
     }
 
     let result = create_backup_internal(&app, &paths, &settings, Some("自动备份"))?;
+    let today = format_today_key();
     settings.last_auto_backup_date = Some(today);
     write_settings_atomically(&paths.settings, &settings)?;
 

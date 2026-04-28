@@ -1,5 +1,4 @@
 import { invoke } from "@tauri-apps/api/core";
-import { rebuildNoteSearchIndex } from "../notebooks/repository";
 import type {
   AppSettings,
   AppSettingsUpdate,
@@ -7,7 +6,6 @@ import type {
   BackupListItem,
   CreateBackupResult,
   DataEnvironmentInfo,
-  ManagedResourceCleanupResult,
   RestoreBackupPreview,
   RestoreBackupResult,
   SelectRestoreBackupFileResult,
@@ -29,10 +27,6 @@ export async function listBackups() {
   return invoke<BackupListItem[]>("list_backups");
 }
 
-export async function validateBackup(fileName: string) {
-  return invoke<BackupListItem>("validate_backup", { fileName });
-}
-
 export async function selectRestoreBackupFile() {
   return invoke<SelectRestoreBackupFileResult>("select_restore_backup_file");
 }
@@ -45,20 +39,14 @@ export async function createBackup() {
   return invoke<CreateBackupResult>("create_backup");
 }
 
+export async function deleteBackup(fileName: string) {
+  return invoke<void>("delete_backup", { fileName });
+}
+
 export async function maybeRunAutoBackup() {
   return invoke<AutoBackupResult>("maybe_run_auto_backup");
 }
 
 export async function restoreBackup(backupPath: string) {
   return invoke<RestoreBackupResult>("restore_backup", { backupPath });
-}
-
-export async function rebuildSearchIndex() {
-  return rebuildNoteSearchIndex();
-}
-
-export async function cleanupUnreferencedManagedResources() {
-  return invoke<ManagedResourceCleanupResult>(
-    "cleanup_unreferenced_managed_resources",
-  );
 }

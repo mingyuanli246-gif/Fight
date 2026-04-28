@@ -155,10 +155,6 @@ async function ensureNoteSearchReadyCommand() {
   return invoke<void>("ensure_note_search_ready");
 }
 
-async function rebuildNoteSearchIndexCommand() {
-  return invoke<void>("rebuild_note_search_index");
-}
-
 async function createNoteCommand(
   notebookId: number,
   folderId: number,
@@ -637,14 +633,6 @@ export async function initializeNotebookDatabase() {
     const database = await getNotebookDatabase();
     await ensureNoteSearchReady(database);
     await ensureNotebookTreeConstraintsCommand();
-  });
-}
-
-export async function rebuildNoteSearchIndex() {
-  return withRepositoryError("重建搜索索引", async () => {
-    await getNotebookDatabase();
-    await rebuildNoteSearchIndexCommand();
-    hasInitializedNoteSearch = true;
   });
 }
 

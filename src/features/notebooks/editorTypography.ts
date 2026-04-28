@@ -2,6 +2,11 @@ export const EDITOR_FONT_FAMILY_NAMES = [
   "modernSans",
   "elegantSerif",
   "systemDefault",
+  "sourceSans",
+  "sourceSerif",
+  "lxgwWenkai",
+  "pingfangSans",
+  "songtiReading",
 ] as const;
 
 export type EditorFontFamilyName =
@@ -19,6 +24,14 @@ export const EDITOR_FONT_FAMILY_STACKS: Record<
     '"Source Han Serif SC", "Noto Serif SC", "Songti SC", "STSong", "SimSun", serif',
   systemDefault:
     '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif',
+  sourceSans:
+    '"Noto Sans SC", "Source Han Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif',
+  sourceSerif:
+    '"Noto Serif SC", "Source Han Serif SC", "Songti SC", "SimSun", serif',
+  lxgwWenkai: '"LXGW WenKai", "Kaiti SC", "KaiTi", serif',
+  pingfangSans:
+    '"PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif',
+  songtiReading: '"Songti SC", "SimSun", serif',
 };
 
 export const EDITOR_FONT_FAMILY_OPTIONS = [
@@ -36,6 +49,31 @@ export const EDITOR_FONT_FAMILY_OPTIONS = [
     value: "systemDefault",
     label: "系统默认",
     description: "贴近当前系统字体风格，兼顾中文稳定显示。",
+  },
+  {
+    value: "sourceSans",
+    label: "思源黑体",
+    description: "开源黑体字栈，适合清晰稳定的中文界面与笔记正文。",
+  },
+  {
+    value: "sourceSerif",
+    label: "思源宋体",
+    description: "开源宋体字栈，适合教材式阅读和长段文字。",
+  },
+  {
+    value: "lxgwWenkai",
+    label: "霞鹜文楷",
+    description: "偏手写楷体气质，适合轻松的学习笔记。",
+  },
+  {
+    value: "pingfangSans",
+    label: "苹方黑体",
+    description: "贴近 macOS 中文系统字体，清爽现代。",
+  },
+  {
+    value: "songtiReading",
+    label: "宋体阅读",
+    description: "传统宋体阅读栈，适合安静的正文阅读。",
   },
 ] as const satisfies ReadonlyArray<{
   value: EditorFontFamilyName;
@@ -75,8 +113,5 @@ export function applyEditorFontFamilyPreference(value: EditorFontFamilyName) {
 
 export const NOTE_EDITOR_PREVIEW_HTML = [
   "<h1>牛顿力学导论</h1>",
-  "<p>运动学是力学的一个分支，研究物体的运动状态随时间的变化，而不涉及引起这种运动的力。在这一章节中，我们主要关注位移、速度和加速度。位移是矢量，表示位置的变化；速度是位移对时间的变化率，而加速度则是速度对时间的变化率。</p>",
-  "<h2>匀变速直线运动</h2>",
-  "<p>对于匀变速直线运动，我们可以通过一系列经典公式来描述物体的轨迹。将正文排版控制在稳定行长内，可以明显降低长段阅读疲劳，也更接近教材与笔记的密度感。</p>",
-  "<ul><li>位移与时间的关系需要保持清晰推导。</li><li>速度与加速度的定义要在同一阅读节奏内展开。</li></ul>",
+  "<p>运动学是力学的一个分支，研究物体运动状态随时间的变化。</p>",
 ].join("");

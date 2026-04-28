@@ -5,7 +5,8 @@ export interface AppSettings {
   theme: ThemeName;
   editorFontFamily: EditorFontFamilyName;
   autoBackupEnabled: boolean;
-  backupRetentionCount: 3 | 5 | 10;
+  backupFrequencyDays: 1 | 3 | 5 | 7;
+  backupRetentionCount: 1 | 3 | 5;
   lastAutoBackupDate: string | null;
 }
 
@@ -13,7 +14,8 @@ export interface AppSettingsUpdate {
   theme?: ThemeName;
   editorFontFamily?: EditorFontFamilyName;
   autoBackupEnabled?: boolean;
-  backupRetentionCount?: 3 | 5 | 10;
+  backupFrequencyDays?: 1 | 3 | 5 | 7;
+  backupRetentionCount?: 1 | 3 | 5;
 }
 
 export interface DataEnvironmentInfo {
@@ -38,19 +40,10 @@ export interface BackupManifest {
   resourceCount?: number | null;
 }
 
-export type BackupValidationStatus =
-  | "unknown"
-  | "validating"
-  | "valid"
-  | "invalid";
-
 export interface BackupListItem {
   fileName: string;
   createdAt: string;
   sizeBytes: number;
-  validationStatus: BackupValidationStatus;
-  invalidReason: string | null;
-  note: string | null;
 }
 
 export interface CreateBackupResult {
@@ -101,22 +94,13 @@ export interface RestoreProgressEvent {
   message: string;
 }
 
-export interface ManagedResourceCleanupFailure {
-  resourcePath: string;
-  message: string;
-}
-
-export interface ManagedResourceCleanupResult {
-  deletedCount: number;
-  failed: ManagedResourceCleanupFailure[];
-}
-
 export interface AutoBackupResult {
   status:
     | "created"
     | "skipped-busy"
     | "skipped-disabled"
     | "skipped-already-ran"
+    | "skipped-not-due"
     | "skipped-missing-database";
   backup: BackupListItem | null;
   warning: string | null;
@@ -131,5 +115,4 @@ export type BackupOperationState =
   | "idle"
   | "creating"
   | "restoring"
-  | "rebuildingSearch"
-  | "cleaningResources";
+  | "deleting";
