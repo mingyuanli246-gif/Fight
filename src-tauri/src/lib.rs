@@ -19,8 +19,9 @@ use resource_ops::{
 };
 use settings_backup::{
     create_backup, delete_backup, get_data_environment_info, list_backups, load_app_settings,
-    maybe_run_auto_backup, preview_restore_backup, restore_backup, save_app_settings,
-    select_restore_backup_file, BackupOperationLock,
+    maybe_run_auto_backup, open_backups_directory, open_cache_directory, open_data_directory,
+    preview_restore_backup, restore_backup, save_app_settings, select_restore_backup_file,
+    BackupOperationLock,
 };
 use tauri_plugin_sql::{Migration, MigrationKind};
 
@@ -83,6 +84,9 @@ pub fn run() {
             load_app_settings,
             save_app_settings,
             get_data_environment_info,
+            open_data_directory,
+            open_backups_directory,
+            open_cache_directory,
             ensure_note_search_ready,
             ensure_notebook_tree_constraints_tx,
             create_note_tx,

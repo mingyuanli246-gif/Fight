@@ -24,7 +24,16 @@ export interface DataEnvironmentInfo {
   settingsPath: string;
   resourcesDir: string;
   backupsDir: string;
+  legacyBackupsDir: string;
+  cacheDir: string;
+  logDir: string;
+  tempDir: string;
   appVersion: string;
+  databaseSizeBytes: number;
+  resourcesSizeBytes: number;
+  backupsSizeBytes: number;
+  cacheSizeBytes: number;
+  legacyBackupsSizeBytes: number;
 }
 
 export interface BackupManifest {

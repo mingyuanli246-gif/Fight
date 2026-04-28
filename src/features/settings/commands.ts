@@ -23,6 +23,18 @@ export async function getDataEnvironmentInfo() {
   return invoke<DataEnvironmentInfo>("get_data_environment_info");
 }
 
+export async function openDataDirectory() {
+  return invoke<void>("open_data_directory");
+}
+
+export async function openBackupsDirectory() {
+  return invoke<void>("open_backups_directory");
+}
+
+export async function openCacheDirectory() {
+  return invoke<void>("open_cache_directory");
+}
+
 export async function listBackups() {
   return invoke<BackupListItem[]>("list_backups");
 }

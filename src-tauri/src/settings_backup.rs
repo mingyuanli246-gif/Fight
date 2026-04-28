@@ -1,10 +1,11 @@
 use chrono::{DateTime, Local, NaiveDate};
-use rusqlite::{Connection, OpenFlags};
 use rfd::FileDialog;
+use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};
@@ -17,8 +18,12 @@ const DATABASE_FILE_NAME: &str = "fight-notes.db";
 const SETTINGS_FILE_NAME: &str = "app-settings.json";
 const RESOURCES_DIR_NAME: &str = "resources";
 const BACKUPS_DIR_NAME: &str = "backups";
+const DOCUMENT_BACKUPS_DIR_NAME: &str = "本地笔记备份";
+const LEGACY_BACKUPS_CLEANUP_MARKER_FILE_NAME: &str = ".legacy-backups-cleanup-v1";
+const APP_TEMP_DIR_NAME: &str = "com.lihongxia.fight";
 const BACKUP_FILE_PREFIX: &str = "fight-notes-backup";
 const RESTORE_PROGRESS_EVENT: &str = "backup-restore-progress";
+const DOCUMENT_DIR_UNAVAILABLE_MESSAGE: &str = "无法读取文稿目录，暂时无法创建备份。";
 const BACKUP_FORMAT_VERSION: u32 = 1;
 const CURRENT_SCHEMA_VERSION: u32 = 7;
 const STORED_RESOURCE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif"];
@@ -112,7 +117,16 @@ pub struct DataEnvironmentInfo {
     pub settings_path: String,
     pub resources_dir: String,
     pub backups_dir: String,
+    pub legacy_backups_dir: String,
+    pub cache_dir: String,
+    pub log_dir: String,
+    pub temp_dir: String,
     pub app_version: String,
+    pub database_size_bytes: u64,
+    pub resources_size_bytes: u64,
+    pub backups_size_bytes: u64,
+    pub cache_size_bytes: u64,
+    pub legacy_backups_size_bytes: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -249,6 +263,10 @@ struct AppPaths {
     settings: PathBuf,
     resources: PathBuf,
     backups: PathBuf,
+    legacy_backups: PathBuf,
+    cache: PathBuf,
+    log: PathBuf,
+    temp: PathBuf,
 }
 
 #[derive(Debug)]
@@ -373,18 +391,145 @@ fn resolve_app_paths<R: Runtime>(app: &AppHandle<R>) -> Result<AppPaths, String>
         .path()
         .app_config_dir()
         .map_err(|_| "读取应用数据目录失败。".to_string())?;
+    let backups = resolve_document_backups_dir(app.path().document_dir())?;
+    let cache = app
+        .path()
+        .app_cache_dir()
+        .map_err(|_| "读取缓存目录失败。".to_string())?;
+    let log = app
+        .path()
+        .app_log_dir()
+        .map_err(|_| "读取日志目录失败。".to_string())?;
+    let temp = app
+        .path()
+        .temp_dir()
+        .map_err(|_| "读取临时目录失败。".to_string())?
+        .join(APP_TEMP_DIR_NAME);
 
     Ok(AppPaths {
         database: root.join(DATABASE_FILE_NAME),
         settings: root.join(SETTINGS_FILE_NAME),
         resources: root.join(RESOURCES_DIR_NAME),
-        backups: root.join(BACKUPS_DIR_NAME),
+        backups,
+        legacy_backups: root.join(BACKUPS_DIR_NAME),
+        cache,
+        log,
+        temp,
         root,
     })
 }
 
 fn ensure_directory(path: &Path, label: &str) -> Result<(), String> {
     fs::create_dir_all(path).map_err(|error| format!("创建{label}失败：{error}"))
+}
+
+fn resolve_document_backups_dir<E>(documents: Result<PathBuf, E>) -> Result<PathBuf, String> {
+    documents
+        .map(|documents| documents.join(DOCUMENT_BACKUPS_DIR_NAME))
+        .map_err(|_| DOCUMENT_DIR_UNAVAILABLE_MESSAGE.to_string())
+}
+
+fn directory_size_bytes(path: &Path) -> u64 {
+    if !path.exists() {
+        return 0;
+    }
+
+    if path.is_file() {
+        return fs::metadata(path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+    }
+
+    if !path.is_dir() {
+        return 0;
+    }
+
+    WalkDir::new(path)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+        .filter_map(|entry| entry.metadata().ok())
+        .map(|metadata| metadata.len())
+        .sum()
+}
+
+fn file_size_bytes(path: &Path) -> u64 {
+    fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0)
+}
+
+fn legacy_cleanup_marker_path(paths: &AppPaths) -> PathBuf {
+    paths.root.join(LEGACY_BACKUPS_CLEANUP_MARKER_FILE_NAME)
+}
+
+fn is_legacy_backups_cleanup_target(root: &Path, target: &Path) -> bool {
+    let expected = root.join(BACKUPS_DIR_NAME);
+
+    target == expected
+        && target != root
+        && target != root.join(DATABASE_FILE_NAME)
+        && target != root.join(SETTINGS_FILE_NAME)
+        && target != root.join(RESOURCES_DIR_NAME)
+}
+
+fn mark_legacy_backups_cleanup_attempted(paths: &AppPaths) {
+    let marker_path = legacy_cleanup_marker_path(paths);
+    if let Err(error) = fs::write(&marker_path, b"done\n") {
+        eprintln!(
+            "[settings.backup] 写入旧备份清理标记失败 [{}]: {error}",
+            marker_path.to_string_lossy()
+        );
+    }
+}
+
+fn cleanup_legacy_backups_once(paths: &AppPaths) {
+    let marker_path = legacy_cleanup_marker_path(paths);
+    if marker_path.exists() {
+        return;
+    }
+
+    if !is_legacy_backups_cleanup_target(&paths.root, &paths.legacy_backups) {
+        eprintln!(
+            "[settings.backup] 拒绝清理旧备份目录，目标路径不匹配: {}",
+            paths.legacy_backups.to_string_lossy()
+        );
+        mark_legacy_backups_cleanup_attempted(paths);
+        return;
+    }
+
+    if paths.legacy_backups.exists() {
+        if let Err(error) = fs::remove_dir_all(&paths.legacy_backups) {
+            eprintln!(
+                "[settings.backup] 清理旧备份目录失败 [{}]: {error}",
+                paths.legacy_backups.to_string_lossy()
+            );
+            mark_legacy_backups_cleanup_attempted(paths);
+            return;
+        }
+    }
+
+    mark_legacy_backups_cleanup_attempted(paths);
+}
+
+fn open_directory(path: &Path, label: &str) -> Result<(), String> {
+    ensure_directory(path, label)?;
+
+    #[cfg(target_os = "macos")]
+    let mut command = Command::new("open");
+
+    #[cfg(target_os = "windows")]
+    let mut command = Command::new("explorer");
+
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    let mut command = Command::new("xdg-open");
+
+    command
+        .arg(path)
+        .spawn()
+        .map_err(|error| format!("打开{label}失败：{error}"))?;
+
+    Ok(())
 }
 
 fn validate_theme(theme: &str) -> Result<(), String> {
@@ -523,6 +668,8 @@ fn ensure_app_environment<R: Runtime>(
     ensure_directory(&paths.root, "应用数据目录")?;
     ensure_directory(&paths.resources, "资源目录")?;
     ensure_directory(&paths.backups, "备份目录")?;
+    ensure_directory(&paths.temp, "应用临时目录")?;
+    cleanup_legacy_backups_once(&paths);
 
     let settings = if paths.settings.exists() {
         read_settings_from_path(&paths.settings)?
@@ -638,10 +785,7 @@ where
 }
 
 fn build_backup_file_name_with_prefix(backups_dir: &Path, prefix: &str) -> PathBuf {
-    let base = format!(
-        "{prefix}-{}",
-        Local::now().format("%Y-%m-%d_%H-%M-%S")
-    );
+    let base = format!("{prefix}-{}", Local::now().format("%Y-%m-%d_%H-%M-%S"));
     let mut candidate = format!("{base}.zip");
     let mut index = 1;
 
@@ -1124,11 +1268,7 @@ fn is_safe_manifest_archive_name(value: &str) -> bool {
     components.next().is_none() && component.to_string_lossy() == value
 }
 
-fn validate_manifest_archive_entry(
-    label: &str,
-    value: &str,
-    expected: &str,
-) -> Result<(), String> {
+fn validate_manifest_archive_entry(label: &str, value: &str, expected: &str) -> Result<(), String> {
     if !is_safe_manifest_archive_name(value) || value != expected {
         return Err(format!("备份清单中的{label}无效。"));
     }
@@ -1142,11 +1282,7 @@ fn validate_manifest_archive_paths(manifest: &BackupManifest) -> Result<(), Stri
         &manifest.database_file,
         DATABASE_FILE_NAME,
     )?;
-    validate_manifest_archive_entry(
-        "设置文件路径",
-        &manifest.settings_file,
-        SETTINGS_FILE_NAME,
-    )?;
+    validate_manifest_archive_entry("设置文件路径", &manifest.settings_file, SETTINGS_FILE_NAME)?;
     validate_manifest_archive_entry(
         "资源目录路径",
         &manifest.resource_directory,
@@ -1341,7 +1477,8 @@ fn validate_backup_archive(path: &Path) -> Result<ValidatedBackup, BackupError> 
 fn collect_backup_file_paths(backups_dir: &Path) -> Result<Vec<PathBuf>, String> {
     let mut backup_files = Vec::new();
 
-    for entry in fs::read_dir(backups_dir).map_err(|error| format!("读取备份目录失败：{error}"))? {
+    for entry in fs::read_dir(backups_dir).map_err(|error| format!("读取备份目录失败：{error}"))?
+    {
         let entry = entry.map_err(|error| format!("读取备份目录失败：{error}"))?;
         let path = entry.path();
 
@@ -1404,7 +1541,7 @@ fn prune_old_backups(backups_dir: &Path, retention_count: usize) -> Result<(), S
                 .file_name()
                 .and_then(|value| value.to_str())
                 .unwrap_or("未知备份");
-            warnings.push(format!("删除旧备份 {name} 失败：{error}"));
+            warnings.push(format!("删除超出保留份数的备份 {name} 失败：{error}"));
         }
     }
 
@@ -1424,7 +1561,7 @@ fn create_backup_snapshot_without_lock<R: Runtime>(
     prune_by_retention: bool,
 ) -> Result<CreateBackupResult, String> {
     let temp_dir =
-        tempdir_in(&paths.root).map_err(|error| format!("创建备份临时目录失败：{error}"))?;
+        tempdir_in(&paths.temp).map_err(|error| format!("创建备份临时目录失败：{error}"))?;
     let snapshot_path = temp_dir.path().join(DATABASE_FILE_NAME);
     with_backup_perf("create_backup.database_snapshot", || {
         create_database_snapshot(&paths.database, &snapshot_path)
@@ -1855,7 +1992,10 @@ pub fn save_app_settings(app: AppHandle, update: AppSettingsUpdate) -> Result<Ap
     write_settings_atomically(&paths.settings, &next_settings)?;
 
     if should_prune_backups {
-        prune_old_backups(&paths.backups, next_settings.backup_retention_count as usize)?;
+        prune_old_backups(
+            &paths.backups,
+            next_settings.backup_retention_count as usize,
+        )?;
     }
 
     Ok(next_settings)
@@ -1871,7 +2011,16 @@ pub fn get_data_environment_info(app: AppHandle) -> Result<DataEnvironmentInfo, 
         settings_path: paths.settings.to_string_lossy().to_string(),
         resources_dir: paths.resources.to_string_lossy().to_string(),
         backups_dir: paths.backups.to_string_lossy().to_string(),
+        legacy_backups_dir: paths.legacy_backups.to_string_lossy().to_string(),
+        cache_dir: paths.cache.to_string_lossy().to_string(),
+        log_dir: paths.log.to_string_lossy().to_string(),
+        temp_dir: paths.temp.to_string_lossy().to_string(),
         app_version: app.package_info().version.to_string(),
+        database_size_bytes: file_size_bytes(&paths.database),
+        resources_size_bytes: directory_size_bytes(&paths.resources),
+        backups_size_bytes: directory_size_bytes(&paths.backups),
+        cache_size_bytes: directory_size_bytes(&paths.cache),
+        legacy_backups_size_bytes: directory_size_bytes(&paths.legacy_backups),
     })
 }
 
@@ -1889,9 +2038,11 @@ pub fn validate_backup(app: AppHandle, file_name: String) -> Result<BackupListIt
 }
 
 #[tauri::command]
-pub fn select_restore_backup_file() -> Result<SelectRestoreBackupFileResult, String> {
+pub fn select_restore_backup_file(app: AppHandle) -> Result<SelectRestoreBackupFileResult, String> {
+    let (paths, _) = ensure_app_environment(&app)?;
     let Some(path) = FileDialog::new()
         .add_filter("Fight 备份压缩包", &["zip"])
+        .set_directory(&paths.backups)
         .pick_file()
     else {
         return Ok(SelectRestoreBackupFileResult::Cancelled);
@@ -1903,6 +2054,24 @@ pub fn select_restore_backup_file() -> Result<SelectRestoreBackupFileResult, Str
         backup_path: path.to_string_lossy().to_string(),
         file_name,
     })
+}
+
+#[tauri::command]
+pub fn open_data_directory(app: AppHandle) -> Result<(), String> {
+    let (paths, _) = ensure_app_environment(&app)?;
+    open_directory(&paths.root, "数据目录")
+}
+
+#[tauri::command]
+pub fn open_backups_directory(app: AppHandle) -> Result<(), String> {
+    let (paths, _) = ensure_app_environment(&app)?;
+    open_directory(&paths.backups, "备份目录")
+}
+
+#[tauri::command]
+pub fn open_cache_directory(app: AppHandle) -> Result<(), String> {
+    let (paths, _) = ensure_app_environment(&app)?;
+    open_directory(&paths.cache, "缓存目录")
 }
 
 #[tauri::command]
@@ -2005,8 +2174,10 @@ pub fn restore_backup(
         RestoreProgressStage::ReadingBackupInfo,
         "正在读取备份信息",
     );
-    let mut archive = with_backup_stage("restore_backup.open_archive", || open_backup_archive(&backup_path))
-        .map_err(BackupError::into_user_message)?;
+    let mut archive = with_backup_stage("restore_backup.open_archive", || {
+        open_backup_archive(&backup_path)
+    })
+    .map_err(BackupError::into_user_message)?;
     let manifest = with_backup_stage("restore_backup.read_manifest", || {
         read_manifest_with_diagnostic(&mut archive)
     })
@@ -2019,7 +2190,7 @@ pub fn restore_backup(
     );
     ensure_manifest_schema_supported(&manifest).map_err(BackupError::into_user_message)?;
 
-    let temp_dir = tempdir_in(&paths.root).map_err(|error| {
+    let temp_dir = tempdir_in(&paths.temp).map_err(|error| {
         BackupError::new(
             BackupErrorKind::RestorePreparationFailed,
             format!("创建恢复临时目录失败：{error}"),
@@ -2028,11 +2199,7 @@ pub fn restore_backup(
     })?;
     let extract_dir = temp_dir.path().join("extracted");
 
-    emit_restore_progress(
-        &app,
-        RestoreProgressStage::ExtractingBackup,
-        "正在解压备份",
-    );
+    emit_restore_progress(&app, RestoreProgressStage::ExtractingBackup, "正在解压备份");
     let restored = with_backup_stage("restore_backup.extract_archive", || {
         fs::create_dir_all(&extract_dir).map_err(|error| {
             BackupError::new(
@@ -2101,20 +2268,20 @@ pub fn restore_backup(
     with_backup_stage("restore_backup.finalize", || Ok(()))
         .map_err(BackupError::into_user_message)?;
 
-    Ok(RestoreBackupResult {
-        restored_file_name,
-    })
+    Ok(RestoreBackupResult { restored_file_name })
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        add_resources_to_zip, build_created_backup_list_item, extract_backup_archive,
-        list_backup_items, prepare_restore_rollback, resource_file_compression_method,
-        rollback_restored_data, validate_backup_archive, validate_backup_file,
-        validate_database_file_for_schema, validate_manifest_archive_paths, zip_dir_options,
-        zip_file_options, AppPaths, AppSettings, BackupErrorKind, BackupManifest,
-        BackupValidationStatus, RestoreRollbackPaths, CURRENT_SCHEMA_VERSION,
+        add_resources_to_zip, build_created_backup_list_item, cleanup_legacy_backups_once,
+        extract_backup_archive, is_legacy_backups_cleanup_target, legacy_cleanup_marker_path,
+        list_backup_items, prepare_restore_rollback, resolve_backup_file_path,
+        resolve_document_backups_dir, resource_file_compression_method, rollback_restored_data,
+        validate_backup_archive, validate_backup_file, validate_database_file_for_schema,
+        validate_manifest_archive_paths, zip_dir_options, zip_file_options, AppPaths, AppSettings,
+        BackupErrorKind, BackupManifest, BackupValidationStatus, RestoreRollbackPaths,
+        CURRENT_SCHEMA_VERSION, DOCUMENT_BACKUPS_DIR_NAME, DOCUMENT_DIR_UNAVAILABLE_MESSAGE,
     };
     use rusqlite::Connection;
     use std::fs::{self, File};
@@ -2136,7 +2303,7 @@ mod tests {
     }
 
     fn create_test_paths(root: &Path) -> AppPaths {
-        let backups = root.join("backups");
+        let backups = root.join("Documents").join(DOCUMENT_BACKUPS_DIR_NAME);
         fs::create_dir_all(&backups).expect("create backups dir");
 
         AppPaths {
@@ -2145,7 +2312,104 @@ mod tests {
             settings: root.join("app-settings.json"),
             resources: root.join("resources"),
             backups,
+            legacy_backups: root.join("backups"),
+            cache: root.join("cache"),
+            log: root.join("logs"),
+            temp: root.join("tmp"),
         }
+    }
+
+    #[test]
+    fn resolve_document_backups_dir_uses_documents_backup_folder() {
+        let documents = PathBuf::from("/tmp/Documents");
+        let backups =
+            resolve_document_backups_dir::<String>(Ok(documents.clone())).expect("resolve backups");
+
+        assert_eq!(backups, documents.join(DOCUMENT_BACKUPS_DIR_NAME));
+    }
+
+    #[test]
+    fn resolve_document_backups_dir_does_not_fallback_when_documents_missing() {
+        let error = resolve_document_backups_dir::<&str>(Err("missing documents"))
+            .expect_err("missing documents should fail");
+
+        assert_eq!(error, DOCUMENT_DIR_UNAVAILABLE_MESSAGE);
+    }
+
+    #[test]
+    fn legacy_backups_cleanup_target_requires_exact_app_config_backups_path() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let root = temp_dir.path();
+
+        assert!(is_legacy_backups_cleanup_target(
+            root,
+            &root.join("backups")
+        ));
+        assert!(!is_legacy_backups_cleanup_target(root, root));
+        assert!(!is_legacy_backups_cleanup_target(
+            root,
+            &root.join("fight-notes.db")
+        ));
+        assert!(!is_legacy_backups_cleanup_target(
+            root,
+            &root.join("app-settings.json")
+        ));
+        assert!(!is_legacy_backups_cleanup_target(
+            root,
+            &root.join("resources")
+        ));
+        assert!(!is_legacy_backups_cleanup_target(
+            root,
+            &root.join("backup")
+        ));
+    }
+
+    #[test]
+    fn cleanup_legacy_backups_once_removes_only_legacy_dir_and_writes_marker() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let paths = create_test_paths(temp_dir.path());
+        fs::create_dir_all(&paths.legacy_backups).expect("create legacy backups");
+        fs::write(paths.legacy_backups.join("old.zip"), b"old backup").expect("write old backup");
+        fs::write(&paths.database, b"database").expect("write database");
+        fs::write(&paths.settings, b"settings").expect("write settings");
+        fs::create_dir_all(&paths.resources).expect("create resources");
+
+        cleanup_legacy_backups_once(&paths);
+
+        assert!(!paths.legacy_backups.exists());
+        assert!(paths.database.exists());
+        assert!(paths.settings.exists());
+        assert!(paths.resources.exists());
+        assert!(legacy_cleanup_marker_path(&paths).exists());
+    }
+
+    #[test]
+    fn cleanup_legacy_backups_once_skips_when_marker_exists() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let paths = create_test_paths(temp_dir.path());
+        fs::create_dir_all(&paths.legacy_backups).expect("create legacy backups");
+        fs::write(paths.legacy_backups.join("old.zip"), b"old backup").expect("write old backup");
+        fs::write(legacy_cleanup_marker_path(&paths), b"done\n").expect("write marker");
+
+        cleanup_legacy_backups_once(&paths);
+
+        assert!(paths.legacy_backups.exists());
+        assert!(paths.legacy_backups.join("old.zip").exists());
+    }
+
+    #[test]
+    fn resolve_backup_file_path_uses_documents_backup_folder_and_rejects_path_traversal() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let paths = create_test_paths(temp_dir.path());
+        let backup_path = paths.backups.join("valid.zip");
+        fs::write(&backup_path, b"backup").expect("write backup");
+
+        assert_eq!(
+            resolve_backup_file_path(&paths, "valid.zip").expect("resolve backup"),
+            backup_path
+        );
+        assert!(resolve_backup_file_path(&paths, "../valid.zip").is_err());
+        assert!(resolve_backup_file_path(&paths, "nested/valid.zip").is_err());
     }
 
     fn write_backup_archive(
@@ -2744,8 +3008,7 @@ mod tests {
         fs::write(paths.resources.join("images/note.png"), b"live-image")
             .expect("write live image");
 
-        let rollback_paths =
-            prepare_restore_rollback(&paths).expect("prepare restore rollback");
+        let rollback_paths = prepare_restore_rollback(&paths).expect("prepare restore rollback");
 
         assert!(!paths.database.exists());
         assert!(!paths.settings.exists());
@@ -2756,8 +3019,14 @@ mod tests {
 
         rollback_restored_data(&paths, &rollback_paths).expect("manual rollback restores data");
 
-        assert_eq!(fs::read(&paths.database).expect("read database"), b"live-database");
-        assert_eq!(fs::read(&paths.settings).expect("read settings"), b"live-settings");
+        assert_eq!(
+            fs::read(&paths.database).expect("read database"),
+            b"live-database"
+        );
+        assert_eq!(
+            fs::read(&paths.settings).expect("read settings"),
+            b"live-settings"
+        );
         assert_eq!(
             fs::read(paths.resources.join("images/note.png")).expect("read image"),
             b"live-image"
@@ -2773,7 +3042,14 @@ mod tests {
             database: temp_dir.path().join("database-as-dir"),
             settings: temp_dir.path().join("app-settings.json"),
             resources: temp_dir.path().join("resources"),
-            backups: temp_dir.path().join("backups"),
+            backups: temp_dir
+                .path()
+                .join("Documents")
+                .join(DOCUMENT_BACKUPS_DIR_NAME),
+            legacy_backups: temp_dir.path().join("backups"),
+            cache: temp_dir.path().join("cache"),
+            log: temp_dir.path().join("logs"),
+            temp: temp_dir.path().join("tmp"),
         };
         fs::create_dir_all(&paths.database).expect("create database dir");
 

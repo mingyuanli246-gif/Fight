@@ -25,6 +25,8 @@ import {
   getDataEnvironmentInfo,
   listBackups,
   loadAppSettings,
+  openBackupsDirectory,
+  openDataDirectory,
   previewRestoreBackup,
   restoreBackup,
   saveAppSettings,
@@ -179,6 +181,7 @@ export function SettingsWorkspace({
   const [backups, setBackups] = useState<BackupListItem[]>([]);
   const [isLoadingBackups, setIsLoadingBackups] = useState(true);
   const [isInitializing, setIsInitializing] = useState(true);
+  const [isRefreshingStorage, setIsRefreshingStorage] = useState(false);
   const [operationState, setOperationState] =
     useState<BackupOperationState>("idle");
   const [notice, setNotice] = useState<SettingsNotice | null>(startupNotice);
@@ -365,6 +368,55 @@ export function SettingsWorkspace({
     }
   }
 
+  async function refreshStorageInfo(showNotice = true) {
+    setIsRefreshingStorage(true);
+
+    try {
+      const nextEnvironmentInfo = await getDataEnvironmentInfo();
+      setEnvironmentInfo(nextEnvironmentInfo);
+      if (showNotice) {
+        setNotice(buildNotice("info", "存储信息已刷新。"));
+      }
+      return nextEnvironmentInfo;
+    } catch (error) {
+      setNotice(
+        buildNotice(
+          "error",
+          getErrorMessage(error, "刷新存储信息失败，请稍后重试。"),
+        ),
+      );
+      return null;
+    } finally {
+      setIsRefreshingStorage(false);
+    }
+  }
+
+  async function handleOpenDataDirectory() {
+    try {
+      await openDataDirectory();
+    } catch (error) {
+      setNotice(
+        buildNotice(
+          "error",
+          getErrorMessage(error, "打开数据目录失败，请稍后重试。"),
+        ),
+      );
+    }
+  }
+
+  async function handleOpenBackupsDirectory() {
+    try {
+      await openBackupsDirectory();
+    } catch (error) {
+      setNotice(
+        buildNotice(
+          "error",
+          getErrorMessage(error, "打开备份目录失败，请稍后重试。"),
+        ),
+      );
+    }
+  }
+
   async function handleAutoBackupToggle(enabled: boolean) {
     if (!settings) {
       return;
@@ -418,6 +470,7 @@ export function SettingsWorkspace({
       });
       setSettings(nextSettings);
       await refreshBackups("initial-load");
+      await refreshStorageInfo(false);
     } catch (error) {
       setNotice(
         buildNotice(
@@ -485,6 +538,7 @@ export function SettingsWorkspace({
 
     try {
       await refreshBackups("post-create");
+      await refreshStorageInfo(false);
     } catch (error) {
       setNotice(
         buildNotice(
@@ -590,6 +644,7 @@ export function SettingsWorkspace({
       await deleteBackup(fileName);
       setDeleteDialogFileName(null);
       await refreshBackups("initial-load");
+      await refreshStorageInfo(false);
     } catch (error) {
       setDeleteDialogFileName(null);
       setNotice(
@@ -796,9 +851,9 @@ export function SettingsWorkspace({
         <section className={styles.panel}>
           <div className={styles.sectionHeader}>
             <div>
-              <h3 className={styles.sectionTitle}>数据与目录</h3>
+              <h3 className={styles.sectionTitle}>存储管理</h3>
               <p className={styles.sectionDescription}>
-                当前阶段会显示应用数据目录、数据库文件、设置文件、资源目录和备份目录。
+                备份文件保存在 macOS 文稿中，方便你手动复制、迁移或长期保存。
               </p>
             </div>
             {environmentInfo ? (
@@ -827,9 +882,64 @@ export function SettingsWorkspace({
             </div>
             <div className={styles.pathRow}>
               <dt>备份目录</dt>
-              <dd>{environmentInfo?.backupsDir ?? "读取失败"}</dd>
+              <dd>
+                <span className={styles.pathDisplayName}>文稿 / 本地笔记备份</span>
+                <span className={styles.pathHint}>
+                  {environmentInfo?.backupsDir ?? "读取失败"}
+                </span>
+              </dd>
             </div>
           </dl>
+
+          <div className={styles.storageStats}>
+            <div className={styles.storageStat}>
+              <span>数据库大小</span>
+              <strong>
+                {formatBytes(environmentInfo?.databaseSizeBytes ?? 0)}
+              </strong>
+            </div>
+            <div className={styles.storageStat}>
+              <span>图片资源大小</span>
+              <strong>
+                {formatBytes(environmentInfo?.resourcesSizeBytes ?? 0)}
+              </strong>
+            </div>
+            <div className={styles.storageStat}>
+              <span>备份大小</span>
+              <strong>{formatBytes(environmentInfo?.backupsSizeBytes ?? 0)}</strong>
+            </div>
+            <div className={styles.storageStat}>
+              <span>缓存大小</span>
+              <strong>{formatBytes(environmentInfo?.cacheSizeBytes ?? 0)}</strong>
+            </div>
+          </div>
+
+          <div className={styles.storageActions}>
+            <button
+              type="button"
+              className={styles.secondaryButton}
+              disabled={isBusy || !environmentInfo}
+              onClick={() => void handleOpenDataDirectory()}
+            >
+              打开数据目录
+            </button>
+            <button
+              type="button"
+              className={styles.secondaryButton}
+              disabled={isBusy || !environmentInfo}
+              onClick={() => void handleOpenBackupsDirectory()}
+            >
+              打开备份目录
+            </button>
+            <button
+              type="button"
+              className={styles.secondaryButton}
+              disabled={isRefreshingStorage}
+              onClick={() => void refreshStorageInfo()}
+            >
+              {isRefreshingStorage ? "刷新中…" : "刷新存储信息"}
+            </button>
+          </div>
         </section>
 
         <section className={styles.panel}>
