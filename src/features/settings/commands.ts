@@ -8,7 +8,9 @@ import type {
   CreateBackupResult,
   DataEnvironmentInfo,
   ManagedResourceCleanupResult,
+  RestoreBackupPreview,
   RestoreBackupResult,
+  SelectRestoreBackupFileResult,
 } from "./types";
 
 export async function loadAppSettings() {
@@ -31,6 +33,14 @@ export async function validateBackup(fileName: string) {
   return invoke<BackupListItem>("validate_backup", { fileName });
 }
 
+export async function selectRestoreBackupFile() {
+  return invoke<SelectRestoreBackupFileResult>("select_restore_backup_file");
+}
+
+export async function previewRestoreBackup(backupPath: string) {
+  return invoke<RestoreBackupPreview>("preview_restore_backup", { backupPath });
+}
+
 export async function createBackup() {
   return invoke<CreateBackupResult>("create_backup");
 }
@@ -39,8 +49,8 @@ export async function maybeRunAutoBackup() {
   return invoke<AutoBackupResult>("maybe_run_auto_backup");
 }
 
-export async function restoreBackup(fileName: string) {
-  return invoke<RestoreBackupResult>("restore_backup", { fileName });
+export async function restoreBackup(backupPath: string) {
+  return invoke<RestoreBackupResult>("restore_backup", { backupPath });
 }
 
 export async function rebuildSearchIndex() {

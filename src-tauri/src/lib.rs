@@ -20,7 +20,8 @@ use resource_ops::{
 };
 use settings_backup::{
     create_backup, get_data_environment_info, list_backups, load_app_settings,
-    maybe_run_auto_backup, restore_backup, save_app_settings, validate_backup, BackupOperationLock,
+    maybe_run_auto_backup, preview_restore_backup, restore_backup, save_app_settings,
+    select_restore_backup_file, validate_backup, BackupOperationLock,
 };
 use tauri_plugin_sql::{Migration, MigrationKind};
 
@@ -118,6 +119,8 @@ pub fn run() {
             delete_managed_resource,
             list_backups,
             validate_backup,
+            select_restore_backup_file,
+            preview_restore_backup,
             create_backup,
             maybe_run_auto_backup,
             restore_backup,

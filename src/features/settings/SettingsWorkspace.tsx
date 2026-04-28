@@ -6,6 +6,7 @@ import {
   useState,
   type CSSProperties,
 } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { closeNotebookDatabase } from "../notebooks/db";
 import { ThemeContext } from "../theme/ThemeProvider";
 import { themeOptions } from "../theme/themeOptions";
@@ -24,9 +25,11 @@ import {
   getDataEnvironmentInfo,
   listBackups,
   loadAppSettings,
+  previewRestoreBackup,
   rebuildSearchIndex,
   restoreBackup,
   saveAppSettings,
+  selectRestoreBackupFile,
   validateBackup,
 } from "./commands";
 import type {
@@ -35,16 +38,38 @@ import type {
   BackupOperationState,
   BackupValidationStatus,
   DataEnvironmentInfo,
+  RestoreBackupPreview,
+  RestoreProgressEvent,
+  RestoreProgressStage,
   SettingsNotice,
 } from "./types";
 import styles from "./SettingsWorkspace.module.css";
 
 const RETENTION_OPTIONS = [3, 5, 10] as const;
-const BACKGROUND_VALIDATION_LIMIT = 5;
+const BACKUP_VALIDATION_TIMEOUT_MS = 25_000;
+const BACKUP_VALIDATION_TIMEOUT_MESSAGE =
+  "检查备份超时，请重试或选择其他备份。";
 const RESTORE_BLOCKED_MESSAGE =
   "恢复备份前保存失败，已阻止恢复操作。请先等待保存完成，或复制内容后再操作。";
 type BackupRefreshReason = "initial-load" | "post-create";
-type BackupValidationSource = "background" | "manual" | "restore";
+type BackupValidationSource = "manual" | "restore";
+
+const RESTORE_SUCCESS_NOTICE_STORAGE_KEY =
+  "fight-notes:restore-success-notice";
+
+type RestoreDialogState =
+  | {
+      status: "confirm";
+      preview: RestoreBackupPreview;
+    }
+  | {
+      status: "progress";
+      percent: number;
+    }
+  | {
+      status: "error";
+      message: string;
+    };
 
 interface SettingsWorkspaceProps {
   startupNotice: SettingsNotice | null;
@@ -161,11 +186,51 @@ function getStatusLabel(status: BackupValidationStatus) {
     case "invalid":
       return "损坏不可恢复";
     case "validating":
-      return "校验中";
+      return "检查中";
     case "unknown":
     default:
-      return "待校验";
+      return "待检查";
   }
+}
+
+function createBackupValidationTimeoutError() {
+  return new Error(BACKUP_VALIDATION_TIMEOUT_MESSAGE);
+}
+
+function isBackupValidationTimeout(error: unknown) {
+  return (
+    error instanceof Error &&
+    error.message === BACKUP_VALIDATION_TIMEOUT_MESSAGE
+  );
+}
+
+function getRestoreProgressPercent(stage: RestoreProgressStage) {
+  switch (stage) {
+    case "reading-backup-info":
+      return 10;
+    case "checking-backup-format":
+      return 20;
+    case "extracting-backup":
+      return 45;
+    case "checking-database":
+      return 65;
+    case "replacing-local-data":
+      return 85;
+    case "reloading":
+      return 95;
+    case "completed":
+      return 100;
+    default:
+      return 0;
+  }
+}
+
+function getRestoreCreatedAt(preview: RestoreBackupPreview) {
+  return preview.createdAt.trim() || "未知时间";
+}
+
+function writeRestoreSuccessNotice() {
+  window.sessionStorage.setItem(RESTORE_SUCCESS_NOTICE_STORAGE_KEY, "1");
 }
 
 export function SettingsWorkspace({
@@ -190,9 +255,8 @@ export function SettingsWorkspace({
   const [operationState, setOperationState] =
     useState<BackupOperationState>("idle");
   const [notice, setNotice] = useState<SettingsNotice | null>(startupNotice);
-  const [confirmRestoreFileName, setConfirmRestoreFileName] = useState<
-    string | null
-  >(null);
+  const [restoreDialog, setRestoreDialog] =
+    useState<RestoreDialogState | null>(null);
   const backupsRef = useRef<BackupListItem[]>([]);
   const latestBackupRefreshRequestRef = useRef(0);
   const backupValidationSessionRef = useRef(0);
@@ -246,6 +310,44 @@ export function SettingsWorkspace({
   useEffect(() => {
     backupsRef.current = backups;
   }, [backups]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+
+    void listen<RestoreProgressEvent>(
+      "backup-restore-progress",
+      (event) => {
+        if (!isMountedRef.current) {
+          return;
+        }
+
+        const nextPercent = getRestoreProgressPercent(event.payload.stage);
+        setRestoreDialog((currentDialog) =>
+          currentDialog?.status === "progress"
+            ? {
+                ...currentDialog,
+                percent: Math.max(currentDialog.percent, nextPercent),
+              }
+            : currentDialog,
+        );
+      },
+    ).then((nextUnlisten) => {
+      if (cancelled) {
+        nextUnlisten();
+        return;
+      }
+
+      unlisten = nextUnlisten;
+    });
+
+    return () => {
+      cancelled = true;
+      if (unlisten) {
+        unlisten();
+      }
+    };
+  }, []);
 
   useEffect(() => {
     isBusyRef.current = isBusy;
@@ -369,7 +471,6 @@ export function SettingsWorkspace({
     backupsRef.current = mergedItems;
     setBackups(mergedItems);
     setIsLoadingBackups(false);
-    startBackgroundValidation(result.requestId, mergedItems);
   }
 
   async function refreshBackups(reason: BackupRefreshReason) {
@@ -420,64 +521,21 @@ export function SettingsWorkspace({
     });
   }
 
-  function startBackgroundValidation(
-    requestId: number,
-    currentBackups: BackupListItem[],
-  ) {
-    if (isBusyRef.current) {
-      return;
-    }
+  function validateBackupWithTimeout(fileName: string) {
+    let timeoutId: number | null = null;
 
-    const targets = currentBackups
-      .filter((item) => item.validationStatus === "unknown")
-      .slice(0, BACKGROUND_VALIDATION_LIMIT)
-      .map((item) => item.fileName);
+    const timeoutPromise = new Promise<BackupListItem>((_, reject) => {
+      timeoutId = window.setTimeout(
+        () => reject(createBackupValidationTimeoutError()),
+        BACKUP_VALIDATION_TIMEOUT_MS,
+      );
+    });
 
-    if (targets.length === 0) {
-      return;
-    }
-
-    const sessionId = backupValidationSessionRef.current + 1;
-    backupValidationSessionRef.current = sessionId;
-
-    void (async () => {
-      for (const fileName of targets) {
-        if (!shouldApplyValidationResult(requestId, sessionId)) {
-          return;
-        }
-
-        updateBackupItem(fileName, (item) =>
-          item.validationStatus === "unknown"
-            ? {
-                ...item,
-                validationStatus: "validating" as const,
-                invalidReason: null,
-              }
-            : item,
-        );
-
-        try {
-          const validatedItem = await validateBackup(fileName);
-
-          if (!shouldApplyValidationResult(requestId, sessionId)) {
-            return;
-          }
-
-          applyValidatedBackupItem(validatedItem);
-        } catch (error) {
-          if (!shouldApplyValidationResult(requestId, sessionId)) {
-            return;
-          }
-
-          console.error("[settings] 后台校验备份失败", { fileName, error });
-          updateBackupItem(fileName, (item) =>
-            item.validationStatus === "validating"
-              ? { ...item, validationStatus: "unknown" as const }
-              : item,
-          );
-        }
+    return Promise.race([validateBackup(fileName), timeoutPromise]).finally(() => {
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
       }
-    })();
+    });
   }
 
   async function validateSingleBackup(
@@ -485,7 +543,16 @@ export function SettingsWorkspace({
     source: BackupValidationSource,
   ) {
     const requestId = latestBackupRefreshRequestRef.current;
-    const sessionId = backupValidationSessionRef.current;
+    const sessionId = backupValidationSessionRef.current + 1;
+    backupValidationSessionRef.current = sessionId;
+    setNotice(
+      buildNotice(
+        "info",
+        source === "restore"
+          ? "正在检查备份，检查通过后可确认恢复。"
+          : "正在检查备份，请稍候…",
+      ),
+    );
     updateBackupItem(fileName, (item) => ({
       ...item,
       validationStatus: "validating" as const,
@@ -493,7 +560,7 @@ export function SettingsWorkspace({
     }));
 
     try {
-      const validatedItem = await validateBackup(fileName);
+      const validatedItem = await validateBackupWithTimeout(fileName);
 
       if (!shouldApplyValidationResult(requestId, sessionId)) {
         return null;
@@ -502,7 +569,6 @@ export function SettingsWorkspace({
       applyValidatedBackupItem(validatedItem);
 
       if (
-        source !== "background" &&
         validatedItem.validationStatus === "invalid" &&
         validatedItem.invalidReason
       ) {
@@ -518,16 +584,17 @@ export function SettingsWorkspace({
       updateBackupItem(fileName, (item) => ({
         ...item,
         validationStatus: "unknown" as const,
+        invalidReason: isBackupValidationTimeout(error)
+          ? null
+          : item.invalidReason,
       }));
 
-      if (source !== "background") {
-        setNotice(
-          buildNotice(
-            "error",
-            getErrorMessage(error, "校验备份失败，请稍后重试。"),
-          ),
-        );
-      }
+      setNotice(
+        buildNotice(
+          "error",
+          getErrorMessage(error, "检查备份失败，请稍后重试。"),
+        ),
+      );
 
       return null;
     }
@@ -613,7 +680,6 @@ export function SettingsWorkspace({
 
   async function handleCreateBackup() {
     setOperationState("creating");
-    setConfirmRestoreFileName(null);
     setNotice(buildNotice("info", "正在创建本地备份，请稍候…"));
 
     try {
@@ -653,35 +719,79 @@ export function SettingsWorkspace({
   }
 
   async function handleValidateBackup(fileName: string) {
-    setConfirmRestoreFileName((currentFileName) =>
-      currentFileName === fileName ? null : currentFileName,
-    );
     await validateSingleBackup(fileName, "manual");
   }
 
+  function getListedBackupPath(fileName: string) {
+    if (!environmentInfo) {
+      return null;
+    }
+
+    const normalizedBackupsDir = environmentInfo.backupsDir.replace(/[\\/]+$/, "");
+    const separator =
+      environmentInfo.backupsDir.includes("\\") &&
+      !environmentInfo.backupsDir.includes("/")
+        ? "\\"
+        : "/";
+
+    return `${normalizedBackupsDir}${separator}${fileName}`;
+  }
+
+  async function openRestorePreview(backupPath: string) {
+    setRestoreDialog(null);
+    setNotice(buildNotice("info", "正在读取备份信息…"));
+
+    try {
+      const preview = await previewRestoreBackup(backupPath);
+      setRestoreDialog({ status: "confirm", preview });
+      setNotice(null);
+    } catch (error) {
+      setRestoreDialog(null);
+      setNotice(
+        buildNotice(
+          "error",
+          getErrorMessage(error, "读取备份信息失败，请选择其他备份。"),
+        ),
+      );
+    }
+  }
+
+  async function handleSelectRestoreBackup() {
+    if (isBusy) {
+      return;
+    }
+
+    setRestoreDialog(null);
+
+    try {
+      const result = await selectRestoreBackupFile();
+      if (result.status === "cancelled") {
+        return;
+      }
+
+      await openRestorePreview(result.backupPath);
+    } catch (error) {
+      setNotice(
+        buildNotice(
+          "error",
+          getErrorMessage(error, "选择备份文件失败，请稍后重试。"),
+        ),
+      );
+    }
+  }
+
   async function handlePrepareRestore(backup: BackupListItem) {
-    if (backup.validationStatus === "valid") {
-      setConfirmRestoreFileName(backup.fileName);
+    const backupPath = getListedBackupPath(backup.fileName);
+    if (!backupPath) {
+      setNotice(buildNotice("error", "读取备份目录失败，请稍后重试。"));
       return;
     }
 
-    if (backup.validationStatus === "validating") {
-      return;
-    }
-
-    const validatedItem = await validateSingleBackup(backup.fileName, "restore");
-
-    if (validatedItem?.validationStatus === "valid") {
-      setConfirmRestoreFileName(validatedItem.fileName);
-      return;
-    }
-
-    setConfirmRestoreFileName(null);
+    await openRestorePreview(backupPath);
   }
 
   async function handleRebuildSearchIndex() {
     setOperationState("rebuildingSearch");
-    setConfirmRestoreFileName(null);
     setNotice(buildNotice("info", "正在重建搜索索引，请稍候…"));
 
     try {
@@ -701,7 +811,6 @@ export function SettingsWorkspace({
 
   async function handleCleanupOrphanResources() {
     setOperationState("cleaningResources");
-    setConfirmRestoreFileName(null);
     setNotice(buildNotice("info", "正在清理孤儿资源，请稍候…"));
 
     try {
@@ -738,49 +847,62 @@ export function SettingsWorkspace({
     }
   }
 
-  async function handleRestoreBackup(fileName: string) {
+  async function handleRestoreBackup() {
+    if (restoreDialog?.status !== "confirm") {
+      return;
+    }
+
+    const backupPath = restoreDialog.preview.backupPath;
+    setOperationState("restoring");
+    setRestoreDialog({ status: "progress", percent: 10 });
+    setNotice(null);
+
     try {
       const canRestore = await beforeRestoreBackup();
 
       if (!canRestore) {
-        setNotice(buildNotice("error", RESTORE_BLOCKED_MESSAGE));
+        setRestoreDialog({ status: "error", message: RESTORE_BLOCKED_MESSAGE });
+        setOperationState("idle");
         return;
       }
     } catch (error) {
-      setNotice(
-        buildNotice(
-          "error",
-          getErrorMessage(error, RESTORE_BLOCKED_MESSAGE),
-        ),
-      );
+      setRestoreDialog({
+        status: "error",
+        message: getErrorMessage(error, RESTORE_BLOCKED_MESSAGE),
+      });
+      setOperationState("idle");
       return;
     }
 
-    setOperationState("restoring");
-    setConfirmRestoreFileName(null);
-    setNotice(
-      buildNotice(
-        "warning",
-        "正在恢复备份并重新加载应用，请勿关闭窗口…",
-      ),
-    );
-
     try {
       await closeNotebookDatabase();
-      await restoreBackup(fileName);
-      setNotice(buildNotice("info", "恢复成功，正在重新加载应用…"));
-      window.setTimeout(() => {
-        window.location.reload();
-      }, 280);
-    } catch (error) {
-      setNotice(
-        buildNotice(
-          "error",
-          getErrorMessage(error, "恢复备份失败，请稍后重试。"),
-        ),
+      await restoreBackup(backupPath);
+      setRestoreDialog((currentDialog) =>
+        currentDialog?.status === "progress"
+          ? { ...currentDialog, percent: Math.max(currentDialog.percent, 95) }
+          : currentDialog,
       );
+      window.setTimeout(() => {
+        setRestoreDialog({ status: "progress", percent: 100 });
+        writeRestoreSuccessNotice();
+        window.setTimeout(() => {
+          setRestoreDialog(null);
+          window.location.reload();
+        }, 180);
+      }, 180);
+    } catch (error) {
+      setRestoreDialog({
+        status: "error",
+        message: getErrorMessage(error, "恢复备份失败，请稍后重试。"),
+      });
       setOperationState("idle");
     }
+  }
+
+  function handleCloseRestoreDialog() {
+    setRestoreDialog((currentDialog) =>
+      currentDialog?.status === "progress" ? currentDialog : null,
+    );
   }
 
   if (isInitializing && !settings && !environmentInfo) {
@@ -1023,6 +1145,15 @@ export function SettingsWorkspace({
               type="button"
               className={styles.secondaryButton}
               disabled={isBusy || !settings}
+              onClick={() => void handleSelectRestoreBackup()}
+            >
+              恢复备份
+            </button>
+
+            <button
+              type="button"
+              className={styles.secondaryButton}
+              disabled={isBusy || !settings}
               onClick={() => void handleRebuildSearchIndex()}
             >
               {operationState === "rebuildingSearch"
@@ -1049,12 +1180,12 @@ export function SettingsWorkspace({
           <div>
             <h3 className={styles.sectionTitle}>备份列表</h3>
             <p className={styles.sectionDescription}>
-              备份列表首开优先显示目录基础信息；严格校验会在单项操作或首屏前几项后台补校验时进行。
+              恢复前会自动检查备份文件是否完整，检查失败不会恢复。
             </p>
           </div>
           <span className={styles.metaText}>
             共 {backupSummary.total} 份，{backupSummary.validCount} 份可恢复，
-            {backupSummary.unknownCount} 份待校验
+            {backupSummary.unknownCount} 份待检查
             {backupSummary.invalidCount > 0
               ? `，${backupSummary.invalidCount} 份损坏`
               : ""}
@@ -1071,11 +1202,8 @@ export function SettingsWorkspace({
         ) : (
           <div className={styles.backupList}>
             {backups.map((backup) => {
-              const isConfirming = confirmRestoreFileName === backup.fileName;
-              const isValid = backup.validationStatus === "valid";
               const isInvalid = backup.validationStatus === "invalid";
               const isValidating = backup.validationStatus === "validating";
-              const canRestore = isValid;
               const canValidate =
                 !isBusy &&
                 (backup.validationStatus === "unknown" ||
@@ -1117,70 +1245,44 @@ export function SettingsWorkspace({
                       <p className={styles.backupError}>{backup.invalidReason}</p>
                     ) : null}
 
-                    {isConfirming ? (
-                      <div className={styles.restoreWarning}>
-                        <p>
-                          恢复会覆盖当前本地数据。建议先手动备份当前状态，再继续恢复。
-                        </p>
-                        <div className={styles.actionRow}>
-                          <button
-                            type="button"
-                            className={styles.dangerButton}
-                            disabled={isBusy}
-                            onClick={() => void handleRestoreBackup(backup.fileName)}
-                          >
-                            {operationState === "restoring" ? "恢复中…" : "确认恢复"}
-                          </button>
-                          <button
-                            type="button"
-                            className={styles.secondaryButton}
-                            disabled={isBusy}
-                            onClick={() => setConfirmRestoreFileName(null)}
-                          >
-                            取消
-                          </button>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className={styles.actionRow}>
-                        {backup.validationStatus === "unknown" ? (
-                          <button
-                            type="button"
-                            className={styles.secondaryButton}
-                            disabled={!canValidate}
-                            onClick={() => void handleValidateBackup(backup.fileName)}
-                          >
-                            校验备份
-                          </button>
-                        ) : backup.validationStatus === "invalid" ? (
-                          <button
-                            type="button"
-                            className={styles.secondaryButton}
-                            disabled={!canValidate}
-                            onClick={() => void handleValidateBackup(backup.fileName)}
-                          >
-                            重新校验
-                          </button>
-                        ) : backup.validationStatus === "validating" ? (
-                          <button
-                            type="button"
-                            className={styles.secondaryButton}
-                            disabled
-                          >
-                            校验中…
-                          </button>
-                        ) : null}
-
+                    <div className={styles.actionRow}>
+                      {backup.validationStatus === "unknown" ? (
                         <button
                           type="button"
                           className={styles.secondaryButton}
-                          disabled={isBusy || isInvalid || isValidating}
-                          onClick={() => void handlePrepareRestore(backup)}
+                          disabled={!canValidate}
+                          onClick={() => void handleValidateBackup(backup.fileName)}
                         >
-                          {canRestore ? "恢复备份" : "校验后恢复"}
+                          检查备份
                         </button>
-                      </div>
-                    )}
+                      ) : backup.validationStatus === "invalid" ? (
+                        <button
+                          type="button"
+                          className={styles.secondaryButton}
+                          disabled={!canValidate}
+                          onClick={() => void handleValidateBackup(backup.fileName)}
+                        >
+                          重新检查
+                        </button>
+                      ) : isValidating ? (
+                        <button
+                          type="button"
+                          className={styles.secondaryButton}
+                          disabled
+                        >
+                          检查中…
+                        </button>
+                      ) : null}
+
+                      <button
+                        type="button"
+                        className={styles.secondaryButton}
+                        disabled={isBusy}
+                        onClick={() => void handlePrepareRestore(backup)}
+                      >
+                        恢复备份
+                      </button>
+                    </div>
                   </div>
                 </article>
               );
@@ -1188,6 +1290,89 @@ export function SettingsWorkspace({
           </div>
         )}
       </section>
+
+      {restoreDialog ? (
+        <div className={styles.modalBackdrop} role="presentation">
+          <section
+            className={styles.restoreDialog}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="restore-dialog-title"
+          >
+            <div className={styles.restoreDialogHeader}>
+              <h3 id="restore-dialog-title" className={styles.restoreDialogTitle}>
+                {restoreDialog.status === "error" ? "恢复失败" : "恢复备份"}
+              </h3>
+              {restoreDialog.status === "confirm" ? (
+                <p className={styles.restoreDialogDescription}>
+                  数据备份于 {getRestoreCreatedAt(restoreDialog.preview)}。继续执行会用该备份
+                  <span className={styles.restoreDangerText}>完全替换</span>
+                  掉当前现有数据，是否确认恢复？
+                </p>
+              ) : restoreDialog.status === "progress" ? (
+                <p className={styles.restoreDialogDescription}>
+                  正在恢复，请勿关闭应用
+                </p>
+              ) : (
+                <p className={styles.restoreDialogDescription}>
+                  {restoreDialog.message}
+                </p>
+              )}
+            </div>
+
+            {restoreDialog.status === "progress" ? (
+              <div
+                className={styles.restoreProgressTrack}
+                aria-label="恢复进度"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={restoreDialog.percent}
+                role="progressbar"
+              >
+                <div
+                  className={styles.restoreProgressBar}
+                  style={
+                    {
+                      "--restore-progress": `${restoreDialog.percent}%`,
+                    } as CSSProperties
+                  }
+                />
+              </div>
+            ) : null}
+
+            {restoreDialog.status === "confirm" ? (
+              <div className={styles.restoreDialogActions}>
+                <button
+                  type="button"
+                  className={`${styles.dangerButton} ${styles.restoreDialogButton}`}
+                  disabled={isBusy}
+                  onClick={() => void handleRestoreBackup()}
+                >
+                  确认
+                </button>
+                <button
+                  type="button"
+                  className={`${styles.secondaryButton} ${styles.restoreDialogButton}`}
+                  disabled={isBusy}
+                  onClick={handleCloseRestoreDialog}
+                >
+                  取消
+                </button>
+              </div>
+            ) : restoreDialog.status === "error" ? (
+              <div className={styles.restoreDialogActions}>
+                <button
+                  type="button"
+                  className={`${styles.secondaryButton} ${styles.restoreDialogButton}`}
+                  onClick={handleCloseRestoreDialog}
+                >
+                  关闭
+                </button>
+              </div>
+            ) : null}
+          </section>
+        </div>
+      ) : null}
     </section>
   );
 }

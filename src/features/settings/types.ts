@@ -34,6 +34,8 @@ export interface BackupManifest {
   resourceDirectory: string;
   settingsFile: string;
   note: string;
+  noteCount?: number | null;
+  resourceCount?: number | null;
 }
 
 export type BackupValidationStatus =
@@ -58,6 +60,45 @@ export interface CreateBackupResult {
 
 export interface RestoreBackupResult {
   restoredFileName: string;
+}
+
+export interface RestoreBackupPreview {
+  backupPath: string;
+  fileName: string;
+  createdAt: string;
+  appVersion: string;
+  schemaVersion?: number | null;
+  databaseFile: string;
+  settingsFile: string;
+  resourceDirectory: string;
+  noteCount?: number | null;
+  resourceCount?: number | null;
+  note: string | null;
+  sizeBytes: number;
+}
+
+export type SelectRestoreBackupFileResult =
+  | {
+      status: "selected";
+      backupPath: string;
+      fileName: string;
+    }
+  | {
+      status: "cancelled";
+    };
+
+export type RestoreProgressStage =
+  | "reading-backup-info"
+  | "checking-backup-format"
+  | "extracting-backup"
+  | "checking-database"
+  | "replacing-local-data"
+  | "reloading"
+  | "completed";
+
+export interface RestoreProgressEvent {
+  stage: RestoreProgressStage;
+  message: string;
 }
 
 export interface ManagedResourceCleanupFailure {

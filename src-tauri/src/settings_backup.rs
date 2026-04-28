@@ -1,12 +1,13 @@
 use chrono::{DateTime, Local};
 use rusqlite::{Connection, OpenFlags};
+use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Manager, Runtime, State};
+use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 use tempfile::{tempdir_in, NamedTempFile, TempDir};
 use walkdir::WalkDir;
 use zip::write::FileOptions;
@@ -17,6 +18,7 @@ const SETTINGS_FILE_NAME: &str = "app-settings.json";
 const RESOURCES_DIR_NAME: &str = "resources";
 const BACKUPS_DIR_NAME: &str = "backups";
 const BACKUP_FILE_PREFIX: &str = "fight-notes-backup";
+const RESTORE_PROGRESS_EVENT: &str = "backup-restore-progress";
 const BACKUP_FORMAT_VERSION: u32 = 1;
 const CURRENT_SCHEMA_VERSION: u32 = 7;
 const STORED_RESOURCE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif"];
@@ -94,6 +96,39 @@ pub struct BackupManifest {
     pub resource_directory: String,
     pub settings_file: String,
     pub note: String,
+    #[serde(default)]
+    pub note_count: Option<u64>,
+    #[serde(default)]
+    pub resource_count: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreBackupPreview {
+    pub backup_path: String,
+    pub file_name: String,
+    pub created_at: String,
+    pub app_version: String,
+    pub schema_version: Option<u32>,
+    pub database_file: String,
+    pub settings_file: String,
+    pub resource_directory: String,
+    pub note_count: Option<u64>,
+    pub resource_count: Option<u64>,
+    pub note: Option<String>,
+    pub size_bytes: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum SelectRestoreBackupFileResult {
+    Selected {
+        #[serde(rename = "backupPath")]
+        backup_path: String,
+        #[serde(rename = "fileName")]
+        file_name: String,
+    },
+    Cancelled,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,6 +162,23 @@ pub struct CreateBackupResult {
 #[serde(rename_all = "camelCase")]
 pub struct RestoreBackupResult {
     pub restored_file_name: String,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RestoreProgressStage {
+    ReadingBackupInfo,
+    CheckingBackupFormat,
+    ExtractingBackup,
+    CheckingDatabase,
+    ReplacingLocalData,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreProgressEvent {
+    pub stage: RestoreProgressStage,
+    pub message: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -441,6 +493,27 @@ fn current_timestamp_label() -> String {
     Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
+fn backup_path_file_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("未知备份")
+        .to_string()
+}
+
+fn emit_restore_progress<R: Runtime>(
+    app: &AppHandle<R>,
+    stage: RestoreProgressStage,
+    message: &str,
+) {
+    let _ = app.emit(
+        RESTORE_PROGRESS_EVENT,
+        RestoreProgressEvent {
+            stage,
+            message: message.to_string(),
+        },
+    );
+}
+
 fn log_backup_perf_start(stage: &str) -> Instant {
     eprintln!("[backup.perf] {stage} start");
     Instant::now()
@@ -489,9 +562,9 @@ where
     }
 }
 
-fn build_backup_file_name(backups_dir: &Path) -> PathBuf {
+fn build_backup_file_name_with_prefix(backups_dir: &Path, prefix: &str) -> PathBuf {
     let base = format!(
-        "{BACKUP_FILE_PREFIX}-{}",
+        "{prefix}-{}",
         Local::now().format("%Y-%m-%d_%H-%M-%S")
     );
     let mut candidate = format!("{base}.zip");
@@ -618,6 +691,8 @@ fn create_manifest<R: Runtime>(app: &AppHandle<R>, note: Option<&str>) -> Backup
         resource_directory: RESOURCES_DIR_NAME.to_string(),
         settings_file: SETTINGS_FILE_NAME.to_string(),
         note: note.unwrap_or("").to_string(),
+        note_count: None,
+        resource_count: None,
     }
 }
 
@@ -731,6 +806,24 @@ fn resolve_backup_file_path(paths: &AppPaths, file_name: &str) -> Result<PathBuf
     }
 
     Ok(backup_path)
+}
+
+fn resolve_restore_backup_path(backup_path: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(backup_path.trim());
+
+    if backup_path.trim().is_empty() {
+        return Err("备份文件路径无效。".to_string());
+    }
+
+    if !path.exists() {
+        return Err("目标备份不存在。".to_string());
+    }
+
+    if !path.is_file() || path.extension().and_then(|value| value.to_str()) != Some("zip") {
+        return Err("请选择 .zip 格式的备份文件。".to_string());
+    }
+
+    Ok(path)
 }
 
 fn map_schema_validation_error(detail: String) -> BackupError {
@@ -988,6 +1081,19 @@ fn validate_manifest_archive_paths(manifest: &BackupManifest) -> Result<(), Stri
     Ok(())
 }
 
+fn ensure_manifest_schema_supported(manifest: &BackupManifest) -> Result<(), BackupError> {
+    if let Some(schema_version) = manifest.schema_version {
+        if schema_version == 0 || schema_version > CURRENT_SCHEMA_VERSION {
+            return Err(BackupError::new(
+                BackupErrorKind::SchemaVersionUnsupported,
+                "备份中的数据库版本不受支持。",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn read_manifest_from_archive(archive: &mut ZipArchive<File>) -> Result<BackupManifest, String> {
     let mut manifest_file = archive
         .by_name("manifest.json")
@@ -1006,6 +1112,38 @@ fn read_manifest_from_archive(archive: &mut ZipArchive<File>) -> Result<BackupMa
     validate_manifest_archive_paths(&manifest)?;
 
     Ok(manifest)
+}
+
+fn build_restore_backup_preview(
+    backup_path: &Path,
+    manifest: &BackupManifest,
+) -> Result<RestoreBackupPreview, String> {
+    let size_bytes = fs::metadata(backup_path)
+        .map_err(|error| format!("读取备份文件元数据失败：{error}"))?
+        .len();
+
+    Ok(RestoreBackupPreview {
+        backup_path: backup_path.to_string_lossy().to_string(),
+        file_name: backup_path_file_name(backup_path),
+        created_at: manifest.created_at.clone(),
+        app_version: manifest.app_version.clone(),
+        schema_version: manifest.schema_version,
+        database_file: manifest.database_file.clone(),
+        settings_file: manifest.settings_file.clone(),
+        resource_directory: manifest.resource_directory.clone(),
+        note_count: manifest.note_count,
+        resource_count: manifest.resource_count,
+        note: backup_note_to_option(&manifest.note),
+        size_bytes,
+    })
+}
+
+fn preview_restore_backup_path(backup_path: &Path) -> Result<RestoreBackupPreview, BackupError> {
+    let mut archive = open_backup_archive(backup_path)?;
+    let manifest = read_manifest_with_diagnostic(&mut archive)?;
+    ensure_manifest_schema_supported(&manifest)?;
+    build_restore_backup_preview(backup_path, &manifest)
+        .map_err(|error| BackupError::new(BackupErrorKind::BackupFileInvalid, error))
 }
 
 fn extract_archive_file_to_path(
@@ -1208,11 +1346,13 @@ fn prune_old_backups(backups_dir: &Path, retention_count: usize) -> Option<Strin
     }
 }
 
-fn create_backup_internal<R: Runtime>(
+fn create_backup_snapshot_without_lock<R: Runtime>(
     app: &AppHandle<R>,
     paths: &AppPaths,
     settings: &AppSettings,
     note: Option<&str>,
+    file_name_prefix: &str,
+    prune_by_retention: bool,
 ) -> Result<CreateBackupResult, String> {
     let temp_dir =
         tempdir_in(&paths.root).map_err(|error| format!("创建备份临时目录失败：{error}"))?;
@@ -1222,7 +1362,7 @@ fn create_backup_internal<R: Runtime>(
     })?;
 
     let manifest = create_manifest(app, note);
-    let backup_path = build_backup_file_name(&paths.backups);
+    let backup_path = build_backup_file_name_with_prefix(&paths.backups, file_name_prefix);
     let backup_file =
         File::create(&backup_path).map_err(|error| format!("创建备份文件失败：{error}"))?;
     let zip_write_started_at = Instant::now();
@@ -1261,11 +1401,24 @@ fn create_backup_internal<R: Runtime>(
     log_backup_perf_complete("create_backup.zip_write", zip_write_started_at);
 
     let result_started_at = Instant::now();
-    let warning = prune_old_backups(&paths.backups, settings.backup_retention_count as usize);
+    let warning = if prune_by_retention {
+        prune_old_backups(&paths.backups, settings.backup_retention_count as usize)
+    } else {
+        None
+    };
     let backup = build_created_backup_list_item(&backup_path, &manifest)?;
     log_backup_perf_complete("create_backup.result", result_started_at);
 
     Ok(CreateBackupResult { backup, warning })
+}
+
+fn create_backup_internal<R: Runtime>(
+    app: &AppHandle<R>,
+    paths: &AppPaths,
+    settings: &AppSettings,
+    note: Option<&str>,
+) -> Result<CreateBackupResult, String> {
+    create_backup_snapshot_without_lock(app, paths, settings, note, BACKUP_FILE_PREFIX, true)
 }
 
 fn safe_join_relative(base: &Path, relative: &str) -> Result<PathBuf, String> {
@@ -1279,9 +1432,103 @@ fn safe_join_relative(base: &Path, relative: &str) -> Result<PathBuf, String> {
         }
     }
 
+    if !result.starts_with(base) {
+        return Err("备份中的资源路径无效。".to_string());
+    }
+
     Ok(result)
 }
 
+fn archive_has_entry(archive: &mut ZipArchive<File>, archive_path: &str) -> bool {
+    archive.by_name(archive_path).is_ok()
+}
+
+struct RestoredBackupPaths {
+    manifest: BackupManifest,
+    database: PathBuf,
+    settings: Option<PathBuf>,
+    resources: PathBuf,
+}
+
+fn extract_restore_backup_archive(
+    backup_path: &Path,
+    destination_dir: &Path,
+) -> Result<RestoredBackupPaths, String> {
+    let file = File::open(backup_path).map_err(|error| format!("打开备份失败：{error}"))?;
+    let mut archive =
+        ZipArchive::new(file).map_err(|error| format!("读取备份压缩包失败：{error}"))?;
+    let manifest = read_manifest_from_archive(&mut archive)?;
+
+    let database_path = destination_dir
+        .join("database")
+        .join(&manifest.database_file);
+    extract_archive_file_to_path(
+        &mut archive,
+        &format!("database/{}", manifest.database_file),
+        &database_path,
+    )?;
+
+    let settings_archive_path = format!("settings/{}", manifest.settings_file);
+    let settings_path = if archive_has_entry(&mut archive, &settings_archive_path) {
+        let settings_path = destination_dir
+            .join("settings")
+            .join(&manifest.settings_file);
+        extract_archive_file_to_path(&mut archive, &settings_archive_path, &settings_path)?;
+        Some(settings_path)
+    } else {
+        None
+    };
+
+    let resources_dir = destination_dir.join(&manifest.resource_directory);
+    fs::create_dir_all(&resources_dir).map_err(|error| format!("创建资源恢复目录失败：{error}"))?;
+
+    let resources_prefix = format!("{}/", manifest.resource_directory.trim_end_matches('/'));
+
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|error| format!("读取备份内容失败：{error}"))?;
+        let name = entry.name().to_string();
+
+        if name == resources_prefix {
+            continue;
+        }
+
+        if !name.starts_with(&resources_prefix) {
+            continue;
+        }
+
+        let relative = &name[resources_prefix.len()..];
+        if relative.is_empty() {
+            continue;
+        }
+
+        let output_path = safe_join_relative(&resources_dir, relative)?;
+
+        if entry.is_dir() {
+            fs::create_dir_all(&output_path)
+                .map_err(|error| format!("恢复资源目录失败：{error}"))?;
+            continue;
+        }
+
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| format!("恢复资源目录失败：{error}"))?;
+        }
+
+        let mut output =
+            File::create(&output_path).map_err(|error| format!("恢复资源文件失败：{error}"))?;
+        io::copy(&mut entry, &mut output).map_err(|error| format!("恢复资源文件失败：{error}"))?;
+    }
+
+    Ok(RestoredBackupPaths {
+        manifest,
+        database: database_path,
+        settings: settings_path,
+        resources: resources_dir,
+    })
+}
+
+#[cfg(test)]
 fn extract_backup_archive(
     backup_path: &Path,
     destination_dir: &Path,
@@ -1450,6 +1697,7 @@ fn rollback_restored_data(
     Ok(())
 }
 
+#[cfg(test)]
 fn swap_restored_data(
     paths: &AppPaths,
     database_path: &Path,
@@ -1469,6 +1717,51 @@ fn swap_restored_data(
         )
     })?;
     fs::rename(resources_dir, &paths.resources).map_err(|error| {
+        BackupError::new(
+            BackupErrorKind::ResourcesRestoreFailed,
+            format!("写入恢复后的资源目录失败：{error}"),
+        )
+    })?;
+
+    Ok(())
+}
+
+fn swap_restore_backup_data(
+    paths: &AppPaths,
+    restored: &RestoredBackupPaths,
+    rollback_paths: &RestoreRollbackPaths,
+) -> Result<(), BackupError> {
+    fs::rename(&restored.database, &paths.database).map_err(|error| {
+        BackupError::new(
+            BackupErrorKind::DatabaseRestoreFailed,
+            format!("写入恢复后的数据库失败：{error}"),
+        )
+    })?;
+
+    if let Some(settings_path) = &restored.settings {
+        fs::rename(settings_path, &paths.settings).map_err(|error| {
+            BackupError::new(
+                BackupErrorKind::SettingsRestoreFailed,
+                format!("写入恢复后的设置失败：{error}"),
+            )
+        })?;
+    } else if rollback_paths.settings.exists() {
+        fs::copy(&rollback_paths.settings, &paths.settings).map_err(|error| {
+            BackupError::new(
+                BackupErrorKind::SettingsRestoreFailed,
+                format!("保留当前设置失败：{error}"),
+            )
+        })?;
+    } else {
+        write_settings_atomically(&paths.settings, &AppSettings::default()).map_err(|error| {
+            BackupError::new(
+                BackupErrorKind::SettingsRestoreFailed,
+                format!("写入默认设置失败：{error}"),
+            )
+        })?;
+    }
+
+    fs::rename(&restored.resources, &paths.resources).map_err(|error| {
         BackupError::new(
             BackupErrorKind::ResourcesRestoreFailed,
             format!("写入恢复后的资源目录失败：{error}"),
@@ -1516,6 +1809,29 @@ pub fn list_backups(app: AppHandle) -> Result<Vec<BackupListItem>, String> {
 pub fn validate_backup(app: AppHandle, file_name: String) -> Result<BackupListItem, String> {
     let (paths, _) = ensure_app_environment(&app)?;
     validate_backup_file(&paths, &file_name)
+}
+
+#[tauri::command]
+pub fn select_restore_backup_file() -> Result<SelectRestoreBackupFileResult, String> {
+    let Some(path) = FileDialog::new()
+        .add_filter("Fight 备份压缩包", &["zip"])
+        .pick_file()
+    else {
+        return Ok(SelectRestoreBackupFileResult::Cancelled);
+    };
+
+    let file_name = backup_path_file_name(&path);
+
+    Ok(SelectRestoreBackupFileResult::Selected {
+        backup_path: path.to_string_lossy().to_string(),
+        file_name,
+    })
+}
+
+#[tauri::command]
+pub fn preview_restore_backup(backup_path: String) -> Result<RestoreBackupPreview, String> {
+    let backup_path = resolve_restore_backup_path(&backup_path)?;
+    preview_restore_backup_path(&backup_path).map_err(BackupError::into_user_message)
 }
 
 #[tauri::command]
@@ -1583,40 +1899,32 @@ pub fn maybe_run_auto_backup(
 pub fn restore_backup(
     app: AppHandle,
     operation_lock: State<BackupOperationLock>,
-    file_name: String,
+    backup_path: String,
 ) -> Result<RestoreBackupResult, String> {
     let _guard = try_acquire_operation(&operation_lock, BackupOperation::Restore)?;
 
     let (paths, _) = ensure_app_environment(&app)?;
+    let backup_path = resolve_restore_backup_path(&backup_path)?;
+    let restored_file_name = backup_path_file_name(&backup_path);
 
-    let backup_path = resolve_backup_file_path(&paths, &file_name)?;
-    let mut archive = with_backup_stage("restore_backup.open_archive", || {
-        open_backup_archive(&backup_path)
-    })
-    .map_err(BackupError::into_user_message)?;
+    emit_restore_progress(
+        &app,
+        RestoreProgressStage::ReadingBackupInfo,
+        "正在读取备份信息",
+    );
+    let mut archive = with_backup_stage("restore_backup.open_archive", || open_backup_archive(&backup_path))
+        .map_err(BackupError::into_user_message)?;
     let manifest = with_backup_stage("restore_backup.read_manifest", || {
         read_manifest_with_diagnostic(&mut archive)
     })
     .map_err(BackupError::into_user_message)?;
-    let validation_temp_dir = tempdir_in(std::env::temp_dir()).map_err(|error| {
-        BackupError::new(
-            BackupErrorKind::RestorePreparationFailed,
-            format!("创建恢复临时目录失败：{error}"),
-        )
-        .into_user_message()
-    })?;
-    let schema_version = with_backup_stage("restore_backup.validate_database", || {
-        validate_database_archive_entry(&mut archive, &manifest, validation_temp_dir.path())
-    })
-    .map_err(BackupError::into_user_message)?;
-    with_backup_stage("restore_backup.validate_settings", || {
-        validate_settings_archive_entry(&mut archive, &manifest, validation_temp_dir.path())
-    })
-    .map_err(BackupError::into_user_message)?;
-    with_backup_stage("restore_backup.validate_resources", || {
-        validate_resources_archive_entry(&mut archive, &manifest)
-    })
-    .map_err(BackupError::into_user_message)?;
+
+    emit_restore_progress(
+        &app,
+        RestoreProgressStage::CheckingBackupFormat,
+        "正在检查备份格式",
+    );
+    ensure_manifest_schema_supported(&manifest).map_err(BackupError::into_user_message)?;
 
     let temp_dir = tempdir_in(&paths.root).map_err(|error| {
         BackupError::new(
@@ -1626,52 +1934,67 @@ pub fn restore_backup(
         .into_user_message()
     })?;
     let extract_dir = temp_dir.path().join("extracted");
-    let (_manifest, restored_database, restored_settings, restored_resources) =
-        with_backup_stage("restore_backup.extract_archive", || {
-            fs::create_dir_all(&extract_dir).map_err(|error| {
-                BackupError::new(
-                    BackupErrorKind::RestorePreparationFailed,
-                    format!("创建恢复临时目录失败：{error}"),
-                )
-            })?;
 
-            let extracted =
-                extract_backup_archive(&backup_path, &extract_dir).map_err(|error| {
-                    if error.contains("清单") || error.contains("manifest") {
-                        BackupError::new(BackupErrorKind::ManifestInvalid, error)
-                    } else if error.contains("设置") {
-                        BackupError::new(BackupErrorKind::SettingsInvalid, error)
-                    } else if error.contains("资源") {
-                        BackupError::new(BackupErrorKind::ResourcesInvalid, error)
-                    } else if error.contains("压缩包") || error.contains("备份内容") {
-                        BackupError::new(BackupErrorKind::ZipReadFailed, error)
-                    } else {
-                        BackupError::new(BackupErrorKind::DatabaseInvalid, error)
-                    }
-                })?;
+    emit_restore_progress(
+        &app,
+        RestoreProgressStage::ExtractingBackup,
+        "正在解压备份",
+    );
+    let restored = with_backup_stage("restore_backup.extract_archive", || {
+        fs::create_dir_all(&extract_dir).map_err(|error| {
+            BackupError::new(
+                BackupErrorKind::RestorePreparationFailed,
+                format!("创建恢复临时目录失败：{error}"),
+            )
+        })?;
 
-            validate_database_file_for_schema(&extracted.1, Some(schema_version))
-                .map_err(map_schema_validation_error)?;
-            read_settings_from_path(&extracted.2)
-                .map_err(|error| BackupError::new(BackupErrorKind::SettingsInvalid, error))?;
-            ensure_directory(&extracted.3, "恢复资源目录")
-                .map_err(|error| BackupError::new(BackupErrorKind::ResourcesInvalid, error))?;
-
-            Ok(extracted)
+        extract_restore_backup_archive(&backup_path, &extract_dir).map_err(|error| {
+            if error.contains("清单") || error.contains("manifest") {
+                BackupError::new(BackupErrorKind::ManifestInvalid, error)
+            } else if error.contains("设置") {
+                BackupError::new(BackupErrorKind::SettingsInvalid, error)
+            } else if error.contains("资源") {
+                BackupError::new(BackupErrorKind::ResourcesInvalid, error)
+            } else if error.contains("压缩包") || error.contains("备份内容") {
+                BackupError::new(BackupErrorKind::ZipReadFailed, error)
+            } else {
+                BackupError::new(BackupErrorKind::DatabaseInvalid, error)
+            }
         })
-        .map_err(BackupError::into_user_message)?;
+    })
+    .map_err(BackupError::into_user_message)?;
+
+    emit_restore_progress(
+        &app,
+        RestoreProgressStage::CheckingDatabase,
+        "正在检查核心数据库",
+    );
+    with_backup_stage("restore_backup.validate_extracted_data", || {
+        validate_database_file_for_schema(&restored.database, restored.manifest.schema_version)
+            .map_err(map_schema_validation_error)?;
+        if let Some(settings_path) = &restored.settings {
+            read_settings_from_path(settings_path)
+                .map_err(|error| BackupError::new(BackupErrorKind::SettingsInvalid, error))?;
+        }
+        ensure_directory(&restored.resources, "恢复资源目录")
+            .map_err(|error| BackupError::new(BackupErrorKind::ResourcesInvalid, error))?;
+
+        Ok(())
+    })
+    .map_err(BackupError::into_user_message)?;
+
+    emit_restore_progress(
+        &app,
+        RestoreProgressStage::ReplacingLocalData,
+        "正在替换本地数据",
+    );
     let rollback_paths = with_backup_stage("restore_backup.prepare_rollback", || {
         prepare_restore_rollback(&paths)
     })
     .map_err(BackupError::into_user_message)?;
 
     if let Err(error) = with_backup_stage("restore_backup.swap_data", || {
-        swap_restored_data(
-            &paths,
-            &restored_database,
-            &restored_settings,
-            &restored_resources,
-        )
+        swap_restore_backup_data(&paths, &restored, &rollback_paths)
     }) {
         if let Err(rollback_error) = with_backup_stage("restore_backup.rollback", || {
             rollback_restored_data(&paths, &rollback_paths)
@@ -1686,7 +2009,7 @@ pub fn restore_backup(
         .map_err(BackupError::into_user_message)?;
 
     Ok(RestoreBackupResult {
-        restored_file_name: file_name,
+        restored_file_name,
     })
 }
 
@@ -1797,6 +2120,8 @@ mod tests {
             resource_directory: "resources".to_string(),
             settings_file: "app-settings.json".to_string(),
             note: String::new(),
+            note_count: None,
+            resource_count: None,
         }
     }
 
@@ -2063,6 +2388,8 @@ mod tests {
             resource_directory: "resources".to_string(),
             settings_file: "app-settings.json".to_string(),
             note: String::new(),
+            note_count: None,
+            resource_count: None,
         };
 
         let file = File::create(&backup_path).expect("create backup archive");
@@ -2135,6 +2462,8 @@ mod tests {
             resource_directory: "resources".to_string(),
             settings_file: "app-settings.json".to_string(),
             note: "自动备份".to_string(),
+            note_count: None,
+            resource_count: None,
         };
 
         let item =

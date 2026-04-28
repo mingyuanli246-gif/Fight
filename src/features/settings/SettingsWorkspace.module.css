@@ -560,3 +560,86 @@
   line-height: 1.7;
   color: var(--color-text-secondary);
 }
+
+.modalBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(15, 23, 42, 0.36);
+}
+
+.restoreDialog {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  width: min(440px, 100%);
+  max-height: min(720px, calc(100vh - 48px));
+  overflow: auto;
+  padding: 28px;
+  background: var(--color-surface-primary);
+  border: 1px solid var(--color-border-soft);
+  border-radius: 18px;
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.22);
+}
+
+.restoreDialogHeader {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-items: center;
+  text-align: center;
+}
+
+.restoreDialogTitle {
+  margin: 0;
+  font-size: 24px;
+  line-height: 1.35;
+  font-weight: 800;
+  color: var(--color-text-primary);
+}
+
+.restoreDialogDescription {
+  margin: 0;
+  max-width: 360px;
+  font-size: 15px;
+  line-height: 1.8;
+  color: var(--color-text-secondary);
+}
+
+.restoreDangerText {
+  color: #b91c1c;
+  font-weight: 800;
+}
+
+.restoreDialogActions {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+}
+
+.restoreDialogButton {
+  flex: 1;
+  max-width: 150px;
+  justify-content: center;
+}
+
+.restoreProgressTrack {
+  width: min(320px, 100%);
+  height: 10px;
+  overflow: hidden;
+  align-self: center;
+  background: rgba(226, 232, 240, 0.92);
+  border-radius: 999px;
+}
+
+.restoreProgressBar {
+  width: var(--restore-progress);
+  height: 100%;
+  background: var(--color-accent-strong);
+  border-radius: inherit;
+  transition: width 220ms ease;
+}

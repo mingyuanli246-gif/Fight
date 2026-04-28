@@ -85,6 +85,8 @@ function createNoteImageNodeView(props: NodeViewRendererProps) {
   const resizeHandle = document.createElement("button");
   let currentNode = props.node;
   let renderVersion = 0;
+  let isNodeSelected = false;
+  let isUserActivatedSelection = false;
   let dragState:
     | {
         pointerId: number;
@@ -143,10 +145,21 @@ function createNoteImageNodeView(props: NodeViewRendererProps) {
     setFrameWidth(normalizeNoteImageWidthPx(node.attrs.widthPx));
   }
 
+  function syncSelectionStyle() {
+    if (isNodeSelected && isUserActivatedSelection) {
+      dom.classList.add(styles.noteImageSelected);
+      return;
+    }
+
+    dom.classList.remove(styles.noteImageSelected);
+  }
+
   function selectCurrentNode() {
+    isUserActivatedSelection = true;
     const position = props.getPos();
 
     if (typeof position !== "number") {
+      syncSelectionStyle();
       return;
     }
 
@@ -157,6 +170,8 @@ function createNoteImageNodeView(props: NodeViewRendererProps) {
       dispatch(state.tr.setSelection(selection));
     }
 
+    isNodeSelected = true;
+    syncSelectionStyle();
     props.editor.view.focus();
   }
 
@@ -402,10 +417,13 @@ function createNoteImageNodeView(props: NodeViewRendererProps) {
       return true;
     },
     selectNode() {
-      dom.classList.add(styles.noteImageSelected);
+      isNodeSelected = true;
+      syncSelectionStyle();
     },
     deselectNode() {
-      dom.classList.remove(styles.noteImageSelected);
+      isNodeSelected = false;
+      isUserActivatedSelection = false;
+      syncSelectionStyle();
     },
     ignoreMutation() {
       return true;
