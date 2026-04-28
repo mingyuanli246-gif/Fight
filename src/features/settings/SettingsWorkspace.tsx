@@ -181,7 +181,6 @@ export function SettingsWorkspace({
   const [backups, setBackups] = useState<BackupListItem[]>([]);
   const [isLoadingBackups, setIsLoadingBackups] = useState(true);
   const [isInitializing, setIsInitializing] = useState(true);
-  const [isRefreshingStorage, setIsRefreshingStorage] = useState(false);
   const [operationState, setOperationState] =
     useState<BackupOperationState>("idle");
   const [notice, setNotice] = useState<SettingsNotice | null>(startupNotice);
@@ -368,26 +367,19 @@ export function SettingsWorkspace({
     }
   }
 
-  async function refreshStorageInfo(showNotice = true) {
-    setIsRefreshingStorage(true);
-
+  async function refreshStorageInfo() {
     try {
       const nextEnvironmentInfo = await getDataEnvironmentInfo();
       setEnvironmentInfo(nextEnvironmentInfo);
-      if (showNotice) {
-        setNotice(buildNotice("info", "存储信息已刷新。"));
-      }
       return nextEnvironmentInfo;
     } catch (error) {
       setNotice(
         buildNotice(
           "error",
-          getErrorMessage(error, "刷新存储信息失败，请稍后重试。"),
+          getErrorMessage(error, "更新存储信息失败，请稍后重试。"),
         ),
       );
       return null;
-    } finally {
-      setIsRefreshingStorage(false);
     }
   }
 
@@ -470,7 +462,7 @@ export function SettingsWorkspace({
       });
       setSettings(nextSettings);
       await refreshBackups("initial-load");
-      await refreshStorageInfo(false);
+      await refreshStorageInfo();
     } catch (error) {
       setNotice(
         buildNotice(
@@ -538,7 +530,7 @@ export function SettingsWorkspace({
 
     try {
       await refreshBackups("post-create");
-      await refreshStorageInfo(false);
+      await refreshStorageInfo();
     } catch (error) {
       setNotice(
         buildNotice(
@@ -644,7 +636,7 @@ export function SettingsWorkspace({
       await deleteBackup(fileName);
       setDeleteDialogFileName(null);
       await refreshBackups("initial-load");
-      await refreshStorageInfo(false);
+      await refreshStorageInfo();
     } catch (error) {
       setDeleteDialogFileName(null);
       setNotice(
@@ -889,6 +881,25 @@ export function SettingsWorkspace({
                 </span>
               </dd>
             </div>
+            <div className={styles.pathRow}>
+              <dt>缓存目录</dt>
+              <dd>
+                <span>{environmentInfo?.cacheDir ?? "读取失败"}</span>
+                {environmentInfo?.webviewCacheDir ? (
+                  <span className={styles.pathHint}>
+                    WebKit：{environmentInfo.webviewCacheDir}
+                  </span>
+                ) : null}
+              </dd>
+            </div>
+            <div className={styles.pathRow}>
+              <dt>日志目录</dt>
+              <dd>{environmentInfo?.logDir ?? "读取失败"}</dd>
+            </div>
+            <div className={styles.pathRow}>
+              <dt>临时目录</dt>
+              <dd>{environmentInfo?.tempDir ?? "读取失败"}</dd>
+            </div>
           </dl>
 
           <div className={styles.storageStats}>
@@ -931,172 +942,172 @@ export function SettingsWorkspace({
             >
               打开备份目录
             </button>
-            <button
-              type="button"
-              className={styles.secondaryButton}
-              disabled={isRefreshingStorage}
-              onClick={() => void refreshStorageInfo()}
-            >
-              {isRefreshingStorage ? "刷新中…" : "刷新存储信息"}
-            </button>
           </div>
         </section>
 
-        <section className={styles.panel}>
-          <div className={styles.sectionHeader}>
-            <div>
-              <h3 className={styles.sectionTitle}>备份策略</h3>
-              <p className={styles.sectionDescription}>
-                自动备份只在应用启动时检查一次，达到所选间隔才会创建新备份。
-              </p>
+        <div className={styles.backupColumn}>
+          <section className={styles.panel}>
+            <div className={styles.sectionHeader}>
+              <div>
+                <h3 className={styles.sectionTitle}>备份策略</h3>
+                <p className={styles.sectionDescription}>
+                  自动备份只在应用启动时检查一次，达到所选间隔才会创建新备份。
+                </p>
+              </div>
+              <span className={styles.metaText}>
+                最近自动备份：{formatDateLabel(settings?.lastAutoBackupDate ?? null)}
+              </span>
             </div>
-            <span className={styles.metaText}>
-              最近自动备份：{formatDateLabel(settings?.lastAutoBackupDate ?? null)}
-            </span>
-          </div>
 
-          <div className={styles.controlGroup}>
-            <label className={styles.toggleRow}>
-              <div>
-                <span className={styles.controlLabel}>自动备份</span>
-                <span className={styles.controlHint}>
-                  开启后，应用启动时会根据频率设置自动创建备份。
-                </span>
-              </div>
-              <input
-                type="checkbox"
-                checked={settings?.autoBackupEnabled ?? false}
-                disabled={isBusy || !settings}
-                onChange={(event) =>
-                  void handleAutoBackupToggle(event.currentTarget.checked)
-                }
-              />
-            </label>
-
-            <label className={styles.selectRow}>
-              <div>
-                <span className={styles.controlLabel}>自动备份频率</span>
-                <span className={styles.controlHint}>
-                  仅在应用启动时检查，不会在后台定时运行。
-                </span>
-              </div>
-              <select
-                value={settings?.backupFrequencyDays ?? 1}
-                disabled={isBusy || !settings}
-                onChange={(event) =>
-                  void handleBackupFrequencyChange(
-                    Number(event.currentTarget.value) as (typeof BACKUP_FREQUENCY_OPTIONS)[number],
-                  )
-                }
-              >
-                {BACKUP_FREQUENCY_OPTIONS.map((option) => (
-                  <option key={option} value={option}>
-                    每 {option} 天
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label className={styles.selectRow}>
-              <div>
-                <span className={styles.controlLabel}>保留份数</span>
-                <span className={styles.controlHint}>
-                  保留份数会作用于所有备份文件，超过数量后会自动删除最旧备份。
-                </span>
-              </div>
-              <select
-                value={settings?.backupRetentionCount ?? 5}
-                disabled={isBusy || !settings}
-                onChange={(event) =>
-                  void handleRetentionChange(
-                    Number(event.currentTarget.value) as (typeof RETENTION_OPTIONS)[number],
-                  )
-                }
-              >
-                {RETENTION_OPTIONS.map((option) => (
-                  <option key={option} value={option}>
-                    保留 {option} 份
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <button
-              type="button"
-              className={styles.primaryButton}
-              disabled={isBusy || !settings}
-              onClick={() => void handleCreateBackup()}
-            >
-              {operationState === "creating" ? "备份中…" : "立即创建备份"}
-            </button>
-          </div>
-        </section>
-      </div>
-
-      <section className={styles.panel}>
-        <div className={styles.sectionHeader}>
-          <div>
-            <h3 className={styles.sectionTitle}>备份列表</h3>
-            <p className={styles.sectionDescription}>
-              选择已有备份恢复，或在没有本地备份时选择外部备份文件恢复。
-            </p>
-          </div>
-          <span className={styles.metaText}>共 {backups.length} 份</span>
-        </div>
-
-        {isLoadingBackups && backups.length === 0 ? (
-          <p className={styles.loadingText}>正在读取备份列表…</p>
-        ) : backups.length === 0 ? (
-          <div className={styles.emptyState}>
-            <strong>还没有本地备份</strong>
-            <span>点击“立即创建备份”后，这里会显示可恢复的备份列表。</span>
-            <button
-              type="button"
-              className={styles.secondaryButton}
-              disabled={isBusy || !settings}
-              onClick={() => void handleSelectRestoreBackup()}
-            >
-              选择外部备份文件恢复
-            </button>
-          </div>
-        ) : (
-          <div className={styles.backupList}>
-            {backups.map((backup) => (
-              <article key={backup.fileName} className={styles.backupItem}>
-                <div className={styles.backupMeta}>
-                  <div className={styles.backupTitleRow}>
-                    <strong className={styles.backupName}>{backup.fileName}</strong>
-                  </div>
-
-                  <div className={styles.backupInfoRow}>
-                    <span>创建时间：{backup.createdAt}</span>
-                    <span>文件大小：{formatBytes(backup.sizeBytes)}</span>
-                  </div>
-
-                  <div className={styles.actionRow}>
-                    <button
-                      type="button"
-                      className={styles.secondaryButton}
-                      disabled={isBusy}
-                      onClick={() => void handlePrepareRestore(backup)}
-                    >
-                      恢复备份
-                    </button>
-                    <button
-                      type="button"
-                      className={styles.secondaryButton}
-                      disabled={isBusy}
-                      onClick={() => handleRequestDeleteBackup(backup.fileName)}
-                    >
-                      删除
-                    </button>
-                  </div>
+            <div className={styles.controlGroup}>
+              <label className={styles.toggleRow}>
+                <div>
+                  <span className={styles.controlLabel}>自动备份</span>
+                  <span className={styles.controlHint}>
+                    开启后，应用启动时会根据频率设置自动创建备份。
+                  </span>
                 </div>
-              </article>
-            ))}
-          </div>
-        )}
-      </section>
+                <input
+                  type="checkbox"
+                  checked={settings?.autoBackupEnabled ?? false}
+                  disabled={isBusy || !settings}
+                  onChange={(event) =>
+                    void handleAutoBackupToggle(event.currentTarget.checked)
+                  }
+                />
+              </label>
+
+              <label className={styles.selectRow}>
+                <div>
+                  <span className={styles.controlLabel}>自动备份频率</span>
+                  <span className={styles.controlHint}>
+                    仅在应用启动时检查，不会在后台定时运行。
+                  </span>
+                </div>
+                <select
+                  value={settings?.backupFrequencyDays ?? 1}
+                  disabled={isBusy || !settings}
+                  onChange={(event) =>
+                    void handleBackupFrequencyChange(
+                      Number(
+                        event.currentTarget.value,
+                      ) as (typeof BACKUP_FREQUENCY_OPTIONS)[number],
+                    )
+                  }
+                >
+                  {BACKUP_FREQUENCY_OPTIONS.map((option) => (
+                    <option key={option} value={option}>
+                      每 {option} 天
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className={styles.selectRow}>
+                <div>
+                  <span className={styles.controlLabel}>保留份数</span>
+                  <span className={styles.controlHint}>
+                    保留份数会作用于所有备份文件，超过数量后会自动删除最旧备份。
+                  </span>
+                </div>
+                <select
+                  value={settings?.backupRetentionCount ?? 5}
+                  disabled={isBusy || !settings}
+                  onChange={(event) =>
+                    void handleRetentionChange(
+                      Number(
+                        event.currentTarget.value,
+                      ) as (typeof RETENTION_OPTIONS)[number],
+                    )
+                  }
+                >
+                  {RETENTION_OPTIONS.map((option) => (
+                    <option key={option} value={option}>
+                      保留 {option} 份
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <button
+                type="button"
+                className={styles.primaryButton}
+                disabled={isBusy || !settings}
+                onClick={() => void handleCreateBackup()}
+              >
+                {operationState === "creating" ? "备份中…" : "立即创建备份"}
+              </button>
+            </div>
+          </section>
+
+          <section className={`${styles.panel} ${styles.backupListPanel}`}>
+            <div className={styles.sectionHeader}>
+              <div>
+                <h3 className={styles.sectionTitle}>备份列表</h3>
+                <p className={styles.sectionDescription}>
+                  选择已有备份恢复，或在没有本地备份时选择外部备份文件恢复。
+                </p>
+              </div>
+              <span className={styles.metaText}>共 {backups.length} 份</span>
+            </div>
+
+            <div className={styles.backupListContent}>
+              {isLoadingBackups && backups.length === 0 ? (
+                <p className={styles.loadingText}>正在读取备份列表…</p>
+              ) : backups.length === 0 ? (
+                <div className={styles.emptyState}>
+                  <strong>还没有本地备份</strong>
+                  <span>点击“立即创建备份”后，这里会显示可恢复的备份列表。</span>
+                  <button
+                    type="button"
+                    className={styles.secondaryButton}
+                    disabled={isBusy || !settings}
+                    onClick={() => void handleSelectRestoreBackup()}
+                  >
+                    选择外部备份文件恢复
+                  </button>
+                </div>
+              ) : (
+                <div className={styles.backupList}>
+                  {backups.map((backup) => (
+                    <article key={backup.fileName} className={styles.backupItem}>
+                      <div className={styles.backupMeta}>
+                        <div className={styles.backupTitleRow}>
+                          <strong className={styles.backupName}>{backup.fileName}</strong>
+                        </div>
+
+                        <div className={styles.backupInfoRow}>
+                          <span>创建时间：{backup.createdAt}</span>
+                          <span>文件大小：{formatBytes(backup.sizeBytes)}</span>
+                        </div>
+
+                        <div className={styles.actionRow}>
+                          <button
+                            type="button"
+                            className={styles.secondaryButton}
+                            disabled={isBusy}
+                            onClick={() => void handlePrepareRestore(backup)}
+                          >
+                            恢复备份
+                          </button>
+                          <button
+                            type="button"
+                            className={styles.secondaryButton}
+                            disabled={isBusy}
+                            onClick={() => handleRequestDeleteBackup(backup.fileName)}
+                          >
+                            删除
+                          </button>
+                        </div>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </div>
+          </section>
+        </div>
+      </div>
 
       {restoreDialog ? (
         <div className={styles.modalBackdrop} role="presentation">

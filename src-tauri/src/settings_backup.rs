@@ -119,6 +119,7 @@ pub struct DataEnvironmentInfo {
     pub backups_dir: String,
     pub legacy_backups_dir: String,
     pub cache_dir: String,
+    pub webview_cache_dir: Option<String>,
     pub log_dir: String,
     pub temp_dir: String,
     pub app_version: String,
@@ -126,6 +127,7 @@ pub struct DataEnvironmentInfo {
     pub resources_size_bytes: u64,
     pub backups_size_bytes: u64,
     pub cache_size_bytes: u64,
+    pub webview_cache_size_bytes: u64,
     pub legacy_backups_size_bytes: u64,
 }
 
@@ -265,6 +267,7 @@ struct AppPaths {
     backups: PathBuf,
     legacy_backups: PathBuf,
     cache: PathBuf,
+    webview_cache: Option<PathBuf>,
     log: PathBuf,
     temp: PathBuf,
 }
@@ -405,6 +408,11 @@ fn resolve_app_paths<R: Runtime>(app: &AppHandle<R>) -> Result<AppPaths, String>
         .temp_dir()
         .map_err(|_| "读取临时目录失败。".to_string())?
         .join(APP_TEMP_DIR_NAME);
+    let webview_cache = app
+        .path()
+        .cache_dir()
+        .ok()
+        .map(|cache_dir| cache_dir.join(&app.package_info().name));
 
     Ok(AppPaths {
         database: root.join(DATABASE_FILE_NAME),
@@ -413,6 +421,7 @@ fn resolve_app_paths<R: Runtime>(app: &AppHandle<R>) -> Result<AppPaths, String>
         backups,
         legacy_backups: root.join(BACKUPS_DIR_NAME),
         cache,
+        webview_cache,
         log,
         temp,
         root,
@@ -421,6 +430,15 @@ fn resolve_app_paths<R: Runtime>(app: &AppHandle<R>) -> Result<AppPaths, String>
 
 fn ensure_directory(path: &Path, label: &str) -> Result<(), String> {
     fs::create_dir_all(path).map_err(|error| format!("创建{label}失败：{error}"))
+}
+
+fn ensure_app_temp_dir(paths: &AppPaths) -> Result<(), String> {
+    ensure_directory(&paths.temp, "应用临时目录")
+}
+
+fn create_app_temp_dir(paths: &AppPaths, label: &str) -> Result<TempDir, String> {
+    ensure_app_temp_dir(paths)?;
+    tempdir_in(&paths.temp).map_err(|error| format!("创建{label}失败：{error}"))
 }
 
 fn resolve_document_backups_dir<E>(documents: Result<PathBuf, E>) -> Result<PathBuf, String> {
@@ -451,6 +469,16 @@ fn directory_size_bytes(path: &Path) -> u64 {
         .filter_map(|entry| entry.metadata().ok())
         .map(|metadata| metadata.len())
         .sum()
+}
+
+fn cache_size_bytes(paths: &AppPaths) -> u64 {
+    let webview_cache_size = paths
+        .webview_cache
+        .as_deref()
+        .map(directory_size_bytes)
+        .unwrap_or(0);
+
+    directory_size_bytes(&paths.cache) + webview_cache_size
 }
 
 fn file_size_bytes(path: &Path) -> u64 {
@@ -668,7 +696,7 @@ fn ensure_app_environment<R: Runtime>(
     ensure_directory(&paths.root, "应用数据目录")?;
     ensure_directory(&paths.resources, "资源目录")?;
     ensure_directory(&paths.backups, "备份目录")?;
-    ensure_directory(&paths.temp, "应用临时目录")?;
+    ensure_app_temp_dir(&paths)?;
     cleanup_legacy_backups_once(&paths);
 
     let settings = if paths.settings.exists() {
@@ -1459,13 +1487,25 @@ fn validate_resources_archive_entry(
         .map_err(|error| BackupError::new(BackupErrorKind::ResourcesInvalid, error))
 }
 
-fn validate_backup_archive(path: &Path) -> Result<ValidatedBackup, BackupError> {
+fn create_backup_validation_temp_dir(temp_parent: &Path) -> Result<TempDir, BackupError> {
+    ensure_directory(temp_parent, "应用临时目录")
+        .map_err(|error| BackupError::new(BackupErrorKind::BackupFileInvalid, error))?;
+    tempdir_in(temp_parent).map_err(|error| {
+        BackupError::new(
+            BackupErrorKind::BackupFileInvalid,
+            format!("创建备份校验临时目录失败：{error}"),
+        )
+    })
+}
+
+fn validate_backup_archive(
+    path: &Path,
+    temp_parent: &Path,
+) -> Result<ValidatedBackup, BackupError> {
     with_backup_stage("validate_backup_archive", || {
         let mut archive = open_backup_archive(path)?;
         let manifest = read_manifest_with_diagnostic(&mut archive)?;
-        let temp_dir = tempdir_in(std::env::temp_dir()).map_err(|error| {
-            BackupError::new(BackupErrorKind::BackupFileInvalid, error.to_string())
-        })?;
+        let temp_dir = create_backup_validation_temp_dir(temp_parent)?;
         validate_database_archive_entry(&mut archive, &manifest, temp_dir.path())?;
         validate_settings_archive_entry(&mut archive, &manifest, temp_dir.path())?;
         validate_resources_archive_entry(&mut archive, &manifest)?;
@@ -1524,7 +1564,7 @@ fn list_backup_items(paths: &AppPaths) -> Result<Vec<BackupListItem>, String> {
 fn validate_backup_file(paths: &AppPaths, file_name: &str) -> Result<BackupListItem, String> {
     let backup_path = resolve_backup_file_path(paths, file_name)?;
 
-    Ok(match validate_backup_archive(&backup_path) {
+    Ok(match validate_backup_archive(&backup_path, &paths.temp) {
         Ok(validated) => build_validated_backup_list_item(&backup_path, validated),
         Err(error) => build_invalid_backup_list_item(&backup_path, error),
     })
@@ -1560,8 +1600,7 @@ fn create_backup_snapshot_without_lock<R: Runtime>(
     file_name_prefix: &str,
     prune_by_retention: bool,
 ) -> Result<CreateBackupResult, String> {
-    let temp_dir =
-        tempdir_in(&paths.temp).map_err(|error| format!("创建备份临时目录失败：{error}"))?;
+    let temp_dir = create_app_temp_dir(paths, "备份临时目录")?;
     let snapshot_path = temp_dir.path().join(DATABASE_FILE_NAME);
     with_backup_perf("create_backup.database_snapshot", || {
         create_database_snapshot(&paths.database, &snapshot_path)
@@ -1840,12 +1879,8 @@ struct RestoreRollbackPaths {
 }
 
 fn prepare_restore_rollback(paths: &AppPaths) -> Result<RestoreRollbackPaths, BackupError> {
-    let rollback_root = tempdir_in(&paths.root).map_err(|error| {
-        BackupError::new(
-            BackupErrorKind::RestorePreparationFailed,
-            format!("创建恢复回滚目录失败：{error}"),
-        )
-    })?;
+    let rollback_root = create_app_temp_dir(paths, "恢复回滚目录")
+        .map_err(|error| BackupError::new(BackupErrorKind::RestorePreparationFailed, error))?;
     let rollback_database = rollback_root.path().join("database.rollback");
     let rollback_settings = rollback_root.path().join("settings.rollback");
     let rollback_resources = rollback_root.path().join("resources.rollback");
@@ -2013,13 +2048,22 @@ pub fn get_data_environment_info(app: AppHandle) -> Result<DataEnvironmentInfo, 
         backups_dir: paths.backups.to_string_lossy().to_string(),
         legacy_backups_dir: paths.legacy_backups.to_string_lossy().to_string(),
         cache_dir: paths.cache.to_string_lossy().to_string(),
+        webview_cache_dir: paths
+            .webview_cache
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string()),
         log_dir: paths.log.to_string_lossy().to_string(),
         temp_dir: paths.temp.to_string_lossy().to_string(),
         app_version: app.package_info().version.to_string(),
         database_size_bytes: file_size_bytes(&paths.database),
         resources_size_bytes: directory_size_bytes(&paths.resources),
         backups_size_bytes: directory_size_bytes(&paths.backups),
-        cache_size_bytes: directory_size_bytes(&paths.cache),
+        cache_size_bytes: cache_size_bytes(&paths),
+        webview_cache_size_bytes: paths
+            .webview_cache
+            .as_deref()
+            .map(directory_size_bytes)
+            .unwrap_or(0),
         legacy_backups_size_bytes: directory_size_bytes(&paths.legacy_backups),
     })
 }
@@ -2066,12 +2110,6 @@ pub fn open_data_directory(app: AppHandle) -> Result<(), String> {
 pub fn open_backups_directory(app: AppHandle) -> Result<(), String> {
     let (paths, _) = ensure_app_environment(&app)?;
     open_directory(&paths.backups, "备份目录")
-}
-
-#[tauri::command]
-pub fn open_cache_directory(app: AppHandle) -> Result<(), String> {
-    let (paths, _) = ensure_app_environment(&app)?;
-    open_directory(&paths.cache, "缓存目录")
 }
 
 #[tauri::command]
@@ -2190,12 +2228,8 @@ pub fn restore_backup(
     );
     ensure_manifest_schema_supported(&manifest).map_err(BackupError::into_user_message)?;
 
-    let temp_dir = tempdir_in(&paths.temp).map_err(|error| {
-        BackupError::new(
-            BackupErrorKind::RestorePreparationFailed,
-            format!("创建恢复临时目录失败：{error}"),
-        )
-        .into_user_message()
+    let temp_dir = create_app_temp_dir(&paths, "恢复临时目录").map_err(|error| {
+        BackupError::new(BackupErrorKind::RestorePreparationFailed, error).into_user_message()
     })?;
     let extract_dir = temp_dir.path().join("extracted");
 
@@ -2274,14 +2308,15 @@ pub fn restore_backup(
 #[cfg(test)]
 mod tests {
     use super::{
-        add_resources_to_zip, build_created_backup_list_item, cleanup_legacy_backups_once,
-        extract_backup_archive, is_legacy_backups_cleanup_target, legacy_cleanup_marker_path,
-        list_backup_items, prepare_restore_rollback, resolve_backup_file_path,
-        resolve_document_backups_dir, resource_file_compression_method, rollback_restored_data,
-        validate_backup_archive, validate_backup_file, validate_database_file_for_schema,
-        validate_manifest_archive_paths, zip_dir_options, zip_file_options, AppPaths, AppSettings,
-        BackupErrorKind, BackupManifest, BackupValidationStatus, RestoreRollbackPaths,
-        CURRENT_SCHEMA_VERSION, DOCUMENT_BACKUPS_DIR_NAME, DOCUMENT_DIR_UNAVAILABLE_MESSAGE,
+        add_resources_to_zip, build_created_backup_list_item, cache_size_bytes,
+        cleanup_legacy_backups_once, directory_size_bytes, extract_backup_archive,
+        is_legacy_backups_cleanup_target, legacy_cleanup_marker_path, list_backup_items,
+        prepare_restore_rollback, resolve_backup_file_path, resolve_document_backups_dir,
+        resource_file_compression_method, rollback_restored_data, validate_backup_archive,
+        validate_backup_file, validate_database_file_for_schema, validate_manifest_archive_paths,
+        zip_dir_options, zip_file_options, AppPaths, AppSettings, BackupErrorKind, BackupManifest,
+        BackupValidationStatus, RestoreRollbackPaths, CURRENT_SCHEMA_VERSION,
+        DOCUMENT_BACKUPS_DIR_NAME, DOCUMENT_DIR_UNAVAILABLE_MESSAGE,
     };
     use rusqlite::Connection;
     use std::fs::{self, File};
@@ -2314,6 +2349,7 @@ mod tests {
             backups,
             legacy_backups: root.join("backups"),
             cache: root.join("cache"),
+            webview_cache: Some(root.join("webkit-cache")),
             log: root.join("logs"),
             temp: root.join("tmp"),
         }
@@ -2967,8 +3003,8 @@ mod tests {
             true,
         );
 
-        let error =
-            validate_backup_archive(&backup_path).expect_err("invalid settings should fail");
+        let error = validate_backup_archive(&backup_path, &temp_dir.path().join("app-temp"))
+            .expect_err("invalid settings should fail");
 
         assert_eq!(error.kind, BackupErrorKind::SettingsInvalid);
         assert_eq!(error.user_message(), "备份中的应用设置无效，无法恢复。");
@@ -2991,17 +3027,42 @@ mod tests {
             false,
         );
 
-        let error =
-            validate_backup_archive(&backup_path).expect_err("missing resources should fail");
+        let error = validate_backup_archive(&backup_path, &temp_dir.path().join("app-temp"))
+            .expect_err("missing resources should fail");
 
         assert_eq!(error.kind, BackupErrorKind::ResourcesInvalid);
         assert_eq!(error.user_message(), "备份中的资源目录结构无效，无法恢复。");
     }
 
     #[test]
+    fn validate_backup_archive_uses_app_temp_parent() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let backup_path = temp_dir.path().join("valid.zip");
+        let app_temp = temp_dir.path().join("app-temp");
+        let database_path = create_v7_database();
+        let manifest = create_valid_manifest(Some(CURRENT_SCHEMA_VERSION));
+        let settings_bytes =
+            serde_json::to_vec(&AppSettings::default()).expect("serialize settings");
+
+        write_backup_archive(
+            &backup_path,
+            Some(&manifest),
+            Some(&database_path),
+            Some(&settings_bytes),
+            true,
+        );
+
+        validate_backup_archive(&backup_path, &app_temp).expect("valid backup");
+
+        assert!(app_temp.exists());
+    }
+
+    #[test]
     fn restore_interruption_probe_confirms_live_paths_are_missing_after_prepare_rollback() {
         let temp_dir = tempdir().expect("create temp dir");
-        let paths = create_test_paths(temp_dir.path());
+        let app_root = temp_dir.path().join("app-config");
+        let mut paths = create_test_paths(&app_root);
+        paths.temp = temp_dir.path().join("app-temp");
         fs::write(&paths.database, b"live-database").expect("write live database");
         fs::write(&paths.settings, b"live-settings").expect("write live settings");
         fs::create_dir_all(paths.resources.join("images")).expect("create resources");
@@ -3016,6 +3077,10 @@ mod tests {
         assert!(rollback_paths.database.exists());
         assert!(rollback_paths.settings.exists());
         assert!(rollback_paths.resources.exists());
+        assert!(rollback_paths.database.starts_with(&paths.temp));
+        assert!(rollback_paths.settings.starts_with(&paths.temp));
+        assert!(rollback_paths.resources.starts_with(&paths.temp));
+        assert!(!rollback_paths.database.starts_with(&paths.root));
 
         rollback_restored_data(&paths, &rollback_paths).expect("manual rollback restores data");
 
@@ -3034,6 +3099,38 @@ mod tests {
     }
 
     #[test]
+    fn prepare_restore_rollback_requires_app_temp_directory() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let paths = create_test_paths(temp_dir.path());
+        fs::write(&paths.temp, b"not a directory").expect("create temp path as file");
+
+        let error = match prepare_restore_rollback(&paths) {
+            Ok(_) => panic!("temp file should fail"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind, BackupErrorKind::RestorePreparationFailed);
+        assert!(error.detail.contains("创建应用临时目录失败"));
+    }
+
+    #[test]
+    fn cache_size_bytes_combines_app_and_webview_cache_and_ignores_missing_dirs() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let paths = create_test_paths(temp_dir.path());
+
+        assert_eq!(directory_size_bytes(&paths.cache), 0);
+        assert_eq!(cache_size_bytes(&paths), 0);
+
+        fs::create_dir_all(&paths.cache).expect("create app cache");
+        fs::write(paths.cache.join("app-cache.bin"), b"1234").expect("write app cache");
+        let webview_cache = paths.webview_cache.as_ref().expect("webview cache path");
+        fs::create_dir_all(webview_cache).expect("create webview cache");
+        fs::write(webview_cache.join("webview-cache.bin"), b"12345").expect("write webview cache");
+
+        assert_eq!(cache_size_bytes(&paths), 9);
+    }
+
+    #[test]
     fn rollback_restored_data_reports_rollback_failed() {
         let temp_dir = tempdir().expect("create temp dir");
         let rollback_root = tempdir().expect("create rollback dir");
@@ -3048,6 +3145,7 @@ mod tests {
                 .join(DOCUMENT_BACKUPS_DIR_NAME),
             legacy_backups: temp_dir.path().join("backups"),
             cache: temp_dir.path().join("cache"),
+            webview_cache: Some(temp_dir.path().join("webkit-cache")),
             log: temp_dir.path().join("logs"),
             temp: temp_dir.path().join("tmp"),
         };

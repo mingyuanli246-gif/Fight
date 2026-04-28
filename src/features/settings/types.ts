@@ -26,6 +26,7 @@ export interface DataEnvironmentInfo {
   backupsDir: string;
   legacyBackupsDir: string;
   cacheDir: string;
+  webviewCacheDir: string | null;
   logDir: string;
   tempDir: string;
   appVersion: string;
@@ -33,6 +34,7 @@ export interface DataEnvironmentInfo {
   resourcesSizeBytes: number;
   backupsSizeBytes: number;
   cacheSizeBytes: number;
+  webviewCacheSizeBytes: number;
   legacyBackupsSizeBytes: number;
 }
 
