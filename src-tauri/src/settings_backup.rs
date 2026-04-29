@@ -20,6 +20,8 @@ const RESOURCES_DIR_NAME: &str = "resources";
 const BACKUPS_DIR_NAME: &str = "backups";
 const DOCUMENT_BACKUPS_DIR_NAME: &str = "本地笔记备份";
 const LEGACY_BACKUPS_CLEANUP_MARKER_FILE_NAME: &str = ".legacy-backups-cleanup-v1";
+const RESTORE_JOURNAL_FILE_NAME: &str = "restore-journal.json";
+const RESTORE_JOURNAL_SCHEMA_VERSION: u32 = 1;
 const APP_TEMP_DIR_NAME: &str = "com.lihongxia.fight";
 const BACKUP_FILE_PREFIX: &str = "fight-notes-backup";
 const RESTORE_PROGRESS_EVENT: &str = "backup-restore-progress";
@@ -687,6 +689,68 @@ fn write_settings_atomically(path: &Path, settings: &AppSettings) -> Result<(), 
         .map_err(|error| format!("替换应用设置失败：{error}"))?;
 
     Ok(())
+}
+
+fn restore_journal_path(paths: &AppPaths) -> PathBuf {
+    paths.root.join(RESTORE_JOURNAL_FILE_NAME)
+}
+
+fn write_restore_journal_atomically(
+    paths: &AppPaths,
+    journal: &RestoreJournal,
+) -> Result<(), String> {
+    ensure_directory(&paths.root, "应用数据目录")?;
+    let path = restore_journal_path(paths);
+    let parent = path
+        .parent()
+        .ok_or_else(|| "恢复状态文件目录无效。".to_string())?;
+    let mut temp_file = NamedTempFile::new_in(parent)
+        .map_err(|error| format!("创建恢复状态临时文件失败：{error}"))?;
+
+    serde_json::to_writer_pretty(&mut temp_file, journal)
+        .map_err(|error| format!("写入恢复状态文件失败：{error}"))?;
+    temp_file
+        .write_all(b"\n")
+        .map_err(|error| format!("写入恢复状态文件失败：{error}"))?;
+    temp_file
+        .as_file()
+        .sync_all()
+        .map_err(|error| format!("同步恢复状态文件失败：{error}"))?;
+    temp_file
+        .persist(&path)
+        .map_err(|error| format!("替换恢复状态文件失败：{error}"))?;
+
+    Ok(())
+}
+
+fn read_restore_journal(paths: &AppPaths) -> Result<Option<RestoreJournal>, String> {
+    let path = restore_journal_path(paths);
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let content =
+        fs::read_to_string(&path).map_err(|error| format!("读取恢复状态文件失败：{error}"))?;
+    let journal: RestoreJournal =
+        serde_json::from_str(&content).map_err(|error| format!("解析恢复状态文件失败：{error}"))?;
+
+    if journal.schema_version != RESTORE_JOURNAL_SCHEMA_VERSION {
+        return Err(format!(
+            "恢复状态文件版本不受支持：{}",
+            journal.schema_version
+        ));
+    }
+
+    Ok(Some(journal))
+}
+
+fn remove_restore_journal(paths: &AppPaths) -> Result<(), String> {
+    let path = restore_journal_path(paths);
+    if !path.exists() {
+        return Ok(());
+    }
+
+    fs::remove_file(&path).map_err(|error| format!("删除恢复状态文件失败：{error}"))
 }
 
 fn ensure_app_environment<R: Runtime>(
@@ -1570,8 +1634,52 @@ fn validate_backup_file(paths: &AppPaths, file_name: &str) -> Result<BackupListI
     })
 }
 
+fn is_app_generated_backup_file(path: &Path) -> bool {
+    let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+
+    file_name.starts_with(&format!("{BACKUP_FILE_PREFIX}-")) && file_name.ends_with(".zip")
+}
+
+fn is_prunable_app_backup_file(path: &Path) -> bool {
+    if !is_app_generated_backup_file(path) {
+        return false;
+    }
+
+    let Ok(file) = File::open(path) else {
+        return false;
+    };
+    let Ok(mut archive) = ZipArchive::new(file) else {
+        return false;
+    };
+    let Ok(manifest) = read_manifest_from_archive(&mut archive) else {
+        return false;
+    };
+    if ensure_manifest_schema_supported(&manifest).is_err() {
+        return false;
+    }
+
+    archive_has_entry(
+        &mut archive,
+        &format!("database/{}", manifest.database_file),
+    ) && archive_has_entry(
+        &mut archive,
+        &format!("settings/{}", manifest.settings_file),
+    ) && ensure_archive_has_resources(&mut archive, &manifest.resource_directory).is_ok()
+}
+
+fn collect_prunable_backup_file_paths(backups_dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut backup_files = collect_backup_file_paths(backups_dir)?
+        .into_iter()
+        .filter(|path| is_prunable_app_backup_file(path))
+        .collect::<Vec<_>>();
+    sort_backup_paths_newest_first(&mut backup_files);
+    Ok(backup_files)
+}
+
 fn prune_old_backups(backups_dir: &Path, retention_count: usize) -> Result<(), String> {
-    let backup_files = collect_backup_file_paths(backups_dir)?;
+    let backup_files = collect_prunable_backup_file_paths(backups_dir)?;
 
     let mut warnings = Vec::new();
 
@@ -1646,16 +1754,19 @@ fn create_backup_snapshot_without_lock<R: Runtime>(
     log_backup_perf_complete("create_backup.zip_write", zip_write_started_at);
 
     let result_started_at = Instant::now();
-    if prune_by_retention {
-        prune_old_backups(&paths.backups, settings.backup_retention_count as usize)?;
-    }
     let backup = build_created_backup_list_item(&backup_path, &manifest)?;
+    let mut warning = None;
+    if prune_by_retention {
+        if let Err(error) =
+            prune_old_backups(&paths.backups, settings.backup_retention_count as usize)
+        {
+            eprintln!("[settings.backup] 备份已创建，但自动裁剪旧备份失败：{error}");
+            warning = Some(format!("备份已创建，但自动裁剪旧备份失败：{error}"));
+        }
+    }
     log_backup_perf_complete("create_backup.result", result_started_at);
 
-    Ok(CreateBackupResult {
-        backup,
-        warning: None,
-    })
+    Ok(CreateBackupResult { backup, warning })
 }
 
 fn create_backup_internal<R: Runtime>(
@@ -1848,6 +1959,7 @@ fn extract_backup_archive(
 
 #[derive(Debug)]
 struct RestoreRollbackPaths {
+    root_path: PathBuf,
     root: Option<TempDir>,
     kept_root: Option<PathBuf>,
     database: PathBuf,
@@ -1864,10 +1976,7 @@ impl RestoreRollbackPaths {
         } else if let Some(path) = &self.kept_root {
             path.clone()
         } else {
-            self.database
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_default()
+            self.root_path.clone()
         }
     }
 }
@@ -1878,11 +1987,126 @@ enum RestorePathKind {
     Directory,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum RestoreJournalStage {
+    PreparingRollback,
+    RollbackReady,
+    Installing,
+    RestoreCommitted,
+    Cleanup,
+    RollbackCompleted,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum RestoreJournalPathKind {
+    File,
+    Directory,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RestoreJournalMoveItem {
+    source: String,
+    target: String,
+    kind: RestoreJournalPathKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RestoreJournalTargetItem {
+    path: String,
+    kind: RestoreJournalPathKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RestoreJournalDataPaths {
+    database: String,
+    settings: String,
+    resources: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RestoreJournal {
+    schema_version: u32,
+    operation_id: String,
+    started_at: String,
+    stage: RestoreJournalStage,
+    rollback_temp_dir: String,
+    data_paths: RestoreJournalDataPaths,
+    rollback_paths: RestoreJournalDataPaths,
+    rollback_items: Vec<RestoreJournalMoveItem>,
+    moving_rollback_item: Option<RestoreJournalMoveItem>,
+    installed_items: Vec<RestoreJournalTargetItem>,
+    installing_item: Option<RestoreJournalTargetItem>,
+}
+
 #[derive(Clone, Debug)]
 struct RestoreMoveItem {
     source: PathBuf,
     target: PathBuf,
     kind: RestorePathKind,
+}
+
+#[derive(Clone, Debug)]
+struct RestoreInstalledItem {
+    path: PathBuf,
+    kind: RestorePathKind,
+}
+
+fn journal_path_string(path: &Path) -> String {
+    path.to_string_lossy().to_string()
+}
+
+fn journal_path(value: &str) -> PathBuf {
+    PathBuf::from(value)
+}
+
+fn journal_kind_from_restore(kind: RestorePathKind) -> RestoreJournalPathKind {
+    match kind {
+        RestorePathKind::File => RestoreJournalPathKind::File,
+        RestorePathKind::Directory => RestoreJournalPathKind::Directory,
+    }
+}
+
+fn restore_kind_from_journal(kind: RestoreJournalPathKind) -> RestorePathKind {
+    match kind {
+        RestoreJournalPathKind::File => RestorePathKind::File,
+        RestoreJournalPathKind::Directory => RestorePathKind::Directory,
+    }
+}
+
+fn journal_move_item_from_restore(item: &RestoreMoveItem) -> RestoreJournalMoveItem {
+    RestoreJournalMoveItem {
+        source: journal_path_string(&item.source),
+        target: journal_path_string(&item.target),
+        kind: journal_kind_from_restore(item.kind),
+    }
+}
+
+fn restore_move_item_from_journal(item: &RestoreJournalMoveItem) -> RestoreMoveItem {
+    RestoreMoveItem {
+        source: journal_path(&item.source),
+        target: journal_path(&item.target),
+        kind: restore_kind_from_journal(item.kind),
+    }
+}
+
+fn journal_target_item(path: &Path, kind: RestorePathKind) -> RestoreJournalTargetItem {
+    RestoreJournalTargetItem {
+        path: journal_path_string(path),
+        kind: journal_kind_from_restore(kind),
+    }
+}
+
+fn restore_installed_item_from_journal(item: &RestoreJournalTargetItem) -> RestoreInstalledItem {
+    RestoreInstalledItem {
+        path: journal_path(&item.path),
+        kind: restore_kind_from_journal(item.kind),
+    }
 }
 
 fn is_cross_device_error(error: &io::Error) -> bool {
@@ -2067,13 +2291,43 @@ fn move_path_for_restore(
     }
 }
 
-fn move_existing_path_for_restore(item: &RestoreMoveItem) -> Result<bool, String> {
-    if !item.source.exists() {
-        return Ok(false);
+fn validate_restore_target_path(
+    paths: &AppPaths,
+    path: &Path,
+    kind: RestorePathKind,
+) -> Result<(), String> {
+    if path == paths.database && kind == RestorePathKind::File {
+        return Ok(());
     }
 
-    move_path_for_restore(&item.source, &item.target, item.kind)?;
-    Ok(true)
+    if path == paths.settings && kind == RestorePathKind::File {
+        return Ok(());
+    }
+
+    if path == paths.resources && kind == RestorePathKind::Directory {
+        return Ok(());
+    }
+
+    Err(format!("恢复目标路径不允许删除或覆盖：{}", path.display()))
+}
+
+fn record_installed_item(
+    paths: &AppPaths,
+    installed_items: &mut Vec<RestoreInstalledItem>,
+    path: &Path,
+    kind: RestorePathKind,
+) -> Result<(), String> {
+    validate_restore_target_path(paths, path, kind)?;
+
+    if installed_items.iter().any(|item| item.path == path) {
+        return Ok(());
+    }
+
+    installed_items.push(RestoreInstalledItem {
+        path: path.to_path_buf(),
+        kind,
+    });
+    Ok(())
 }
 
 fn copy_file_without_overwrite_for_restore(source: &Path, target: &Path) -> Result<(), String> {
@@ -2114,6 +2368,128 @@ fn build_restore_move_items(
             kind: RestorePathKind::Directory,
         },
     ]
+}
+
+fn create_restore_rollback_paths(paths: &AppPaths) -> Result<RestoreRollbackPaths, BackupError> {
+    let rollback_root = create_app_temp_dir(paths, "恢复回滚目录")
+        .map_err(|error| BackupError::new(BackupErrorKind::RestorePreparationFailed, error))?;
+    let root_path = rollback_root.path().to_path_buf();
+
+    Ok(RestoreRollbackPaths {
+        root_path: root_path.clone(),
+        root: Some(rollback_root),
+        kept_root: None,
+        database: root_path.join("database.rollback"),
+        settings: root_path.join("settings.rollback"),
+        resources: root_path.join("resources.rollback"),
+    })
+}
+
+fn rollback_paths_from_journal(journal: &RestoreJournal) -> RestoreRollbackPaths {
+    RestoreRollbackPaths {
+        root_path: journal_path(&journal.rollback_temp_dir),
+        root: None,
+        kept_root: None,
+        database: journal_path(&journal.rollback_paths.database),
+        settings: journal_path(&journal.rollback_paths.settings),
+        resources: journal_path(&journal.rollback_paths.resources),
+    }
+}
+
+fn data_paths_for_journal(
+    database: &Path,
+    settings: &Path,
+    resources: &Path,
+) -> RestoreJournalDataPaths {
+    RestoreJournalDataPaths {
+        database: journal_path_string(database),
+        settings: journal_path_string(settings),
+        resources: journal_path_string(resources),
+    }
+}
+
+fn new_restore_journal(paths: &AppPaths, rollback_paths: &RestoreRollbackPaths) -> RestoreJournal {
+    RestoreJournal {
+        schema_version: RESTORE_JOURNAL_SCHEMA_VERSION,
+        operation_id: format!(
+            "restore-{}-{}",
+            Local::now().format("%Y%m%d%H%M%S%3f"),
+            std::process::id()
+        ),
+        started_at: current_timestamp_label(),
+        stage: RestoreJournalStage::PreparingRollback,
+        rollback_temp_dir: journal_path_string(&rollback_paths.root_path),
+        data_paths: data_paths_for_journal(&paths.database, &paths.settings, &paths.resources),
+        rollback_paths: data_paths_for_journal(
+            &rollback_paths.database,
+            &rollback_paths.settings,
+            &rollback_paths.resources,
+        ),
+        rollback_items: Vec::new(),
+        moving_rollback_item: None,
+        installed_items: Vec::new(),
+        installing_item: None,
+    }
+}
+
+fn set_restore_journal_stage(
+    paths: &AppPaths,
+    journal: &mut RestoreJournal,
+    stage: RestoreJournalStage,
+) -> Result<(), String> {
+    journal.stage = stage;
+    write_restore_journal_atomically(paths, journal)
+}
+
+fn set_moving_rollback_item(
+    paths: &AppPaths,
+    journal: &mut RestoreJournal,
+    item: Option<RestoreJournalMoveItem>,
+) -> Result<(), String> {
+    journal.moving_rollback_item = item;
+    write_restore_journal_atomically(paths, journal)
+}
+
+fn record_journal_rollback_item(
+    paths: &AppPaths,
+    journal: &mut RestoreJournal,
+    item: &RestoreMoveItem,
+) -> Result<(), String> {
+    let journal_item = journal_move_item_from_restore(item);
+    if !journal.rollback_items.iter().any(|existing| {
+        existing.source == journal_item.source
+            && existing.target == journal_item.target
+            && existing.kind == journal_item.kind
+    }) {
+        journal.rollback_items.push(journal_item);
+    }
+    journal.moving_rollback_item = None;
+    write_restore_journal_atomically(paths, journal)
+}
+
+fn set_installing_item(
+    paths: &AppPaths,
+    journal: &mut RestoreJournal,
+    item: Option<RestoreJournalTargetItem>,
+) -> Result<(), String> {
+    journal.installing_item = item;
+    write_restore_journal_atomically(paths, journal)
+}
+
+fn record_journal_installed_item(
+    paths: &AppPaths,
+    journal: &mut RestoreJournal,
+    item: RestoreJournalTargetItem,
+) -> Result<(), String> {
+    if !journal
+        .installed_items
+        .iter()
+        .any(|existing| existing.path == item.path)
+    {
+        journal.installed_items.push(item);
+    }
+    journal.installing_item = None;
+    write_restore_journal_atomically(paths, journal)
 }
 
 fn restore_moved_items_after_prepare_failure(
@@ -2164,44 +2540,111 @@ fn restore_moved_items_after_prepare_failure(
     }
 }
 
-fn prepare_restore_rollback(paths: &AppPaths) -> Result<RestoreRollbackPaths, BackupError> {
-    let rollback_root = create_app_temp_dir(paths, "恢复回滚目录")
-        .map_err(|error| BackupError::new(BackupErrorKind::RestorePreparationFailed, error))?;
-    let rollback_database = rollback_root.path().join("database.rollback");
-    let rollback_settings = rollback_root.path().join("settings.rollback");
-    let rollback_resources = rollback_root.path().join("resources.rollback");
+fn prepare_restore_rollback(
+    paths: &AppPaths,
+) -> Result<(RestoreRollbackPaths, RestoreJournal), BackupError> {
+    let mut rollback_paths = create_restore_rollback_paths(paths)?;
+    let mut journal = new_restore_journal(paths, &rollback_paths);
+    write_restore_journal_atomically(paths, &journal).map_err(|error| {
+        BackupError::new(
+            BackupErrorKind::RestorePreparationFailed,
+            format!("写入恢复状态文件失败：{error}"),
+        )
+    })?;
 
-    let mut rollback_paths = RestoreRollbackPaths {
-        root: Some(rollback_root),
-        kept_root: None,
-        database: rollback_database,
-        settings: rollback_settings,
-        resources: rollback_resources,
-    };
     let move_items = build_restore_move_items(paths, &rollback_paths);
     let mut moved_items = Vec::new();
 
     for item in move_items {
-        match move_existing_path_for_restore(&item) {
-            Ok(true) => moved_items.push(item),
-            Ok(false) => {}
+        if !item.source.exists() {
+            continue;
+        }
+
+        if let Err(error) = set_moving_rollback_item(
+            paths,
+            &mut journal,
+            Some(journal_move_item_from_restore(&item)),
+        ) {
+            let prepare_error =
+                restore_moved_items_after_prepare_failure(&mut rollback_paths, &moved_items, error);
+            if prepare_error.detail.contains("原始数据已恢复") {
+                let _ = remove_restore_journal(paths);
+            }
+            return Err(prepare_error);
+        }
+
+        match move_path_for_restore(&item.source, &item.target, item.kind) {
+            Ok(()) => {
+                moved_items.push(item.clone());
+                if let Err(error) = record_journal_rollback_item(paths, &mut journal, &item) {
+                    return Err(restore_moved_items_after_prepare_failure(
+                        &mut rollback_paths,
+                        &moved_items,
+                        error,
+                    ));
+                }
+            }
             Err(error) => {
-                return Err(restore_moved_items_after_prepare_failure(
+                let prepare_error = restore_moved_items_after_prepare_failure(
                     &mut rollback_paths,
                     &moved_items,
                     error,
-                ));
+                );
+                if prepare_error.detail.contains("原始数据已恢复") {
+                    let _ = remove_restore_journal(paths);
+                }
+                return Err(prepare_error);
             }
         }
     }
 
-    Ok(rollback_paths)
+    set_restore_journal_stage(paths, &mut journal, RestoreJournalStage::RollbackReady).map_err(
+        |error| restore_moved_items_after_prepare_failure(&mut rollback_paths, &moved_items, error),
+    )?;
+
+    Ok((rollback_paths, journal))
 }
 
 fn rollback_restored_data(
     paths: &AppPaths,
     rollback_paths: &mut RestoreRollbackPaths,
+    installed_items: &[RestoreInstalledItem],
 ) -> Result<(), BackupError> {
+    for item in installed_items.iter().rev() {
+        if let Err(error) = validate_restore_target_path(paths, &item.path, item.kind) {
+            let kept_path = rollback_paths.keep_root();
+            return Err(BackupError::new(
+                BackupErrorKind::RollbackFailed,
+                format!(
+                    "回滚本地数据失败：{error}；rollback 临时目录已保留：{}",
+                    kept_path.display()
+                ),
+            ));
+        }
+
+        if !item.path.exists() {
+            continue;
+        }
+
+        let remove_result = match item.kind {
+            RestorePathKind::File => fs::remove_file(&item.path),
+            RestorePathKind::Directory => fs::remove_dir_all(&item.path),
+        };
+
+        if let Err(error) = remove_result {
+            let kept_path = rollback_paths.keep_root();
+            return Err(BackupError::new(
+                BackupErrorKind::RollbackFailed,
+                format!(
+                    "清理恢复半成品失败：{}：{}；rollback 临时目录已保留：{}",
+                    item.path.display(),
+                    error,
+                    kept_path.display()
+                ),
+            ));
+        }
+    }
+
     let rollback_items = vec![
         RestoreMoveItem {
             source: rollback_paths.database.clone(),
@@ -2244,7 +2687,17 @@ fn swap_restore_backup_data(
     paths: &AppPaths,
     restored: &RestoredBackupPaths,
     rollback_paths: &RestoreRollbackPaths,
+    installed_items: &mut Vec<RestoreInstalledItem>,
+    journal: &mut RestoreJournal,
 ) -> Result<(), BackupError> {
+    set_restore_journal_stage(paths, journal, RestoreJournalStage::Installing)
+        .map_err(|error| BackupError::new(BackupErrorKind::DatabaseRestoreFailed, error))?;
+    set_installing_item(
+        paths,
+        journal,
+        Some(journal_target_item(&paths.database, RestorePathKind::File)),
+    )
+    .map_err(|error| BackupError::new(BackupErrorKind::DatabaseRestoreFailed, error))?;
     move_path_for_restore(&restored.database, &paths.database, RestorePathKind::File).map_err(
         |error| {
             BackupError::new(
@@ -2253,8 +2706,27 @@ fn swap_restore_backup_data(
             )
         },
     )?;
+    record_installed_item(
+        paths,
+        installed_items,
+        &paths.database,
+        RestorePathKind::File,
+    )
+    .map_err(|error| BackupError::new(BackupErrorKind::DatabaseRestoreFailed, error))?;
+    record_journal_installed_item(
+        paths,
+        journal,
+        journal_target_item(&paths.database, RestorePathKind::File),
+    )
+    .map_err(|error| BackupError::new(BackupErrorKind::DatabaseRestoreFailed, error))?;
 
     if let Some(settings_path) = &restored.settings {
+        set_installing_item(
+            paths,
+            journal,
+            Some(journal_target_item(&paths.settings, RestorePathKind::File)),
+        )
+        .map_err(|error| BackupError::new(BackupErrorKind::SettingsRestoreFailed, error))?;
         move_path_for_restore(settings_path, &paths.settings, RestorePathKind::File).map_err(
             |error| {
                 BackupError::new(
@@ -2263,7 +2735,26 @@ fn swap_restore_backup_data(
                 )
             },
         )?;
+        record_installed_item(
+            paths,
+            installed_items,
+            &paths.settings,
+            RestorePathKind::File,
+        )
+        .map_err(|error| BackupError::new(BackupErrorKind::SettingsRestoreFailed, error))?;
+        record_journal_installed_item(
+            paths,
+            journal,
+            journal_target_item(&paths.settings, RestorePathKind::File),
+        )
+        .map_err(|error| BackupError::new(BackupErrorKind::SettingsRestoreFailed, error))?;
     } else if rollback_paths.settings.exists() {
+        set_installing_item(
+            paths,
+            journal,
+            Some(journal_target_item(&paths.settings, RestorePathKind::File)),
+        )
+        .map_err(|error| BackupError::new(BackupErrorKind::SettingsRestoreFailed, error))?;
         copy_file_without_overwrite_for_restore(&rollback_paths.settings, &paths.settings)
             .map_err(|error| {
                 BackupError::new(
@@ -2271,6 +2762,19 @@ fn swap_restore_backup_data(
                     format!("保留当前设置失败：{error}"),
                 )
             })?;
+        record_installed_item(
+            paths,
+            installed_items,
+            &paths.settings,
+            RestorePathKind::File,
+        )
+        .map_err(|error| BackupError::new(BackupErrorKind::SettingsRestoreFailed, error))?;
+        record_journal_installed_item(
+            paths,
+            journal,
+            journal_target_item(&paths.settings, RestorePathKind::File),
+        )
+        .map_err(|error| BackupError::new(BackupErrorKind::SettingsRestoreFailed, error))?;
     } else {
         if paths.settings.exists() {
             return Err(BackupError::new(
@@ -2281,14 +2785,42 @@ fn swap_restore_backup_data(
                 ),
             ));
         }
+        set_installing_item(
+            paths,
+            journal,
+            Some(journal_target_item(&paths.settings, RestorePathKind::File)),
+        )
+        .map_err(|error| BackupError::new(BackupErrorKind::SettingsRestoreFailed, error))?;
         write_settings_atomically(&paths.settings, &AppSettings::default()).map_err(|error| {
             BackupError::new(
                 BackupErrorKind::SettingsRestoreFailed,
                 format!("写入默认设置失败：{error}"),
             )
         })?;
+        record_installed_item(
+            paths,
+            installed_items,
+            &paths.settings,
+            RestorePathKind::File,
+        )
+        .map_err(|error| BackupError::new(BackupErrorKind::SettingsRestoreFailed, error))?;
+        record_journal_installed_item(
+            paths,
+            journal,
+            journal_target_item(&paths.settings, RestorePathKind::File),
+        )
+        .map_err(|error| BackupError::new(BackupErrorKind::SettingsRestoreFailed, error))?;
     }
 
+    set_installing_item(
+        paths,
+        journal,
+        Some(journal_target_item(
+            &paths.resources,
+            RestorePathKind::Directory,
+        )),
+    )
+    .map_err(|error| BackupError::new(BackupErrorKind::ResourcesRestoreFailed, error))?;
     move_path_for_restore(
         &restored.resources,
         &paths.resources,
@@ -2300,8 +2832,213 @@ fn swap_restore_backup_data(
             format!("写入恢复后的资源目录失败：{error}"),
         )
     })?;
+    record_installed_item(
+        paths,
+        installed_items,
+        &paths.resources,
+        RestorePathKind::Directory,
+    )
+    .map_err(|error| BackupError::new(BackupErrorKind::ResourcesRestoreFailed, error))?;
+    record_journal_installed_item(
+        paths,
+        journal,
+        journal_target_item(&paths.resources, RestorePathKind::Directory),
+    )
+    .map_err(|error| BackupError::new(BackupErrorKind::ResourcesRestoreFailed, error))?;
 
     Ok(())
+}
+
+fn validate_restore_journal_paths(
+    paths: &AppPaths,
+    journal: &RestoreJournal,
+) -> Result<(), String> {
+    if journal.data_paths.database != journal_path_string(&paths.database)
+        || journal.data_paths.settings != journal_path_string(&paths.settings)
+        || journal.data_paths.resources != journal_path_string(&paths.resources)
+    {
+        return Err("恢复状态文件中的正式数据路径与当前应用数据目录不一致。".to_string());
+    }
+
+    let rollback_root = journal_path(&journal.rollback_temp_dir);
+    if journal.rollback_paths.database
+        != journal_path_string(&rollback_root.join("database.rollback"))
+        || journal.rollback_paths.settings
+            != journal_path_string(&rollback_root.join("settings.rollback"))
+        || journal.rollback_paths.resources
+            != journal_path_string(&rollback_root.join("resources.rollback"))
+    {
+        return Err("恢复状态文件中的回滚路径无效。".to_string());
+    }
+
+    Ok(())
+}
+
+fn cleanup_restore_journal_terminal(
+    paths: &AppPaths,
+    journal: &RestoreJournal,
+) -> Result<(), String> {
+    let rollback_root = journal_path(&journal.rollback_temp_dir);
+    if rollback_root.exists()
+        && rollback_root.starts_with(&paths.temp)
+        && rollback_root != paths.temp
+        && rollback_root != paths.root
+        && rollback_root != paths.backups
+    {
+        if let Err(error) = fs::remove_dir_all(&rollback_root) {
+            eprintln!(
+                "[settings.backup] 清理恢复回滚临时目录失败 [{}]: {error}",
+                rollback_root.to_string_lossy()
+            );
+        }
+    }
+
+    remove_restore_journal(paths)
+}
+
+fn rollback_items_from_journal(journal: &RestoreJournal) -> Vec<RestoreMoveItem> {
+    journal
+        .rollback_items
+        .iter()
+        .map(restore_move_item_from_journal)
+        .collect()
+}
+
+fn installed_items_from_journal(journal: &RestoreJournal) -> Vec<RestoreInstalledItem> {
+    let mut installed_items: Vec<RestoreInstalledItem> = journal
+        .installed_items
+        .iter()
+        .map(restore_installed_item_from_journal)
+        .collect();
+
+    if let Some(item) = &journal.installing_item {
+        let installing = restore_installed_item_from_journal(item);
+        if !installed_items
+            .iter()
+            .any(|existing| existing.path == installing.path)
+        {
+            installed_items.push(installing);
+        }
+    }
+
+    installed_items
+}
+
+fn recover_preparing_rollback(
+    paths: &AppPaths,
+    journal: &mut RestoreJournal,
+) -> Result<(), String> {
+    let mut items = rollback_items_from_journal(journal);
+
+    if let Some(moving_item) = journal.moving_rollback_item.clone() {
+        let item = restore_move_item_from_journal(&moving_item);
+        if item.target.exists() {
+            if !items
+                .iter()
+                .any(|existing| existing.source == item.source && existing.target == item.target)
+            {
+                items.push(item);
+            }
+        } else if item.source.exists() {
+            journal.moving_rollback_item = None;
+            write_restore_journal_atomically(paths, journal)?;
+        } else {
+            return Err(format!(
+                "检测到中断的恢复准备，但原路径和 rollback 源都不存在：{} / {}",
+                item.source.display(),
+                item.target.display()
+            ));
+        }
+    }
+
+    for item in items.iter().rev() {
+        validate_restore_target_path(paths, &item.source, item.kind)?;
+
+        if item.target.exists() {
+            if item.source.exists() {
+                return Err(format!(
+                    "恢复准备中断后发现目标冲突，拒绝覆盖：{}",
+                    item.source.display()
+                ));
+            }
+            move_path_for_restore(&item.target, &item.source, item.kind)?;
+        } else if item.source.exists() {
+            continue;
+        } else {
+            return Err(format!(
+                "恢复准备中断后无法找回原始数据：{}；rollback 源缺失：{}",
+                item.source.display(),
+                item.target.display()
+            ));
+        }
+    }
+
+    set_restore_journal_stage(paths, journal, RestoreJournalStage::RollbackCompleted)?;
+    cleanup_restore_journal_terminal(paths, journal)
+}
+
+fn ensure_rollback_originals_complete(rollback_paths: &RestoreRollbackPaths) -> Result<(), String> {
+    for path in [
+        &rollback_paths.database,
+        &rollback_paths.settings,
+        &rollback_paths.resources,
+    ] {
+        if !path.exists() {
+            return Err(format!(
+                "恢复中断状态缺少 rollback 原始数据，停止自动回滚：{}",
+                path.display()
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn recover_ready_or_installing(
+    paths: &AppPaths,
+    journal: &mut RestoreJournal,
+) -> Result<(), String> {
+    let mut rollback_paths = rollback_paths_from_journal(journal);
+    ensure_rollback_originals_complete(&rollback_paths)?;
+    let installed_items = installed_items_from_journal(journal);
+
+    rollback_restored_data(paths, &mut rollback_paths, &installed_items)
+        .map_err(|error| error.detail)?;
+    set_restore_journal_stage(paths, journal, RestoreJournalStage::RollbackCompleted)?;
+    cleanup_restore_journal_terminal(paths, journal)
+}
+
+fn recover_incomplete_restore_for_paths(paths: &AppPaths) -> Result<(), String> {
+    ensure_directory(&paths.root, "应用数据目录")?;
+    let Some(mut journal) = read_restore_journal(paths)? else {
+        return Ok(());
+    };
+
+    validate_restore_journal_paths(paths, &journal)?;
+
+    match journal.stage {
+        RestoreJournalStage::PreparingRollback => recover_preparing_rollback(paths, &mut journal),
+        RestoreJournalStage::RollbackReady | RestoreJournalStage::Installing => {
+            recover_ready_or_installing(paths, &mut journal)
+        }
+        RestoreJournalStage::RestoreCommitted | RestoreJournalStage::Cleanup => {
+            if let Err(error) = cleanup_restore_journal_terminal(paths, &journal) {
+                eprintln!("[settings.backup] 清理已提交恢复状态失败：{error}");
+            }
+            Ok(())
+        }
+        RestoreJournalStage::RollbackCompleted => {
+            if let Err(error) = cleanup_restore_journal_terminal(paths, &journal) {
+                eprintln!("[settings.backup] 清理已回滚恢复状态失败：{error}");
+            }
+            Ok(())
+        }
+    }
+}
+
+pub fn recover_incomplete_restore_if_needed<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    let paths = resolve_app_paths(app)?;
+    recover_incomplete_restore_for_paths(&paths)
 }
 
 #[tauri::command]
@@ -2313,16 +3050,8 @@ pub fn load_app_settings(app: AppHandle) -> Result<AppSettings, String> {
 #[tauri::command]
 pub fn save_app_settings(app: AppHandle, update: AppSettingsUpdate) -> Result<AppSettings, String> {
     let (paths, current_settings) = ensure_app_environment(&app)?;
-    let should_prune_backups = update.backup_retention_count.is_some();
     let next_settings = merge_app_settings(&current_settings, update)?;
     write_settings_atomically(&paths.settings, &next_settings)?;
-
-    if should_prune_backups {
-        prune_old_backups(
-            &paths.backups,
-            next_settings.backup_retention_count as usize,
-        )?;
-    }
 
     Ok(next_settings)
 }
@@ -2361,8 +3090,7 @@ pub fn get_data_environment_info(app: AppHandle) -> Result<DataEnvironmentInfo, 
 
 #[tauri::command]
 pub fn list_backups(app: AppHandle) -> Result<Vec<BackupListItem>, String> {
-    let (paths, settings) = ensure_app_environment(&app)?;
-    prune_old_backups(&paths.backups, settings.backup_retention_count as usize)?;
+    let (paths, _) = ensure_app_environment(&app)?;
     list_backup_items(&paths)
 }
 
@@ -2573,25 +3301,78 @@ pub fn restore_backup(
         RestoreProgressStage::ReplacingLocalData,
         "正在替换本地数据",
     );
-    let mut rollback_paths = with_backup_stage("restore_backup.prepare_rollback", || {
-        prepare_restore_rollback(&paths)
-    })
-    .map_err(BackupError::into_user_message)?;
+    let (mut rollback_paths, mut restore_journal) =
+        with_backup_stage("restore_backup.prepare_rollback", || {
+            prepare_restore_rollback(&paths)
+        })
+        .map_err(BackupError::into_user_message)?;
+    let mut installed_items = Vec::new();
 
     if let Err(error) = with_backup_stage("restore_backup.swap_data", || {
-        swap_restore_backup_data(&paths, &restored, &rollback_paths)
+        swap_restore_backup_data(
+            &paths,
+            &restored,
+            &rollback_paths,
+            &mut installed_items,
+            &mut restore_journal,
+        )
     }) {
         if let Err(rollback_error) = with_backup_stage("restore_backup.rollback", || {
-            rollback_restored_data(&paths, &mut rollback_paths)
+            rollback_restored_data(&paths, &mut rollback_paths, &installed_items)
         }) {
             return Err(rollback_error.into_user_message());
         }
 
+        let _ = set_restore_journal_stage(
+            &paths,
+            &mut restore_journal,
+            RestoreJournalStage::RollbackCompleted,
+        );
+        let _ = cleanup_restore_journal_terminal(&paths, &restore_journal);
+
         return Err(error.into_user_message());
     }
 
-    with_backup_stage("restore_backup.finalize", || Ok(()))
-        .map_err(BackupError::into_user_message)?;
+    if let Err(error) = with_backup_stage("restore_backup.finalize", || {
+        validate_database_file_for_schema(&paths.database, restored.manifest.schema_version)
+            .map_err(map_schema_validation_error)?;
+        read_settings_from_path(&paths.settings)
+            .map_err(|error| BackupError::new(BackupErrorKind::SettingsInvalid, error))?;
+        if !paths.resources.is_dir() {
+            return Err(BackupError::new(
+                BackupErrorKind::ResourcesInvalid,
+                "恢复后的资源目录缺失。".to_string(),
+            ));
+        }
+        set_restore_journal_stage(
+            &paths,
+            &mut restore_journal,
+            RestoreJournalStage::RestoreCommitted,
+        )
+        .map_err(|error| BackupError::new(BackupErrorKind::RestorePreparationFailed, error))?;
+        if let Err(error) = cleanup_restore_journal_terminal(&paths, &restore_journal) {
+            eprintln!("[settings.backup] 恢复已提交，但清理恢复状态文件失败：{error}");
+        }
+
+        Ok(())
+    }) {
+        if let Err(rollback_error) =
+            with_backup_stage("restore_backup.rollback_after_finalize", || {
+                rollback_restored_data(&paths, &mut rollback_paths, &installed_items)
+            })
+        {
+            return Err(rollback_error.into_user_message());
+        }
+
+        let _ = set_restore_journal_stage(
+            &paths,
+            &mut restore_journal,
+            RestoreJournalStage::RollbackCompleted,
+        );
+        let _ = cleanup_restore_journal_terminal(&paths, &restore_journal);
+
+        return Err(error.into_user_message());
+    }
 
     Ok(RestoreBackupResult { restored_file_name })
 }
@@ -2600,15 +3381,18 @@ pub fn restore_backup(
 mod tests {
     use super::{
         add_resources_to_zip, build_created_backup_list_item, cache_size_bytes,
-        cleanup_legacy_backups_once, directory_size_bytes, extract_backup_archive,
-        is_legacy_backups_cleanup_target, legacy_cleanup_marker_path, list_backup_items,
-        move_path_for_restore, prepare_restore_rollback, resolve_backup_file_path,
-        resolve_document_backups_dir, resource_file_compression_method,
-        restore_moved_items_after_prepare_failure, rollback_restored_data, validate_backup_archive,
-        validate_backup_file, validate_database_file_for_schema, validate_manifest_archive_paths,
-        zip_dir_options, zip_file_options, AppPaths, AppSettings, BackupErrorKind, BackupManifest,
-        BackupValidationStatus, RestoreMoveItem, RestorePathKind, RestoreRollbackPaths,
-        CURRENT_SCHEMA_VERSION, DOCUMENT_BACKUPS_DIR_NAME, DOCUMENT_DIR_UNAVAILABLE_MESSAGE,
+        cleanup_legacy_backups_once, create_restore_rollback_paths, directory_size_bytes,
+        extract_backup_archive, is_legacy_backups_cleanup_target, legacy_cleanup_marker_path,
+        list_backup_items, move_path_for_restore, new_restore_journal, prepare_restore_rollback,
+        prune_old_backups, record_installed_item, recover_incomplete_restore_for_paths,
+        resolve_backup_file_path, resolve_document_backups_dir, resource_file_compression_method,
+        restore_journal_path, restore_moved_items_after_prepare_failure, rollback_restored_data,
+        validate_backup_archive, validate_backup_file, validate_database_file_for_schema,
+        validate_manifest_archive_paths, write_restore_journal_atomically, zip_dir_options,
+        zip_file_options, AppPaths, AppSettings, BackupErrorKind, BackupManifest,
+        BackupValidationStatus, RestoreInstalledItem, RestoreJournalStage, RestoreMoveItem,
+        RestorePathKind, RestoreRollbackPaths, CURRENT_SCHEMA_VERSION, DOCUMENT_BACKUPS_DIR_NAME,
+        DOCUMENT_DIR_UNAVAILABLE_MESSAGE,
     };
     use rusqlite::Connection;
     use std::fs::{self, File};
@@ -2645,6 +3429,31 @@ mod tests {
             log: root.join("logs"),
             temp: root.join("tmp"),
         }
+    }
+
+    fn write_formal_test_data(paths: &AppPaths) {
+        fs::create_dir_all(&paths.root).expect("create app root");
+        fs::write(&paths.database, b"live-database").expect("write database");
+        fs::write(&paths.settings, b"live-settings").expect("write settings");
+        fs::create_dir_all(paths.resources.join("images")).expect("create resources");
+        fs::write(paths.resources.join("images/live.png"), b"live-image").expect("write resource");
+    }
+
+    fn write_complete_rollback_data(rollback_paths: &RestoreRollbackPaths) {
+        fs::write(&rollback_paths.database, b"original-database").expect("write rollback db");
+        fs::write(&rollback_paths.settings, b"original-settings").expect("write rollback settings");
+        fs::create_dir_all(rollback_paths.resources.join("images"))
+            .expect("create rollback resources");
+        fs::write(
+            rollback_paths.resources.join("images/original.png"),
+            b"original-image",
+        )
+        .expect("write rollback resource");
+    }
+
+    fn keep_test_rollback_root(rollback_paths: &mut RestoreRollbackPaths) {
+        let kept = rollback_paths.keep_root();
+        assert!(kept.exists());
     }
 
     #[test]
@@ -3193,6 +4002,73 @@ mod tests {
     }
 
     #[test]
+    fn list_backup_items_does_not_prune_files() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let paths = create_test_paths(temp_dir.path());
+        fs::write(
+            paths.backups.join("fight-notes-backup-old.zip"),
+            b"not-a-zip",
+        )
+        .expect("write app zip");
+        fs::write(paths.backups.join("random.zip"), b"manual").expect("write random zip");
+
+        let before = fs::read_dir(&paths.backups).expect("read backups").count();
+        let _ = list_backup_items(&paths).expect("list backups");
+        let after = fs::read_dir(&paths.backups).expect("read backups").count();
+
+        assert_eq!(before, after);
+        assert!(paths.backups.join("fight-notes-backup-old.zip").exists());
+        assert!(paths.backups.join("random.zip").exists());
+    }
+
+    #[test]
+    fn prune_old_backups_only_removes_recognized_app_backups() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let paths = create_test_paths(temp_dir.path());
+        let database_path = create_v7_database();
+        let settings_bytes =
+            serde_json::to_vec(&AppSettings::default()).expect("serialize settings");
+        let manifest = create_valid_manifest(Some(CURRENT_SCHEMA_VERSION));
+        let old_backup = paths
+            .backups
+            .join("fight-notes-backup-2026-04-01_00-00-00.zip");
+        let new_backup = paths
+            .backups
+            .join("fight-notes-backup-2026-04-02_00-00-00.zip");
+        let random_zip = paths.backups.join("random.zip");
+        let other_zip = paths.backups.join("other-business.zip");
+        let broken_app_zip = paths
+            .backups
+            .join("fight-notes-backup-2026-04-03_00-00-00.zip");
+
+        write_backup_archive(
+            &old_backup,
+            Some(&manifest),
+            Some(&database_path),
+            Some(&settings_bytes),
+            true,
+        );
+        write_backup_archive(
+            &new_backup,
+            Some(&manifest),
+            Some(&database_path),
+            Some(&settings_bytes),
+            true,
+        );
+        fs::write(&random_zip, b"manual").expect("write random zip");
+        fs::write(&other_zip, b"other").expect("write other zip");
+        fs::write(&broken_app_zip, b"not-a-zip").expect("write broken app zip");
+
+        prune_old_backups(&paths.backups, 1).expect("prune old app backups");
+
+        assert!(!old_backup.exists());
+        assert!(new_backup.exists());
+        assert!(random_zip.exists());
+        assert!(other_zip.exists());
+        assert!(broken_app_zip.exists());
+    }
+
+    #[test]
     fn validate_backup_file_returns_valid_for_legal_backup() {
         let temp_dir = tempdir().expect("create temp dir");
         let paths = create_test_paths(temp_dir.path());
@@ -3444,6 +4320,7 @@ mod tests {
         fs::write(&paths.database, b"conflict-database").expect("write conflict database");
 
         let mut rollback_paths = RestoreRollbackPaths {
+            root_path: rollback_root.path().to_path_buf(),
             root: Some(rollback_root),
             kept_root: None,
             database: rollback_database.clone(),
@@ -3491,7 +4368,7 @@ mod tests {
         fs::write(paths.resources.join("images/note.png"), b"live-image")
             .expect("write live image");
 
-        let mut rollback_paths =
+        let (mut rollback_paths, _) =
             prepare_restore_rollback(&paths).expect("prepare restore rollback");
 
         assert!(!paths.database.exists());
@@ -3505,7 +4382,8 @@ mod tests {
         assert!(rollback_paths.resources.starts_with(&paths.temp));
         assert!(!rollback_paths.database.starts_with(&paths.root));
 
-        rollback_restored_data(&paths, &mut rollback_paths).expect("manual rollback restores data");
+        rollback_restored_data(&paths, &mut rollback_paths, &[])
+            .expect("manual rollback restores data");
 
         assert_eq!(
             fs::read(&paths.database).expect("read database"),
@@ -3537,6 +4415,286 @@ mod tests {
     }
 
     #[test]
+    fn recovery_without_restore_journal_is_noop() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let paths = create_test_paths(temp_dir.path());
+
+        recover_incomplete_restore_for_paths(&paths).expect("no journal recovery should no-op");
+
+        assert!(!restore_journal_path(&paths).exists());
+    }
+
+    #[test]
+    fn recovery_preparing_rollback_restores_moved_database_only() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let paths = create_test_paths(temp_dir.path());
+        write_formal_test_data(&paths);
+        let mut rollback_paths = create_restore_rollback_paths(&paths).expect("rollback paths");
+        let database_move = RestoreMoveItem {
+            source: paths.database.clone(),
+            target: rollback_paths.database.clone(),
+            kind: RestorePathKind::File,
+        };
+        move_path_for_restore(
+            &database_move.source,
+            &database_move.target,
+            database_move.kind,
+        )
+        .expect("move db into rollback");
+        let mut journal = new_restore_journal(&paths, &rollback_paths);
+        journal
+            .rollback_items
+            .push(super::journal_move_item_from_restore(&database_move));
+        keep_test_rollback_root(&mut rollback_paths);
+        write_restore_journal_atomically(&paths, &journal).expect("write journal");
+
+        recover_incomplete_restore_for_paths(&paths).expect("recover preparing rollback");
+
+        assert_eq!(
+            fs::read(&paths.database).expect("read db"),
+            b"live-database"
+        );
+        assert_eq!(
+            fs::read(&paths.settings).expect("read settings"),
+            b"live-settings"
+        );
+        assert_eq!(
+            fs::read(paths.resources.join("images/live.png")).expect("read resource"),
+            b"live-image"
+        );
+        assert!(!restore_journal_path(&paths).exists());
+    }
+
+    #[test]
+    fn recovery_preparing_rollback_recovers_moving_item_when_rollback_source_exists() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let paths = create_test_paths(temp_dir.path());
+        write_formal_test_data(&paths);
+        let mut rollback_paths = create_restore_rollback_paths(&paths).expect("rollback paths");
+        let database_move = RestoreMoveItem {
+            source: paths.database.clone(),
+            target: rollback_paths.database.clone(),
+            kind: RestorePathKind::File,
+        };
+        move_path_for_restore(
+            &database_move.source,
+            &database_move.target,
+            database_move.kind,
+        )
+        .expect("move db into rollback");
+        let mut journal = new_restore_journal(&paths, &rollback_paths);
+        journal.moving_rollback_item = Some(super::journal_move_item_from_restore(&database_move));
+        keep_test_rollback_root(&mut rollback_paths);
+        write_restore_journal_atomically(&paths, &journal).expect("write journal");
+
+        recover_incomplete_restore_for_paths(&paths).expect("recover moving item");
+
+        assert_eq!(
+            fs::read(&paths.database).expect("read db"),
+            b"live-database"
+        );
+        assert!(!restore_journal_path(&paths).exists());
+    }
+
+    #[test]
+    fn recovery_preparing_rollback_clears_moving_item_when_move_never_happened() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let paths = create_test_paths(temp_dir.path());
+        write_formal_test_data(&paths);
+        let mut rollback_paths = create_restore_rollback_paths(&paths).expect("rollback paths");
+        let database_move = RestoreMoveItem {
+            source: paths.database.clone(),
+            target: rollback_paths.database.clone(),
+            kind: RestorePathKind::File,
+        };
+        let mut journal = new_restore_journal(&paths, &rollback_paths);
+        journal.moving_rollback_item = Some(super::journal_move_item_from_restore(&database_move));
+        keep_test_rollback_root(&mut rollback_paths);
+        write_restore_journal_atomically(&paths, &journal).expect("write journal");
+
+        recover_incomplete_restore_for_paths(&paths).expect("recover no-op moving item");
+
+        assert_eq!(
+            fs::read(&paths.database).expect("read db"),
+            b"live-database"
+        );
+        assert!(!restore_journal_path(&paths).exists());
+    }
+
+    #[test]
+    fn recovery_preparing_rollback_fails_when_moving_item_is_lost() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let paths = create_test_paths(temp_dir.path());
+        fs::create_dir_all(&paths.root).expect("create app root");
+        let mut rollback_paths = create_restore_rollback_paths(&paths).expect("rollback paths");
+        let database_move = RestoreMoveItem {
+            source: paths.database.clone(),
+            target: rollback_paths.database.clone(),
+            kind: RestorePathKind::File,
+        };
+        let mut journal = new_restore_journal(&paths, &rollback_paths);
+        journal.moving_rollback_item = Some(super::journal_move_item_from_restore(&database_move));
+        keep_test_rollback_root(&mut rollback_paths);
+        write_restore_journal_atomically(&paths, &journal).expect("write journal");
+
+        let error = recover_incomplete_restore_for_paths(&paths)
+            .expect_err("lost moving item should fail closed");
+
+        assert!(error.contains("原路径和 rollback 源都不存在"));
+        assert!(restore_journal_path(&paths).exists());
+    }
+
+    #[test]
+    fn recovery_installing_removes_recorded_half_installs_and_restores_originals() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let paths = create_test_paths(temp_dir.path());
+        fs::create_dir_all(&paths.root).expect("create root");
+        let mut rollback_paths = create_restore_rollback_paths(&paths).expect("rollback paths");
+        write_complete_rollback_data(&rollback_paths);
+        fs::write(&paths.database, b"restored-database").expect("write half database");
+        fs::write(&paths.settings, b"restored-settings").expect("write half settings");
+        let mut journal = new_restore_journal(&paths, &rollback_paths);
+        journal.stage = RestoreJournalStage::Installing;
+        journal.installed_items.push(super::journal_target_item(
+            &paths.database,
+            RestorePathKind::File,
+        ));
+        journal.installed_items.push(super::journal_target_item(
+            &paths.settings,
+            RestorePathKind::File,
+        ));
+        keep_test_rollback_root(&mut rollback_paths);
+        write_restore_journal_atomically(&paths, &journal).expect("write journal");
+
+        recover_incomplete_restore_for_paths(&paths).expect("recover installing");
+
+        assert_eq!(
+            fs::read(&paths.database).expect("read db"),
+            b"original-database"
+        );
+        assert_eq!(
+            fs::read(&paths.settings).expect("read settings"),
+            b"original-settings"
+        );
+        assert_eq!(
+            fs::read(paths.resources.join("images/original.png")).expect("read resource"),
+            b"original-image"
+        );
+        assert!(!restore_journal_path(&paths).exists());
+    }
+
+    #[test]
+    fn recovery_installing_rejects_untracked_formal_conflict() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let paths = create_test_paths(temp_dir.path());
+        fs::create_dir_all(&paths.root).expect("create root");
+        let mut rollback_paths = create_restore_rollback_paths(&paths).expect("rollback paths");
+        write_complete_rollback_data(&rollback_paths);
+        fs::write(&paths.database, b"external-database").expect("write external conflict");
+        let mut journal = new_restore_journal(&paths, &rollback_paths);
+        journal.stage = RestoreJournalStage::Installing;
+        keep_test_rollback_root(&mut rollback_paths);
+        write_restore_journal_atomically(&paths, &journal).expect("write journal");
+
+        let error = recover_incomplete_restore_for_paths(&paths)
+            .expect_err("untracked conflict should fail closed");
+
+        assert!(error.contains(&paths.database.to_string_lossy().to_string()));
+        assert_eq!(
+            fs::read(&paths.database).expect("read conflict"),
+            b"external-database"
+        );
+        assert!(restore_journal_path(&paths).exists());
+    }
+
+    #[test]
+    fn recovery_committed_marker_cleans_journal_without_rollback() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let paths = create_test_paths(temp_dir.path());
+        fs::create_dir_all(&paths.root).expect("create root");
+        let mut rollback_paths = create_restore_rollback_paths(&paths).expect("rollback paths");
+        write_complete_rollback_data(&rollback_paths);
+        fs::write(&paths.database, b"committed-database").expect("write committed db");
+        let mut journal = new_restore_journal(&paths, &rollback_paths);
+        journal.stage = RestoreJournalStage::RestoreCommitted;
+        keep_test_rollback_root(&mut rollback_paths);
+        let rollback_root = journal.rollback_temp_dir.clone();
+        write_restore_journal_atomically(&paths, &journal).expect("write journal");
+
+        recover_incomplete_restore_for_paths(&paths).expect("cleanup committed journal");
+
+        assert_eq!(
+            fs::read(&paths.database).expect("read committed db"),
+            b"committed-database"
+        );
+        assert!(!restore_journal_path(&paths).exists());
+        assert!(!Path::new(&rollback_root).exists());
+    }
+
+    #[test]
+    fn recovery_rejects_corrupt_journal_without_deleting_data() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let paths = create_test_paths(temp_dir.path());
+        write_formal_test_data(&paths);
+        fs::write(restore_journal_path(&paths), b"{not-json").expect("write corrupt journal");
+
+        let error = recover_incomplete_restore_for_paths(&paths)
+            .expect_err("corrupt journal should fail closed");
+
+        assert!(error.contains("解析恢复状态文件失败"));
+        assert_eq!(
+            fs::read(&paths.database).expect("read db"),
+            b"live-database"
+        );
+        assert!(restore_journal_path(&paths).exists());
+    }
+
+    #[test]
+    fn recovery_rollback_ready_requires_complete_rollback_sources() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let paths = create_test_paths(temp_dir.path());
+        fs::create_dir_all(&paths.root).expect("create root");
+        let mut rollback_paths = create_restore_rollback_paths(&paths).expect("rollback paths");
+        fs::write(&rollback_paths.database, b"original-database").expect("write rollback db");
+        let mut journal = new_restore_journal(&paths, &rollback_paths);
+        journal.stage = RestoreJournalStage::RollbackReady;
+        keep_test_rollback_root(&mut rollback_paths);
+        write_restore_journal_atomically(&paths, &journal).expect("write journal");
+
+        let error = recover_incomplete_restore_for_paths(&paths)
+            .expect_err("missing rollback source should fail closed");
+
+        assert!(error.contains("缺少 rollback 原始数据"));
+        assert!(restore_journal_path(&paths).exists());
+    }
+
+    #[test]
+    fn recovery_is_idempotent_after_successful_recovery() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let paths = create_test_paths(temp_dir.path());
+        fs::create_dir_all(&paths.root).expect("create root");
+        let mut rollback_paths = create_restore_rollback_paths(&paths).expect("rollback paths");
+        write_complete_rollback_data(&rollback_paths);
+        fs::write(&paths.database, b"restored-database").expect("write half database");
+        let mut journal = new_restore_journal(&paths, &rollback_paths);
+        journal.stage = RestoreJournalStage::Installing;
+        journal.installed_items.push(super::journal_target_item(
+            &paths.database,
+            RestorePathKind::File,
+        ));
+        keep_test_rollback_root(&mut rollback_paths);
+        write_restore_journal_atomically(&paths, &journal).expect("write journal");
+
+        recover_incomplete_restore_for_paths(&paths).expect("first recovery");
+        recover_incomplete_restore_for_paths(&paths).expect("second recovery no-op");
+
+        assert_eq!(
+            fs::read(&paths.database).expect("read db"),
+            b"original-database"
+        );
+    }
+
+    #[test]
     fn cache_size_bytes_combines_app_and_webview_cache_and_ignores_missing_dirs() {
         let temp_dir = tempdir().expect("create temp dir");
         let paths = create_test_paths(temp_dir.path());
@@ -3551,6 +4709,230 @@ mod tests {
         fs::write(webview_cache.join("webview-cache.bin"), b"12345").expect("write webview cache");
 
         assert_eq!(cache_size_bytes(&paths), 9);
+    }
+
+    #[test]
+    fn rollback_restored_data_removes_installed_database_before_restoring_original() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let paths = create_test_paths(temp_dir.path());
+        fs::create_dir_all(&paths.temp).expect("create app temp");
+        let rollback_root = tempdir_in(&paths.temp).expect("create rollback root");
+        let rollback_database = rollback_root.path().join("database.rollback");
+        fs::write(&rollback_database, b"original database").expect("write rollback database");
+        fs::write(&paths.database, b"restored database").expect("write restored database");
+
+        let mut rollback_paths = RestoreRollbackPaths {
+            root_path: rollback_root.path().to_path_buf(),
+            root: Some(rollback_root),
+            kept_root: None,
+            database: rollback_database,
+            settings: paths.temp.join("settings.rollback"),
+            resources: paths.temp.join("resources.rollback"),
+        };
+        let installed_items = vec![RestoreInstalledItem {
+            path: paths.database.clone(),
+            kind: RestorePathKind::File,
+        }];
+
+        rollback_restored_data(&paths, &mut rollback_paths, &installed_items)
+            .expect("rollback should restore original database");
+
+        assert_eq!(
+            fs::read(&paths.database).expect("read restored original database"),
+            b"original database"
+        );
+    }
+
+    #[test]
+    fn rollback_restored_data_removes_installed_database_and_settings_before_resources_restore() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let paths = create_test_paths(temp_dir.path());
+        fs::create_dir_all(&paths.temp).expect("create app temp");
+        let rollback_root = tempdir_in(&paths.temp).expect("create rollback root");
+        let rollback_database = rollback_root.path().join("database.rollback");
+        let rollback_settings = rollback_root.path().join("settings.rollback");
+        let rollback_resources = rollback_root.path().join("resources.rollback");
+        fs::write(&rollback_database, b"original database").expect("write rollback database");
+        fs::write(&rollback_settings, b"original settings").expect("write rollback settings");
+        fs::create_dir_all(rollback_resources.join("images")).expect("create rollback resources");
+        fs::write(
+            rollback_resources.join("images/original.png"),
+            b"original image",
+        )
+        .expect("write rollback image");
+        fs::write(&paths.database, b"restored database").expect("write restored database");
+        fs::write(&paths.settings, b"restored settings").expect("write restored settings");
+
+        let mut rollback_paths = RestoreRollbackPaths {
+            root_path: rollback_root.path().to_path_buf(),
+            root: Some(rollback_root),
+            kept_root: None,
+            database: rollback_database,
+            settings: rollback_settings,
+            resources: rollback_resources,
+        };
+        let installed_items = vec![
+            RestoreInstalledItem {
+                path: paths.database.clone(),
+                kind: RestorePathKind::File,
+            },
+            RestoreInstalledItem {
+                path: paths.settings.clone(),
+                kind: RestorePathKind::File,
+            },
+        ];
+
+        rollback_restored_data(&paths, &mut rollback_paths, &installed_items)
+            .expect("rollback should restore original data");
+
+        assert_eq!(
+            fs::read(&paths.database).expect("read original database"),
+            b"original database"
+        );
+        assert_eq!(
+            fs::read(&paths.settings).expect("read original settings"),
+            b"original settings"
+        );
+        assert_eq!(
+            fs::read(paths.resources.join("images/original.png")).expect("read original image"),
+            b"original image"
+        );
+    }
+
+    #[test]
+    fn record_installed_item_deduplicates_paths() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let paths = create_test_paths(temp_dir.path());
+        let mut installed_items = Vec::new();
+
+        record_installed_item(
+            &paths,
+            &mut installed_items,
+            &paths.database,
+            RestorePathKind::File,
+        )
+        .expect("record database");
+        record_installed_item(
+            &paths,
+            &mut installed_items,
+            &paths.database,
+            RestorePathKind::File,
+        )
+        .expect("record duplicate database");
+
+        assert_eq!(installed_items.len(), 1);
+    }
+
+    #[test]
+    fn rollback_restored_data_ignores_missing_installed_item_and_restores_original() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let paths = create_test_paths(temp_dir.path());
+        fs::create_dir_all(&paths.temp).expect("create app temp");
+        let rollback_root = tempdir_in(&paths.temp).expect("create rollback root");
+        let rollback_database = rollback_root.path().join("database.rollback");
+        fs::write(&rollback_database, b"original database").expect("write rollback database");
+
+        let mut rollback_paths = RestoreRollbackPaths {
+            root_path: rollback_root.path().to_path_buf(),
+            root: Some(rollback_root),
+            kept_root: None,
+            database: rollback_database,
+            settings: paths.temp.join("settings.rollback"),
+            resources: paths.temp.join("resources.rollback"),
+        };
+        let installed_items = vec![RestoreInstalledItem {
+            path: paths.database.clone(),
+            kind: RestorePathKind::File,
+        }];
+
+        rollback_restored_data(&paths, &mut rollback_paths, &installed_items)
+            .expect("rollback should ignore missing installed target");
+
+        assert_eq!(
+            fs::read(&paths.database).expect("read original database"),
+            b"original database"
+        );
+    }
+
+    #[test]
+    fn rollback_restored_data_rejects_conflict_not_in_installed_items_and_keeps_temp() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let paths = create_test_paths(temp_dir.path());
+        fs::create_dir_all(&paths.temp).expect("create app temp");
+        let rollback_root = tempdir_in(&paths.temp).expect("create rollback root");
+        let rollback_database = rollback_root.path().join("database.rollback");
+        fs::write(&rollback_database, b"original database").expect("write rollback database");
+        fs::write(&paths.database, b"external conflict").expect("write conflict database");
+
+        let mut rollback_paths = RestoreRollbackPaths {
+            root_path: rollback_root.path().to_path_buf(),
+            root: Some(rollback_root),
+            kept_root: None,
+            database: rollback_database.clone(),
+            settings: paths.temp.join("settings.rollback"),
+            resources: paths.temp.join("resources.rollback"),
+        };
+
+        let error = rollback_restored_data(&paths, &mut rollback_paths, &[])
+            .expect_err("rollback should reject untracked conflict");
+
+        assert_eq!(error.kind, BackupErrorKind::RollbackFailed);
+        assert!(error
+            .detail
+            .contains(&paths.database.to_string_lossy().to_string()));
+        let kept_root = rollback_paths
+            .kept_root
+            .clone()
+            .expect("rollback root should be kept");
+        assert!(kept_root.exists());
+        assert!(rollback_database.exists());
+        assert_eq!(
+            fs::read(&paths.database).expect("read conflict database"),
+            b"external conflict"
+        );
+    }
+
+    #[test]
+    fn rollback_restored_data_rejects_installed_item_outside_restore_targets() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let paths = create_test_paths(temp_dir.path());
+        fs::create_dir_all(&paths.temp).expect("create app temp");
+
+        for forbidden_path in [
+            paths.root.clone(),
+            paths.backups.clone(),
+            paths.temp.clone(),
+            temp_dir.path().join("unrelated"),
+        ] {
+            let case_root = tempdir_in(&paths.temp).expect("create case rollback root");
+            let case_database = case_root.path().join("database.rollback");
+            fs::write(&case_database, b"original database").expect("write case rollback database");
+            let mut rollback_paths = RestoreRollbackPaths {
+                root_path: case_root.path().to_path_buf(),
+                root: Some(case_root),
+                kept_root: None,
+                database: case_database,
+                settings: paths.temp.join("settings.rollback"),
+                resources: paths.temp.join("resources.rollback"),
+            };
+            let installed_items = vec![RestoreInstalledItem {
+                path: forbidden_path.clone(),
+                kind: RestorePathKind::Directory,
+            }];
+
+            let error = rollback_restored_data(&paths, &mut rollback_paths, &installed_items)
+                .expect_err("forbidden installed item should fail");
+
+            assert_eq!(error.kind, BackupErrorKind::RollbackFailed);
+            assert!(error
+                .detail
+                .contains(&forbidden_path.to_string_lossy().to_string()));
+            assert!(rollback_paths
+                .kept_root
+                .as_ref()
+                .expect("rollback root should be kept")
+                .exists());
+        }
     }
 
     #[test]
@@ -3577,6 +4959,7 @@ mod tests {
         fs::write(&rollback_database, b"rollback database").expect("write rollback database");
 
         let mut rollback_paths = RestoreRollbackPaths {
+            root_path: rollback_root.path().to_path_buf(),
             root: Some(rollback_root),
             kept_root: None,
             database: rollback_database.clone(),
@@ -3584,7 +4967,7 @@ mod tests {
             resources: temp_dir.path().join("resources.rollback"),
         };
 
-        let error = rollback_restored_data(&paths, &mut rollback_paths)
+        let error = rollback_restored_data(&paths, &mut rollback_paths, &[])
             .expect_err("rollback should fail on invalid target");
 
         assert_eq!(error.kind, BackupErrorKind::RollbackFailed);

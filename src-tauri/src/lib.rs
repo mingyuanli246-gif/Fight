@@ -20,7 +20,8 @@ use resource_ops::{
 use settings_backup::{
     create_backup, delete_backup, get_data_environment_info, list_backups, load_app_settings,
     maybe_run_auto_backup, open_backups_directory, open_data_directory, preview_restore_backup,
-    restore_backup, save_app_settings, select_restore_backup_file, BackupOperationLock,
+    recover_incomplete_restore_if_needed, restore_backup, save_app_settings,
+    select_restore_backup_file, BackupOperationLock,
 };
 use tauri_plugin_sql::{Migration, MigrationKind};
 
@@ -79,6 +80,11 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(BackupOperationLock::default())
+        .setup(|app| {
+            recover_incomplete_restore_if_needed(app.handle())
+                .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             load_app_settings,
             save_app_settings,
