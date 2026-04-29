@@ -1846,36 +1846,322 @@ fn extract_backup_archive(
     Ok((manifest, database_path, settings_path, resources_dir))
 }
 
-fn rename_if_exists(source: &Path, destination: &Path) -> Result<(), String> {
-    if !source.exists() {
-        return Ok(());
-    }
-
-    fs::rename(source, destination).map_err(|error| format!("切换本地数据失败：{error}"))
-}
-
-fn restore_if_exists(source: &Path, destination: &Path) -> Result<(), String> {
-    if !source.exists() {
-        return Ok(());
-    }
-
-    if destination.exists() {
-        if destination.is_dir() {
-            fs::remove_dir_all(destination)
-                .map_err(|error| format!("回滚本地数据失败：{error}"))?;
-        } else {
-            fs::remove_file(destination).map_err(|error| format!("回滚本地数据失败：{error}"))?;
-        }
-    }
-
-    fs::rename(source, destination).map_err(|error| format!("回滚本地数据失败：{error}"))
-}
-
+#[derive(Debug)]
 struct RestoreRollbackPaths {
-    _root: TempDir,
+    root: Option<TempDir>,
+    kept_root: Option<PathBuf>,
     database: PathBuf,
     settings: PathBuf,
     resources: PathBuf,
+}
+
+impl RestoreRollbackPaths {
+    fn keep_root(&mut self) -> PathBuf {
+        if let Some(root) = self.root.take() {
+            let path = root.keep();
+            self.kept_root = Some(path.clone());
+            path
+        } else if let Some(path) = &self.kept_root {
+            path.clone()
+        } else {
+            self.database
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default()
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RestorePathKind {
+    File,
+    Directory,
+}
+
+#[derive(Clone, Debug)]
+struct RestoreMoveItem {
+    source: PathBuf,
+    target: PathBuf,
+    kind: RestorePathKind,
+}
+
+fn is_cross_device_error(error: &io::Error) -> bool {
+    if error.kind() == io::ErrorKind::CrossesDevices {
+        return true;
+    }
+
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(18)
+    }
+
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+fn cleanup_incomplete_restore_target(target: &Path, kind: RestorePathKind) -> String {
+    if !target.exists() {
+        return String::new();
+    }
+
+    let cleanup_result = match kind {
+        RestorePathKind::File => fs::remove_file(target),
+        RestorePathKind::Directory => fs::remove_dir_all(target),
+    };
+
+    match cleanup_result {
+        Ok(_) => String::new(),
+        Err(error) => format!("未完成目标路径清理失败：{error}；"),
+    }
+}
+
+fn copy_file_for_restore(source: &Path, target: &Path) -> Result<(), String> {
+    if let Err(error) = fs::copy(source, target) {
+        let cleanup_note = cleanup_incomplete_restore_target(target, RestorePathKind::File);
+        return Err(format!(
+            "复制恢复文件失败：{error}；{cleanup_note}源数据仍保留：{}",
+            source.display()
+        ));
+    }
+
+    fs::remove_file(source).map_err(|error| {
+        format!(
+            "复制恢复文件已完成，但删除源文件失败：{error}；源数据仍保留：{}；目标路径：{}",
+            source.display(),
+            target.display()
+        )
+    })
+}
+
+fn copy_directory_for_restore(source: &Path, target: &Path) -> Result<(), String> {
+    if let Err(error) = fs::create_dir(target) {
+        return Err(format!(
+            "创建恢复目标目录失败：{error}；源数据仍保留：{}",
+            source.display()
+        ));
+    }
+
+    for entry in WalkDir::new(source).min_depth(1) {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                let cleanup_note =
+                    cleanup_incomplete_restore_target(target, RestorePathKind::Directory);
+                return Err(format!(
+                    "读取恢复目录失败：{error}；{cleanup_note}源数据仍保留：{}",
+                    source.display()
+                ));
+            }
+        };
+
+        let relative_path = match entry.path().strip_prefix(source) {
+            Ok(relative_path) => relative_path,
+            Err(error) => {
+                let cleanup_note =
+                    cleanup_incomplete_restore_target(target, RestorePathKind::Directory);
+                return Err(format!(
+                    "解析恢复目录路径失败：{error}；{cleanup_note}源数据仍保留：{}",
+                    source.display()
+                ));
+            }
+        };
+        let target_path = target.join(relative_path);
+
+        if entry.file_type().is_dir() {
+            if let Err(error) = fs::create_dir_all(&target_path) {
+                let cleanup_note =
+                    cleanup_incomplete_restore_target(target, RestorePathKind::Directory);
+                return Err(format!(
+                    "复制恢复目录失败：{error}；{cleanup_note}源数据仍保留：{}",
+                    source.display()
+                ));
+            }
+            continue;
+        }
+
+        if entry.file_type().is_file() {
+            if let Some(parent) = target_path.parent() {
+                if let Err(error) = fs::create_dir_all(parent) {
+                    let cleanup_note =
+                        cleanup_incomplete_restore_target(target, RestorePathKind::Directory);
+                    return Err(format!(
+                        "创建恢复目标目录失败：{error}；{cleanup_note}源数据仍保留：{}",
+                        source.display()
+                    ));
+                }
+            }
+
+            if let Err(error) = fs::copy(entry.path(), &target_path) {
+                let cleanup_note =
+                    cleanup_incomplete_restore_target(target, RestorePathKind::Directory);
+                return Err(format!(
+                    "复制恢复目录失败：{error}；{cleanup_note}源数据仍保留：{}",
+                    source.display()
+                ));
+            }
+            continue;
+        }
+
+        let cleanup_note = cleanup_incomplete_restore_target(target, RestorePathKind::Directory);
+        return Err(format!(
+            "恢复目录包含不支持的路径类型：{}；{cleanup_note}源数据仍保留：{}",
+            entry.path().display(),
+            source.display()
+        ));
+    }
+
+    fs::remove_dir_all(source).map_err(|error| {
+        format!(
+            "复制恢复目录已完成，但删除源目录失败：{error}；源数据仍保留：{}；目标路径：{}",
+            source.display(),
+            target.display()
+        )
+    })
+}
+
+fn move_path_for_restore(
+    source: &Path,
+    target: &Path,
+    kind: RestorePathKind,
+) -> Result<(), String> {
+    if target.exists() {
+        return Err(format!(
+            "目标路径已存在，拒绝覆盖：{}；源数据仍保留：{}",
+            target.display(),
+            source.display()
+        ));
+    }
+
+    if !source.exists() {
+        return Err(format!("源路径不存在：{}", source.display()));
+    }
+
+    match kind {
+        RestorePathKind::File if !source.is_file() => {
+            return Err(format!(
+                "源路径不是文件：{}；源数据仍保留",
+                source.display()
+            ));
+        }
+        RestorePathKind::Directory if !source.is_dir() => {
+            return Err(format!(
+                "源路径不是目录：{}；源数据仍保留",
+                source.display()
+            ));
+        }
+        _ => {}
+    }
+
+    match fs::rename(source, target) {
+        Ok(_) => Ok(()),
+        Err(error) if is_cross_device_error(&error) => match kind {
+            RestorePathKind::File => copy_file_for_restore(source, target),
+            RestorePathKind::Directory => copy_directory_for_restore(source, target),
+        },
+        Err(error) => Err(format!(
+            "移动恢复数据失败：{error}；源数据仍保留：{}",
+            source.display()
+        )),
+    }
+}
+
+fn move_existing_path_for_restore(item: &RestoreMoveItem) -> Result<bool, String> {
+    if !item.source.exists() {
+        return Ok(false);
+    }
+
+    move_path_for_restore(&item.source, &item.target, item.kind)?;
+    Ok(true)
+}
+
+fn copy_file_without_overwrite_for_restore(source: &Path, target: &Path) -> Result<(), String> {
+    if target.exists() {
+        return Err(format!(
+            "目标路径已存在，拒绝覆盖：{}；源数据仍保留：{}",
+            target.display(),
+            source.display()
+        ));
+    }
+
+    fs::copy(source, target).map(|_| ()).map_err(|error| {
+        format!(
+            "复制恢复文件失败：{error}；源数据仍保留：{}",
+            source.display()
+        )
+    })
+}
+
+fn build_restore_move_items(
+    paths: &AppPaths,
+    rollback_paths: &RestoreRollbackPaths,
+) -> Vec<RestoreMoveItem> {
+    vec![
+        RestoreMoveItem {
+            source: paths.database.clone(),
+            target: rollback_paths.database.clone(),
+            kind: RestorePathKind::File,
+        },
+        RestoreMoveItem {
+            source: paths.settings.clone(),
+            target: rollback_paths.settings.clone(),
+            kind: RestorePathKind::File,
+        },
+        RestoreMoveItem {
+            source: paths.resources.clone(),
+            target: rollback_paths.resources.clone(),
+            kind: RestorePathKind::Directory,
+        },
+    ]
+}
+
+fn restore_moved_items_after_prepare_failure(
+    rollback_paths: &mut RestoreRollbackPaths,
+    moved_items: &[RestoreMoveItem],
+    cause: String,
+) -> BackupError {
+    if moved_items.is_empty() {
+        return BackupError::new(
+            BackupErrorKind::RestorePreparationFailed,
+            format!("恢复准备失败：{cause}"),
+        );
+    }
+
+    let mut restore_errors = Vec::new();
+    for item in moved_items.iter().rev() {
+        let restore_item = RestoreMoveItem {
+            source: item.target.clone(),
+            target: item.source.clone(),
+            kind: item.kind,
+        };
+
+        if let Err(error) = move_path_for_restore(
+            &restore_item.source,
+            &restore_item.target,
+            restore_item.kind,
+        ) {
+            restore_errors.push(error);
+        }
+    }
+
+    if restore_errors.is_empty() {
+        BackupError::new(
+            BackupErrorKind::RestorePreparationFailed,
+            format!("恢复准备失败，原始数据已恢复：{cause}"),
+        )
+    } else {
+        let kept_path = rollback_paths.keep_root();
+        BackupError::new(
+            BackupErrorKind::RestorePreparationFailed,
+            format!(
+                "恢复准备失败，部分原始数据保留在 rollback 临时目录：{}；原因：{}；恢复错误：{}",
+                kept_path.display(),
+                cause,
+                restore_errors.join("；")
+            ),
+        )
+    }
 }
 
 fn prepare_restore_rollback(paths: &AppPaths) -> Result<RestoreRollbackPaths, BackupError> {
@@ -1885,85 +2171,71 @@ fn prepare_restore_rollback(paths: &AppPaths) -> Result<RestoreRollbackPaths, Ba
     let rollback_settings = rollback_root.path().join("settings.rollback");
     let rollback_resources = rollback_root.path().join("resources.rollback");
 
-    rename_if_exists(&paths.database, &rollback_database)
-        .map_err(|error| BackupError::new(BackupErrorKind::RestorePreparationFailed, error))?;
-    rename_if_exists(&paths.settings, &rollback_settings)
-        .map_err(|error| BackupError::new(BackupErrorKind::RestorePreparationFailed, error))?;
-    rename_if_exists(&paths.resources, &rollback_resources)
-        .map_err(|error| BackupError::new(BackupErrorKind::RestorePreparationFailed, error))?;
-
-    Ok(RestoreRollbackPaths {
-        _root: rollback_root,
+    let mut rollback_paths = RestoreRollbackPaths {
+        root: Some(rollback_root),
+        kept_root: None,
         database: rollback_database,
         settings: rollback_settings,
         resources: rollback_resources,
-    })
+    };
+    let move_items = build_restore_move_items(paths, &rollback_paths);
+    let mut moved_items = Vec::new();
+
+    for item in move_items {
+        match move_existing_path_for_restore(&item) {
+            Ok(true) => moved_items.push(item),
+            Ok(false) => {}
+            Err(error) => {
+                return Err(restore_moved_items_after_prepare_failure(
+                    &mut rollback_paths,
+                    &moved_items,
+                    error,
+                ));
+            }
+        }
+    }
+
+    Ok(rollback_paths)
 }
 
 fn rollback_restored_data(
     paths: &AppPaths,
-    rollback_paths: &RestoreRollbackPaths,
+    rollback_paths: &mut RestoreRollbackPaths,
 ) -> Result<(), BackupError> {
-    if paths.database.exists() {
-        fs::remove_file(&paths.database).map_err(|error| {
-            BackupError::new(
-                BackupErrorKind::RollbackFailed,
-                format!("回滚本地数据失败：{error}"),
-            )
-        })?;
-    }
-    if paths.settings.exists() {
-        fs::remove_file(&paths.settings).map_err(|error| {
-            BackupError::new(
-                BackupErrorKind::RollbackFailed,
-                format!("回滚本地数据失败：{error}"),
-            )
-        })?;
-    }
-    if paths.resources.exists() {
-        fs::remove_dir_all(&paths.resources).map_err(|error| {
-            BackupError::new(
-                BackupErrorKind::RollbackFailed,
-                format!("回滚本地数据失败：{error}"),
-            )
-        })?;
-    }
+    let rollback_items = vec![
+        RestoreMoveItem {
+            source: rollback_paths.database.clone(),
+            target: paths.database.clone(),
+            kind: RestorePathKind::File,
+        },
+        RestoreMoveItem {
+            source: rollback_paths.settings.clone(),
+            target: paths.settings.clone(),
+            kind: RestorePathKind::File,
+        },
+        RestoreMoveItem {
+            source: rollback_paths.resources.clone(),
+            target: paths.resources.clone(),
+            kind: RestorePathKind::Directory,
+        },
+    ];
 
-    restore_if_exists(&rollback_paths.database, &paths.database)
-        .map_err(|error| BackupError::new(BackupErrorKind::RollbackFailed, error))?;
-    restore_if_exists(&rollback_paths.settings, &paths.settings)
-        .map_err(|error| BackupError::new(BackupErrorKind::RollbackFailed, error))?;
-    restore_if_exists(&rollback_paths.resources, &paths.resources)
-        .map_err(|error| BackupError::new(BackupErrorKind::RollbackFailed, error))?;
+    for item in rollback_items {
+        if !item.source.exists() {
+            continue;
+        }
 
-    Ok(())
-}
-
-#[cfg(test)]
-fn swap_restored_data(
-    paths: &AppPaths,
-    database_path: &Path,
-    settings_path: &Path,
-    resources_dir: &Path,
-) -> Result<(), BackupError> {
-    fs::rename(database_path, &paths.database).map_err(|error| {
-        BackupError::new(
-            BackupErrorKind::DatabaseRestoreFailed,
-            format!("写入恢复后的数据库失败：{error}"),
-        )
-    })?;
-    fs::rename(settings_path, &paths.settings).map_err(|error| {
-        BackupError::new(
-            BackupErrorKind::SettingsRestoreFailed,
-            format!("写入恢复后的设置失败：{error}"),
-        )
-    })?;
-    fs::rename(resources_dir, &paths.resources).map_err(|error| {
-        BackupError::new(
-            BackupErrorKind::ResourcesRestoreFailed,
-            format!("写入恢复后的资源目录失败：{error}"),
-        )
-    })?;
+        if let Err(error) = move_path_for_restore(&item.source, &item.target, item.kind) {
+            let kept_path = rollback_paths.keep_root();
+            return Err(BackupError::new(
+                BackupErrorKind::RollbackFailed,
+                format!(
+                    "回滚本地数据失败：{error}；rollback 临时目录已保留：{}",
+                    kept_path.display()
+                ),
+            ));
+        }
+    }
 
     Ok(())
 }
@@ -1973,28 +2245,42 @@ fn swap_restore_backup_data(
     restored: &RestoredBackupPaths,
     rollback_paths: &RestoreRollbackPaths,
 ) -> Result<(), BackupError> {
-    fs::rename(&restored.database, &paths.database).map_err(|error| {
-        BackupError::new(
-            BackupErrorKind::DatabaseRestoreFailed,
-            format!("写入恢复后的数据库失败：{error}"),
-        )
-    })?;
+    move_path_for_restore(&restored.database, &paths.database, RestorePathKind::File).map_err(
+        |error| {
+            BackupError::new(
+                BackupErrorKind::DatabaseRestoreFailed,
+                format!("写入恢复后的数据库失败：{error}"),
+            )
+        },
+    )?;
 
     if let Some(settings_path) = &restored.settings {
-        fs::rename(settings_path, &paths.settings).map_err(|error| {
-            BackupError::new(
-                BackupErrorKind::SettingsRestoreFailed,
-                format!("写入恢复后的设置失败：{error}"),
-            )
-        })?;
+        move_path_for_restore(settings_path, &paths.settings, RestorePathKind::File).map_err(
+            |error| {
+                BackupError::new(
+                    BackupErrorKind::SettingsRestoreFailed,
+                    format!("写入恢复后的设置失败：{error}"),
+                )
+            },
+        )?;
     } else if rollback_paths.settings.exists() {
-        fs::copy(&rollback_paths.settings, &paths.settings).map_err(|error| {
-            BackupError::new(
-                BackupErrorKind::SettingsRestoreFailed,
-                format!("保留当前设置失败：{error}"),
-            )
-        })?;
+        copy_file_without_overwrite_for_restore(&rollback_paths.settings, &paths.settings)
+            .map_err(|error| {
+                BackupError::new(
+                    BackupErrorKind::SettingsRestoreFailed,
+                    format!("保留当前设置失败：{error}"),
+                )
+            })?;
     } else {
+        if paths.settings.exists() {
+            return Err(BackupError::new(
+                BackupErrorKind::SettingsRestoreFailed,
+                format!(
+                    "写入默认设置失败：目标路径已存在，拒绝覆盖：{}",
+                    paths.settings.display()
+                ),
+            ));
+        }
         write_settings_atomically(&paths.settings, &AppSettings::default()).map_err(|error| {
             BackupError::new(
                 BackupErrorKind::SettingsRestoreFailed,
@@ -2003,7 +2289,12 @@ fn swap_restore_backup_data(
         })?;
     }
 
-    fs::rename(&restored.resources, &paths.resources).map_err(|error| {
+    move_path_for_restore(
+        &restored.resources,
+        &paths.resources,
+        RestorePathKind::Directory,
+    )
+    .map_err(|error| {
         BackupError::new(
             BackupErrorKind::ResourcesRestoreFailed,
             format!("写入恢复后的资源目录失败：{error}"),
@@ -2282,7 +2573,7 @@ pub fn restore_backup(
         RestoreProgressStage::ReplacingLocalData,
         "正在替换本地数据",
     );
-    let rollback_paths = with_backup_stage("restore_backup.prepare_rollback", || {
+    let mut rollback_paths = with_backup_stage("restore_backup.prepare_rollback", || {
         prepare_restore_rollback(&paths)
     })
     .map_err(BackupError::into_user_message)?;
@@ -2291,7 +2582,7 @@ pub fn restore_backup(
         swap_restore_backup_data(&paths, &restored, &rollback_paths)
     }) {
         if let Err(rollback_error) = with_backup_stage("restore_backup.rollback", || {
-            rollback_restored_data(&paths, &rollback_paths)
+            rollback_restored_data(&paths, &mut rollback_paths)
         }) {
             return Err(rollback_error.into_user_message());
         }
@@ -2311,18 +2602,19 @@ mod tests {
         add_resources_to_zip, build_created_backup_list_item, cache_size_bytes,
         cleanup_legacy_backups_once, directory_size_bytes, extract_backup_archive,
         is_legacy_backups_cleanup_target, legacy_cleanup_marker_path, list_backup_items,
-        prepare_restore_rollback, resolve_backup_file_path, resolve_document_backups_dir,
-        resource_file_compression_method, rollback_restored_data, validate_backup_archive,
+        move_path_for_restore, prepare_restore_rollback, resolve_backup_file_path,
+        resolve_document_backups_dir, resource_file_compression_method,
+        restore_moved_items_after_prepare_failure, rollback_restored_data, validate_backup_archive,
         validate_backup_file, validate_database_file_for_schema, validate_manifest_archive_paths,
         zip_dir_options, zip_file_options, AppPaths, AppSettings, BackupErrorKind, BackupManifest,
-        BackupValidationStatus, RestoreRollbackPaths, CURRENT_SCHEMA_VERSION,
-        DOCUMENT_BACKUPS_DIR_NAME, DOCUMENT_DIR_UNAVAILABLE_MESSAGE,
+        BackupValidationStatus, RestoreMoveItem, RestorePathKind, RestoreRollbackPaths,
+        CURRENT_SCHEMA_VERSION, DOCUMENT_BACKUPS_DIR_NAME, DOCUMENT_DIR_UNAVAILABLE_MESSAGE,
     };
     use rusqlite::Connection;
     use std::fs::{self, File};
     use std::io::Write;
     use std::path::{Path, PathBuf};
-    use tempfile::tempdir;
+    use tempfile::{tempdir, tempdir_in};
     use zip::{CompressionMethod, ZipWriter};
 
     fn create_temp_database(schema_sql: &str) -> std::path::PathBuf {
@@ -3058,6 +3350,136 @@ mod tests {
     }
 
     #[test]
+    fn move_path_for_restore_rejects_existing_target_and_keeps_source() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let source = temp_dir.path().join("source.db");
+        let target = temp_dir.path().join("target.db");
+        fs::write(&source, b"source").expect("write source");
+        fs::write(&target, b"target").expect("write target");
+
+        let error = move_path_for_restore(&source, &target, RestorePathKind::File)
+            .expect_err("existing target should fail");
+
+        assert!(error.contains("拒绝覆盖"));
+        assert!(error.contains(&target.to_string_lossy().to_string()));
+        assert_eq!(fs::read(&source).expect("read source"), b"source");
+        assert_eq!(fs::read(&target).expect("read target"), b"target");
+    }
+
+    #[test]
+    fn move_path_for_restore_moves_file() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let source = temp_dir.path().join("source.db");
+        let target = temp_dir.path().join("target.db");
+        fs::write(&source, b"database").expect("write source");
+
+        move_path_for_restore(&source, &target, RestorePathKind::File).expect("move file");
+
+        assert!(!source.exists());
+        assert_eq!(fs::read(&target).expect("read target"), b"database");
+    }
+
+    #[test]
+    fn move_path_for_restore_moves_directory() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let source = temp_dir.path().join("resources");
+        let target = temp_dir.path().join("resources-target");
+        fs::create_dir_all(source.join("images")).expect("create source dir");
+        fs::write(source.join("images/note.png"), b"image").expect("write image");
+
+        move_path_for_restore(&source, &target, RestorePathKind::Directory).expect("move dir");
+
+        assert!(!source.exists());
+        assert_eq!(
+            fs::read(target.join("images/note.png")).expect("read target image"),
+            b"image"
+        );
+    }
+
+    #[test]
+    fn move_path_for_restore_failure_keeps_source_data() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let source = temp_dir.path().join("source-file");
+        let target = temp_dir.path().join("target-dir");
+        fs::write(&source, b"source").expect("write source");
+
+        let error = move_path_for_restore(&source, &target, RestorePathKind::Directory)
+            .expect_err("kind mismatch should fail");
+
+        assert!(error.contains("源数据仍保留"));
+        assert_eq!(fs::read(&source).expect("read source"), b"source");
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn prepare_restore_rollback_restores_database_when_settings_move_fails() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let app_root = temp_dir.path().join("app-config");
+        let mut paths = create_test_paths(&app_root);
+        paths.temp = temp_dir.path().join("app-temp");
+        fs::write(&paths.database, b"live-database").expect("write live database");
+        fs::create_dir_all(&paths.settings).expect("create invalid settings dir");
+
+        let error = prepare_restore_rollback(&paths)
+            .expect_err("settings directory should fail rollback preparation");
+
+        assert_eq!(error.kind, BackupErrorKind::RestorePreparationFailed);
+        assert!(error.detail.contains("原始数据已恢复"));
+        assert_eq!(
+            fs::read(&paths.database).expect("read restored database"),
+            b"live-database"
+        );
+        assert!(paths.settings.is_dir());
+        assert_eq!(fs::read_dir(&paths.temp).expect("read app temp").count(), 0);
+    }
+
+    #[test]
+    fn prepare_restore_failure_keeps_rollback_temp_when_restore_fails() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let paths = create_test_paths(temp_dir.path());
+        fs::create_dir_all(&paths.temp).expect("create app temp");
+        let rollback_root = tempdir_in(&paths.temp).expect("create rollback root");
+        let rollback_database = rollback_root.path().join("database.rollback");
+        fs::write(&rollback_database, b"rollback-database").expect("write rollback database");
+        fs::write(&paths.database, b"conflict-database").expect("write conflict database");
+
+        let mut rollback_paths = RestoreRollbackPaths {
+            root: Some(rollback_root),
+            kept_root: None,
+            database: rollback_database.clone(),
+            settings: paths.temp.join("settings.rollback"),
+            resources: paths.temp.join("resources.rollback"),
+        };
+        let moved_items = vec![RestoreMoveItem {
+            source: paths.database.clone(),
+            target: rollback_database.clone(),
+            kind: RestorePathKind::File,
+        }];
+
+        let error = restore_moved_items_after_prepare_failure(
+            &mut rollback_paths,
+            &moved_items,
+            "settings move failed".to_string(),
+        );
+
+        assert_eq!(error.kind, BackupErrorKind::RestorePreparationFailed);
+        assert!(error.detail.contains("rollback 临时目录"));
+        assert!(error
+            .detail
+            .contains(&paths.database.to_string_lossy().to_string()));
+        let kept_root = rollback_paths
+            .kept_root
+            .clone()
+            .expect("rollback root should be kept");
+        assert!(kept_root.exists());
+        assert!(rollback_database.exists());
+        assert_eq!(
+            fs::read(&paths.database).expect("read conflict database"),
+            b"conflict-database"
+        );
+    }
+
+    #[test]
     fn restore_interruption_probe_confirms_live_paths_are_missing_after_prepare_rollback() {
         let temp_dir = tempdir().expect("create temp dir");
         let app_root = temp_dir.path().join("app-config");
@@ -3069,7 +3491,8 @@ mod tests {
         fs::write(paths.resources.join("images/note.png"), b"live-image")
             .expect("write live image");
 
-        let rollback_paths = prepare_restore_rollback(&paths).expect("prepare restore rollback");
+        let mut rollback_paths =
+            prepare_restore_rollback(&paths).expect("prepare restore rollback");
 
         assert!(!paths.database.exists());
         assert!(!paths.settings.exists());
@@ -3082,7 +3505,7 @@ mod tests {
         assert!(rollback_paths.resources.starts_with(&paths.temp));
         assert!(!rollback_paths.database.starts_with(&paths.root));
 
-        rollback_restored_data(&paths, &rollback_paths).expect("manual rollback restores data");
+        rollback_restored_data(&paths, &mut rollback_paths).expect("manual rollback restores data");
 
         assert_eq!(
             fs::read(&paths.database).expect("read database"),
@@ -3136,7 +3559,7 @@ mod tests {
         let rollback_root = tempdir().expect("create rollback dir");
         let paths = AppPaths {
             root: temp_dir.path().to_path_buf(),
-            database: temp_dir.path().join("database-as-dir"),
+            database: temp_dir.path().join("fight-notes.db"),
             settings: temp_dir.path().join("app-settings.json"),
             resources: temp_dir.path().join("resources"),
             backups: temp_dir
@@ -3149,22 +3572,38 @@ mod tests {
             log: temp_dir.path().join("logs"),
             temp: temp_dir.path().join("tmp"),
         };
-        fs::create_dir_all(&paths.database).expect("create database dir");
+        fs::write(&paths.database, b"conflict database").expect("write conflict database");
+        let rollback_database = rollback_root.path().join("database.rollback");
+        fs::write(&rollback_database, b"rollback database").expect("write rollback database");
 
-        let rollback_paths = RestoreRollbackPaths {
-            _root: rollback_root,
-            database: temp_dir.path().join("database.rollback"),
+        let mut rollback_paths = RestoreRollbackPaths {
+            root: Some(rollback_root),
+            kept_root: None,
+            database: rollback_database.clone(),
             settings: temp_dir.path().join("settings.rollback"),
             resources: temp_dir.path().join("resources.rollback"),
         };
 
-        let error = rollback_restored_data(&paths, &rollback_paths)
+        let error = rollback_restored_data(&paths, &mut rollback_paths)
             .expect_err("rollback should fail on invalid target");
 
         assert_eq!(error.kind, BackupErrorKind::RollbackFailed);
         assert_eq!(
             error.user_message(),
             "恢复失败，且回滚本地数据时出现问题，请立即检查数据目录。"
+        );
+        assert!(error
+            .detail
+            .contains(&paths.database.to_string_lossy().to_string()));
+        let kept_root = rollback_paths
+            .kept_root
+            .clone()
+            .expect("rollback root should be kept");
+        assert!(kept_root.exists());
+        assert!(rollback_database.exists());
+        assert_eq!(
+            fs::read(&paths.database).expect("read conflict database"),
+            b"conflict database"
         );
     }
 }
