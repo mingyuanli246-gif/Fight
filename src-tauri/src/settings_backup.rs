@@ -3,13 +3,13 @@ use rfd::FileDialog;
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};
-use tempfile::{tempdir_in, NamedTempFile, TempDir};
+use tempfile::{tempdir_in, Builder as TempFileBuilder, NamedTempFile, TempDir};
 use walkdir::WalkDir;
 use zip::write::FileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
@@ -24,6 +24,9 @@ const RESTORE_JOURNAL_FILE_NAME: &str = "restore-journal.json";
 const RESTORE_JOURNAL_SCHEMA_VERSION: u32 = 1;
 const APP_TEMP_DIR_NAME: &str = "com.lihongxia.fight";
 const BACKUP_FILE_PREFIX: &str = "fight-notes-backup";
+const BACKUP_TEMP_FILE_SUFFIX: &str = ".zip.creating";
+const BACKUP_TEMP_FILE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+const MAX_BACKUP_PERSIST_RETRIES: usize = 8;
 const RESTORE_PROGRESS_EVENT: &str = "backup-restore-progress";
 const DOCUMENT_DIR_UNAVAILABLE_MESSAGE: &str = "无法读取文稿目录，暂时无法创建备份。";
 const BACKUP_FORMAT_VERSION: u32 = 1;
@@ -889,6 +892,145 @@ fn build_backup_file_name_with_prefix(backups_dir: &Path, prefix: &str) -> PathB
     backups_dir.join(candidate)
 }
 
+fn backup_temp_file_prefix() -> String {
+    format!(".{BACKUP_FILE_PREFIX}-")
+}
+
+fn is_backup_temp_file_name(file_name: &str) -> bool {
+    file_name.starts_with(&backup_temp_file_prefix())
+        && file_name.ends_with(BACKUP_TEMP_FILE_SUFFIX)
+}
+
+fn is_restore_temporary_backup_file_name(file_name: &str) -> bool {
+    file_name.ends_with(BACKUP_TEMP_FILE_SUFFIX)
+        || file_name.starts_with(&backup_temp_file_prefix())
+}
+
+fn cleanup_stale_backup_temp_files_with_options(
+    backups_dir: &Path,
+    now: SystemTime,
+    max_age: Duration,
+) -> Result<Vec<PathBuf>, String> {
+    let mut removed_paths = Vec::new();
+
+    for entry in fs::read_dir(backups_dir).map_err(|error| format!("读取备份目录失败：{error}"))?
+    {
+        let entry = entry.map_err(|error| format!("读取备份目录失败：{error}"))?;
+        let path = entry.path();
+
+        if !path.is_file() {
+            continue;
+        }
+
+        let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+
+        if !is_backup_temp_file_name(file_name) {
+            continue;
+        }
+
+        let metadata =
+            fs::metadata(&path).map_err(|error| format!("读取临时备份文件元数据失败：{error}"))?;
+        let modified = metadata
+            .modified()
+            .map_err(|error| format!("读取临时备份文件修改时间失败：{error}"))?;
+        let age = now.duration_since(modified).unwrap_or(Duration::ZERO);
+
+        if age <= max_age {
+            continue;
+        }
+
+        fs::remove_file(&path).map_err(|error| {
+            format!(
+                "清理旧临时备份文件失败 [{}]: {error}",
+                path.to_string_lossy()
+            )
+        })?;
+        removed_paths.push(path);
+    }
+
+    Ok(removed_paths)
+}
+
+fn cleanup_stale_backup_temp_files(backups_dir: &Path) {
+    if let Err(error) = cleanup_stale_backup_temp_files_with_options(
+        backups_dir,
+        SystemTime::now(),
+        BACKUP_TEMP_FILE_MAX_AGE,
+    ) {
+        eprintln!("[settings.backup] {error}");
+    }
+}
+
+fn create_backup_temp_file(backups_dir: &Path) -> Result<NamedTempFile, String> {
+    TempFileBuilder::new()
+        .prefix(&backup_temp_file_prefix())
+        .suffix(BACKUP_TEMP_FILE_SUFFIX)
+        .tempfile_in(backups_dir)
+        .map_err(|error| format!("创建备份临时文件失败：{error}"))
+}
+
+fn sync_backup_directory_best_effort(backups_dir: &Path) {
+    match File::open(backups_dir) {
+        Ok(directory) => {
+            if let Err(error) = directory.sync_all() {
+                eprintln!(
+                    "[settings.backup] 同步备份目录失败 [{}]: {error}",
+                    backups_dir.to_string_lossy()
+                );
+            }
+        }
+        Err(error) => {
+            eprintln!(
+                "[settings.backup] 打开备份目录用于同步失败 [{}]: {error}",
+                backups_dir.to_string_lossy()
+            );
+        }
+    }
+}
+
+fn persist_backup_temp_file(
+    mut temp_file: NamedTempFile,
+    initial_backup_path: PathBuf,
+    backups_dir: &Path,
+    file_name_prefix: &str,
+) -> Result<PathBuf, String> {
+    let mut backup_path = initial_backup_path;
+
+    for attempt in 0..MAX_BACKUP_PERSIST_RETRIES {
+        match temp_file.persist_noclobber(&backup_path) {
+            Ok(_) => {
+                sync_backup_directory_best_effort(backups_dir);
+                return Ok(backup_path);
+            }
+            Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {
+                temp_file = error.file;
+                backup_path = build_backup_file_name_with_prefix(backups_dir, file_name_prefix);
+                if attempt + 1 == MAX_BACKUP_PERSIST_RETRIES {
+                    let temp_path = temp_file.path().to_path_buf();
+                    return Err(format!(
+                        "保存备份文件失败：正式备份文件名连续冲突，临时文件已清理：{}",
+                        temp_path.display()
+                    ));
+                }
+            }
+            Err(error) => {
+                let temp_path = error.file.path().to_path_buf();
+                let detail = format!(
+                    "保存备份文件失败：{}；临时文件已清理：{}",
+                    error.error,
+                    temp_path.display()
+                );
+                drop(error.file);
+                return Err(detail);
+            }
+        }
+    }
+
+    Err("保存备份文件失败：正式备份文件名冲突过多。".to_string())
+}
+
 fn create_database_snapshot(source_path: &Path, snapshot_path: &Path) -> Result<(), String> {
     if !source_path.exists() {
         return Err("数据库文件不存在，暂时无法创建备份。".to_string());
@@ -944,8 +1086,8 @@ fn zip_dir_options() -> FileOptions {
         .unix_permissions(0o755)
 }
 
-fn add_file_to_zip(
-    zip: &mut ZipWriter<File>,
+fn add_file_to_zip<W: Write + Seek>(
+    zip: &mut ZipWriter<W>,
     source_path: &Path,
     zip_path: &str,
     options: FileOptions,
@@ -958,8 +1100,8 @@ fn add_file_to_zip(
     Ok(())
 }
 
-fn add_resources_to_zip(
-    zip: &mut ZipWriter<File>,
+fn add_resources_to_zip<W: Write + Seek>(
+    zip: &mut ZipWriter<W>,
     resources_dir: &Path,
     zip_dir_name: &str,
 ) -> Result<(), String> {
@@ -1124,6 +1266,14 @@ fn resolve_restore_backup_path(backup_path: &str) -> Result<PathBuf, String> {
 
     if backup_path.trim().is_empty() {
         return Err("备份文件路径无效。".to_string());
+    }
+
+    if path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(is_restore_temporary_backup_file_name)
+    {
+        return Err("临时备份文件尚未创建完成，不能用于恢复。".to_string());
     }
 
     if !path.exists() {
@@ -1700,6 +1850,61 @@ fn prune_old_backups(backups_dir: &Path, retention_count: usize) -> Result<(), S
     }
 }
 
+fn write_backup_zip_to_temp_file(
+    paths: &AppPaths,
+    snapshot_path: &Path,
+    manifest: &BackupManifest,
+) -> Result<NamedTempFile, String> {
+    let mut temp_file = create_backup_temp_file(&paths.backups)?;
+    let zip_write_started_at = Instant::now();
+
+    {
+        let backup_file = temp_file.as_file_mut();
+        let mut zip = ZipWriter::new(backup_file);
+
+        zip.add_directory("database/", zip_dir_options())
+            .map_err(|error| format!("写入备份压缩包失败：{error}"))?;
+        zip.add_directory("settings/", zip_dir_options())
+            .map_err(|error| format!("写入备份压缩包失败：{error}"))?;
+
+        let manifest_content = serde_json::to_vec_pretty(manifest)
+            .map_err(|error| format!("生成备份清单失败：{error}"))?;
+        zip.start_file("manifest.json", zip_file_options())
+            .map_err(|error| format!("写入备份压缩包失败：{error}"))?;
+        zip.write_all(&manifest_content)
+            .map_err(|error| format!("写入备份压缩包失败：{error}"))?;
+
+        add_file_to_zip(
+            &mut zip,
+            snapshot_path,
+            &format!("database/{}", manifest.database_file),
+            zip_file_options(),
+        )?;
+        add_file_to_zip(
+            &mut zip,
+            &paths.settings,
+            &format!("settings/{}", manifest.settings_file),
+            zip_file_options(),
+        )?;
+        with_backup_perf("create_backup.resources_zip", || {
+            add_resources_to_zip(&mut zip, &paths.resources, &manifest.resource_directory)
+        })?;
+
+        let backup_file = zip
+            .finish()
+            .map_err(|error| format!("完成备份压缩包失败：{error}"))?;
+        backup_file
+            .flush()
+            .map_err(|error| format!("刷新备份临时文件失败：{error}"))?;
+        backup_file
+            .sync_all()
+            .map_err(|error| format!("同步备份临时文件失败：{error}"))?;
+    }
+
+    log_backup_perf_complete("create_backup.zip_write", zip_write_started_at);
+    Ok(temp_file)
+}
+
 fn create_backup_snapshot_without_lock<R: Runtime>(
     app: &AppHandle<R>,
     paths: &AppPaths,
@@ -1708,6 +1913,8 @@ fn create_backup_snapshot_without_lock<R: Runtime>(
     file_name_prefix: &str,
     prune_by_retention: bool,
 ) -> Result<CreateBackupResult, String> {
+    cleanup_stale_backup_temp_files(&paths.backups);
+
     let temp_dir = create_app_temp_dir(paths, "备份临时目录")?;
     let snapshot_path = temp_dir.path().join(DATABASE_FILE_NAME);
     with_backup_perf("create_backup.database_snapshot", || {
@@ -1715,43 +1922,14 @@ fn create_backup_snapshot_without_lock<R: Runtime>(
     })?;
 
     let manifest = create_manifest(app, note);
-    let backup_path = build_backup_file_name_with_prefix(&paths.backups, file_name_prefix);
-    let backup_file =
-        File::create(&backup_path).map_err(|error| format!("创建备份文件失败：{error}"))?;
-    let zip_write_started_at = Instant::now();
-    let mut zip = ZipWriter::new(backup_file);
-
-    zip.add_directory("database/", zip_dir_options())
-        .map_err(|error| format!("写入备份压缩包失败：{error}"))?;
-    zip.add_directory("settings/", zip_dir_options())
-        .map_err(|error| format!("写入备份压缩包失败：{error}"))?;
-
-    let manifest_content = serde_json::to_vec_pretty(&manifest)
-        .map_err(|error| format!("生成备份清单失败：{error}"))?;
-    zip.start_file("manifest.json", zip_file_options())
-        .map_err(|error| format!("写入备份压缩包失败：{error}"))?;
-    zip.write_all(&manifest_content)
-        .map_err(|error| format!("写入备份压缩包失败：{error}"))?;
-
-    add_file_to_zip(
-        &mut zip,
-        &snapshot_path,
-        &format!("database/{}", manifest.database_file),
-        zip_file_options(),
+    let temp_backup_file = write_backup_zip_to_temp_file(paths, &snapshot_path, &manifest)?;
+    let initial_backup_path = build_backup_file_name_with_prefix(&paths.backups, file_name_prefix);
+    let backup_path = persist_backup_temp_file(
+        temp_backup_file,
+        initial_backup_path,
+        &paths.backups,
+        file_name_prefix,
     )?;
-    add_file_to_zip(
-        &mut zip,
-        &paths.settings,
-        &format!("settings/{}", manifest.settings_file),
-        zip_file_options(),
-    )?;
-    with_backup_perf("create_backup.resources_zip", || {
-        add_resources_to_zip(&mut zip, &paths.resources, &manifest.resource_directory)
-    })?;
-
-    zip.finish()
-        .map_err(|error| format!("完成备份压缩包失败：{error}"))?;
-    log_backup_perf_complete("create_backup.zip_write", zip_write_started_at);
 
     let result_started_at = Instant::now();
     let backup = build_created_backup_list_item(&backup_path, &manifest)?;
@@ -3381,23 +3559,28 @@ pub fn restore_backup(
 mod tests {
     use super::{
         add_resources_to_zip, build_created_backup_list_item, cache_size_bytes,
-        cleanup_legacy_backups_once, create_restore_rollback_paths, directory_size_bytes,
+        cleanup_legacy_backups_once, cleanup_stale_backup_temp_files_with_options,
+        create_backup_temp_file, create_restore_rollback_paths, directory_size_bytes,
         extract_backup_archive, is_legacy_backups_cleanup_target, legacy_cleanup_marker_path,
-        list_backup_items, move_path_for_restore, new_restore_journal, prepare_restore_rollback,
-        prune_old_backups, record_installed_item, recover_incomplete_restore_for_paths,
-        resolve_backup_file_path, resolve_document_backups_dir, resource_file_compression_method,
-        restore_journal_path, restore_moved_items_after_prepare_failure, rollback_restored_data,
-        validate_backup_archive, validate_backup_file, validate_database_file_for_schema,
-        validate_manifest_archive_paths, write_restore_journal_atomically, zip_dir_options,
+        list_backup_items, move_path_for_restore, new_restore_journal, persist_backup_temp_file,
+        prepare_restore_rollback, prune_old_backups, record_installed_item,
+        recover_incomplete_restore_for_paths, resolve_backup_file_path,
+        resolve_document_backups_dir, resolve_restore_backup_path,
+        resource_file_compression_method, restore_journal_path,
+        restore_moved_items_after_prepare_failure, rollback_restored_data, validate_backup_archive,
+        validate_backup_file, validate_database_file_for_schema, validate_manifest_archive_paths,
+        write_backup_zip_to_temp_file, write_restore_journal_atomically, zip_dir_options,
         zip_file_options, AppPaths, AppSettings, BackupErrorKind, BackupManifest,
         BackupValidationStatus, RestoreInstalledItem, RestoreJournalStage, RestoreMoveItem,
-        RestorePathKind, RestoreRollbackPaths, CURRENT_SCHEMA_VERSION, DOCUMENT_BACKUPS_DIR_NAME,
-        DOCUMENT_DIR_UNAVAILABLE_MESSAGE,
+        RestorePathKind, RestoreRollbackPaths, BACKUP_FILE_PREFIX, CURRENT_SCHEMA_VERSION,
+        DOCUMENT_BACKUPS_DIR_NAME, DOCUMENT_DIR_UNAVAILABLE_MESSAGE,
     };
     use rusqlite::Connection;
     use std::fs::{self, File};
     use std::io::Write;
     use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::time::{Duration, SystemTime};
     use tempfile::{tempdir, tempdir_in};
     use zip::{CompressionMethod, ZipWriter};
 
@@ -3454,6 +3637,16 @@ mod tests {
     fn keep_test_rollback_root(rollback_paths: &mut RestoreRollbackPaths) {
         let kept = rollback_paths.keep_root();
         assert!(kept.exists());
+    }
+
+    fn mark_file_as_old(path: &Path) {
+        let status = Command::new("touch")
+            .arg("-t")
+            .arg("202001010000")
+            .arg(path)
+            .status()
+            .expect("run touch");
+        assert!(status.success());
     }
 
     #[test]
@@ -4011,14 +4204,174 @@ mod tests {
         )
         .expect("write app zip");
         fs::write(paths.backups.join("random.zip"), b"manual").expect("write random zip");
+        fs::write(
+            paths.backups.join(".fight-notes-backup-temp.zip.creating"),
+            b"temporary",
+        )
+        .expect("write temporary backup");
 
         let before = fs::read_dir(&paths.backups).expect("read backups").count();
-        let _ = list_backup_items(&paths).expect("list backups");
+        let items = list_backup_items(&paths).expect("list backups");
         let after = fs::read_dir(&paths.backups).expect("read backups").count();
 
         assert_eq!(before, after);
+        assert!(!items
+            .iter()
+            .any(|item| item.file_name.ends_with(".zip.creating")));
         assert!(paths.backups.join("fight-notes-backup-old.zip").exists());
         assert!(paths.backups.join("random.zip").exists());
+        assert!(paths
+            .backups
+            .join(".fight-notes-backup-temp.zip.creating")
+            .exists());
+    }
+
+    #[test]
+    fn resolve_restore_backup_path_rejects_temporary_backup_files() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let creating_path = temp_dir
+            .path()
+            .join(".fight-notes-backup-temp.zip.creating");
+        let hidden_zip_path = temp_dir.path().join(".fight-notes-backup-temp.zip");
+        let external_zip_path = temp_dir.path().join("external.zip");
+        fs::write(&creating_path, b"creating").expect("write creating");
+        fs::write(&hidden_zip_path, b"hidden").expect("write hidden");
+        fs::write(&external_zip_path, b"external").expect("write external");
+
+        assert!(resolve_restore_backup_path(&creating_path.to_string_lossy()).is_err());
+        assert!(resolve_restore_backup_path(&hidden_zip_path.to_string_lossy()).is_err());
+        assert_eq!(
+            resolve_restore_backup_path(&external_zip_path.to_string_lossy())
+                .expect("external zip should pass path validation"),
+            external_zip_path
+        );
+    }
+
+    #[test]
+    fn cleanup_stale_backup_temp_files_only_removes_old_app_creating_files() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let paths = create_test_paths(temp_dir.path());
+        let old_temp = paths.backups.join(".fight-notes-backup-old.zip.creating");
+        let recent_temp = paths
+            .backups
+            .join(".fight-notes-backup-recent.zip.creating");
+        let formal_backup = paths.backups.join("fight-notes-backup-old.zip");
+        let random_zip = paths.backups.join("random.zip");
+        let other_creating = paths.backups.join(".other.zip.creating");
+        fs::write(&old_temp, b"old temp").expect("write old temp");
+        fs::write(&recent_temp, b"recent temp").expect("write recent temp");
+        fs::write(&formal_backup, b"formal").expect("write formal");
+        fs::write(&random_zip, b"random").expect("write random");
+        fs::write(&other_creating, b"other").expect("write other creating");
+        mark_file_as_old(&old_temp);
+        mark_file_as_old(&formal_backup);
+        mark_file_as_old(&random_zip);
+        mark_file_as_old(&other_creating);
+
+        let removed = cleanup_stale_backup_temp_files_with_options(
+            &paths.backups,
+            SystemTime::now(),
+            Duration::from_secs(24 * 60 * 60),
+        )
+        .expect("cleanup stale temp files");
+
+        assert_eq!(removed, vec![old_temp.clone()]);
+        assert!(!old_temp.exists());
+        assert!(recent_temp.exists());
+        assert!(formal_backup.exists());
+        assert!(random_zip.exists());
+        assert!(other_creating.exists());
+    }
+
+    #[test]
+    fn persist_backup_temp_file_retries_without_overwriting_existing_backup() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let paths = create_test_paths(temp_dir.path());
+        let existing_backup = paths
+            .backups
+            .join("fight-notes-backup-2026-04-29_10-00-00.zip");
+        fs::write(&existing_backup, b"existing backup").expect("write existing backup");
+        let mut temp_file = create_backup_temp_file(&paths.backups).expect("create temp backup");
+        temp_file
+            .write_all(b"new backup")
+            .expect("write temp backup");
+        temp_file.as_file().sync_all().expect("sync temp backup");
+
+        let persisted_path = persist_backup_temp_file(
+            temp_file,
+            existing_backup.clone(),
+            &paths.backups,
+            BACKUP_FILE_PREFIX,
+        )
+        .expect("persist temp backup");
+
+        assert_ne!(persisted_path, existing_backup);
+        assert_eq!(
+            fs::read(&existing_backup).expect("read existing backup"),
+            b"existing backup"
+        );
+        assert_eq!(
+            fs::read(&persisted_path).expect("read persisted backup"),
+            b"new backup"
+        );
+        assert_eq!(
+            persisted_path.extension().and_then(|value| value.to_str()),
+            Some("zip")
+        );
+    }
+
+    #[test]
+    fn failed_temp_zip_write_does_not_create_formal_backup_or_prune_existing_backups() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let paths = create_test_paths(temp_dir.path());
+        fs::create_dir_all(&paths.root).expect("create root");
+        fs::create_dir_all(&paths.resources).expect("create resources");
+        let database_path = create_v7_database();
+        let settings_bytes =
+            serde_json::to_vec(&AppSettings::default()).expect("serialize settings");
+        let manifest = create_valid_manifest(Some(CURRENT_SCHEMA_VERSION));
+        let old_backup = paths
+            .backups
+            .join("fight-notes-backup-2026-04-01_00-00-00.zip");
+        let new_backup = paths
+            .backups
+            .join("fight-notes-backup-2026-04-02_00-00-00.zip");
+        write_backup_archive(
+            &old_backup,
+            Some(&manifest),
+            Some(&database_path),
+            Some(&settings_bytes),
+            true,
+        );
+        write_backup_archive(
+            &new_backup,
+            Some(&manifest),
+            Some(&database_path),
+            Some(&settings_bytes),
+            true,
+        );
+
+        let error = write_backup_zip_to_temp_file(&paths, &database_path, &manifest)
+            .expect_err("missing settings should fail zip write");
+
+        assert!(error.contains("读取备份文件失败"));
+        assert!(old_backup.exists());
+        assert!(new_backup.exists());
+        let formal_zip_count = fs::read_dir(&paths.backups)
+            .expect("read backups")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry.path().extension().and_then(|value| value.to_str()) == Some("zip")
+            })
+            .count();
+        assert_eq!(formal_zip_count, 2);
+        assert!(fs::read_dir(&paths.backups)
+            .expect("read backups")
+            .filter_map(Result::ok)
+            .all(|entry| entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| !name.ends_with(".zip.creating"))));
     }
 
     #[test]
