@@ -42,6 +42,7 @@ import type { NoteEditorPaneRef } from "./NoteEditorPane";
 import { NotebookDetailWorkspace } from "./NotebookDetailWorkspace";
 import { NotebookHomeWorkspace } from "./NotebookHomeWorkspace";
 import {
+  cleanupUnreferencedManagedResources,
   deleteManagedResource,
   ensureResourceDirectories,
   selectAndImportImage,
@@ -672,6 +673,9 @@ export const NotebookWorkspace = forwardRef<
       await initializeNotebookDatabase();
       await ensureReviewFeatureReady();
       await syncWorkspace();
+      void cleanupUnreferencedManagedResources().catch((error) => {
+        console.warn("[notebooks.resources] 保守清理孤儿图片失败", error);
+      });
       setShellMode("home");
     } catch (error) {
       setInitializationError(getErrorMessage(error));

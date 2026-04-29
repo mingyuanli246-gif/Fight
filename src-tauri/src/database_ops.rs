@@ -1,7 +1,10 @@
 use crate::resource_ops::{
-    delete_managed_resource_internal, normalize_managed_resource_path, resolve_app_root,
+    is_app_managed_image_resource_path, move_managed_resource_to_trash,
+    normalize_managed_resource_path, resolve_app_root, snapshot_managed_resource_session_leases,
+    ManagedResourceTrashSource,
 };
 use chrono::{Local, NaiveDate, Utc};
+use percent_encoding::percent_decode_str;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -164,6 +167,7 @@ pub struct ManagedResourceCleanupFailure {
 #[serde(rename_all = "camelCase")]
 pub struct ManagedResourceCleanupResult {
     pub deleted_count: usize,
+    pub moved_to_trash_count: usize,
     pub failed: Vec<ManagedResourceCleanupFailure>,
 }
 
@@ -1248,7 +1252,9 @@ fn normalize_tag_name(name: &str) -> Result<String, String> {
 
 fn tag_exists(connection: &Connection, tag_id: i64) -> Result<bool, String> {
     connection
-        .query_row("SELECT 1 FROM tags WHERE id = ?1 LIMIT 1", [tag_id], |_| Ok(()))
+        .query_row("SELECT 1 FROM tags WHERE id = ?1 LIMIT 1", [tag_id], |_| {
+            Ok(())
+        })
         .optional()
         .map_err(|error| to_command_error("校验标签是否存在", error))
         .map(|value| value.is_some())
@@ -2247,11 +2253,8 @@ fn move_folder_to_notebook_top_tx_internal(
         return Err("目标笔记本不存在。".to_string());
     }
 
-    let mut source_sibling_ids = fetch_folder_sibling_ids(
-        &transaction,
-        source_notebook_id,
-        source_parent_folder_id,
-    )?;
+    let mut source_sibling_ids =
+        fetch_folder_sibling_ids(&transaction, source_notebook_id, source_parent_folder_id)?;
     source_sibling_ids.retain(|current_id| *current_id != folder_id);
     assign_folder_sibling_sort_orders(&transaction, &source_sibling_ids)?;
 
@@ -3302,12 +3305,57 @@ fn extract_image_alt_from_tag(tag: &str) -> Option<String> {
 }
 
 fn extract_image_resource_path_from_tag(tag: &str) -> Option<String> {
-    if !tag.contains("data-note-image") {
+    let is_note_image = tag.contains("data-note-image");
+    let is_image_tag = extract_tag_name(tag).as_deref() == Some("img");
+
+    if !is_note_image && !is_image_tag {
         return None;
     }
 
-    let resource_path = extract_tag_attribute(tag, "data-resource-path")?;
-    normalize_managed_resource_path(&resource_path).ok()
+    if let Some(resource_path) = extract_tag_attribute(tag, "data-resource-path") {
+        if let Ok(normalized_path) = normalize_managed_resource_path(&resource_path) {
+            return Some(normalized_path);
+        }
+    }
+
+    let src = extract_tag_attribute(tag, "src")?;
+    extract_managed_resource_path_from_text(&src)
+}
+
+fn extract_managed_resource_path_from_text(value: &str) -> Option<String> {
+    let decoded_html = decode_html_entities(value);
+    extract_managed_resource_path_fragment(&decoded_html).or_else(|| {
+        percent_decode_str(&decoded_html)
+            .decode_utf8()
+            .ok()
+            .and_then(|decoded| extract_managed_resource_path_fragment(&decoded))
+    })
+}
+
+fn extract_managed_resource_path_fragment(value: &str) -> Option<String> {
+    for marker in ["resources/images/", "resources/covers/"] {
+        let Some(start) = value.find(marker) else {
+            continue;
+        };
+        let remainder = &value[start..];
+        let end = remainder
+            .find(|character: char| {
+                character == '?'
+                    || character == '#'
+                    || character == '"'
+                    || character == '\''
+                    || character == '<'
+                    || character == '>'
+                    || character.is_whitespace()
+            })
+            .unwrap_or(remainder.len());
+
+        if let Ok(normalized_path) = normalize_managed_resource_path(&remainder[..end]) {
+            return Some(normalized_path);
+        }
+    }
+
+    None
 }
 
 fn extract_note_image_resource_paths(content: &str) -> Vec<String> {
@@ -3620,24 +3668,8 @@ fn list_live_managed_resource_paths(connection: &Connection) -> Result<BTreeSet<
     Ok(resource_paths)
 }
 
-fn select_unreferenced_managed_resource_paths(
-    connection: &Connection,
-    candidate_paths: &[String],
-) -> Result<Vec<String>, String> {
-    let mut normalized_candidates = BTreeSet::new();
-    for candidate_path in candidate_paths {
-        insert_normalized_resource_path(&mut normalized_candidates, candidate_path);
-    }
-
-    if normalized_candidates.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let live_resource_paths = list_live_managed_resource_paths(connection)?;
-    Ok(normalized_candidates
-        .into_iter()
-        .filter(|candidate_path| !live_resource_paths.contains(candidate_path))
-        .collect())
+fn is_auto_cleanup_candidate_resource_path(resource_path: &str) -> bool {
+    is_app_managed_image_resource_path(resource_path)
 }
 
 fn cleanup_candidate_unreferenced_managed_resources(
@@ -3645,16 +3677,60 @@ fn cleanup_candidate_unreferenced_managed_resources(
     connection: &Connection,
     candidate_paths: &[String],
 ) -> Result<ManagedResourceCleanupResult, String> {
-    let cleanup_targets = select_unreferenced_managed_resource_paths(connection, candidate_paths)?;
+    cleanup_candidate_unreferenced_managed_resources_with_leases(
+        root,
+        connection,
+        candidate_paths,
+        &BTreeSet::new(),
+        ManagedResourceTrashSource::OrphanCleanup,
+        None,
+    )
+}
+
+fn cleanup_candidate_unreferenced_managed_resources_with_leases(
+    root: &Path,
+    connection: &Connection,
+    candidate_paths: &[String],
+    leased_resource_paths: &BTreeSet<String>,
+    source: ManagedResourceTrashSource,
+    note_id: Option<i64>,
+) -> Result<ManagedResourceCleanupResult, String> {
+    let mut normalized_candidates = BTreeSet::new();
+    for candidate_path in candidate_paths {
+        insert_normalized_resource_path(&mut normalized_candidates, candidate_path);
+    }
+
     let mut result = ManagedResourceCleanupResult {
         deleted_count: 0,
+        moved_to_trash_count: 0,
         failed: Vec::new(),
     };
 
-    for resource_path in cleanup_targets {
-        match delete_managed_resource_internal(root, &resource_path) {
+    for resource_path in normalized_candidates {
+        if !is_auto_cleanup_candidate_resource_path(&resource_path) {
+            continue;
+        }
+
+        if leased_resource_paths.contains(&resource_path) {
+            continue;
+        }
+
+        let live_resource_paths = match list_live_managed_resource_paths(connection) {
+            Ok(paths) => paths,
+            Err(error) => {
+                result.failed.push(to_cleanup_failure(resource_path, error));
+                continue;
+            }
+        };
+
+        if live_resource_paths.contains(&resource_path) {
+            continue;
+        }
+
+        match move_managed_resource_to_trash(root, &resource_path, source, note_id) {
             Ok(()) => {
                 result.deleted_count += 1;
+                result.moved_to_trash_count += 1;
             }
             Err(error) => {
                 result.failed.push(to_cleanup_failure(resource_path, error));
@@ -3711,7 +3787,9 @@ fn collect_managed_resource_file_candidates(
                 let entry_path = entry.path();
                 match managed_resource_path_from_absolute_path(root, entry_path) {
                     Ok(resource_path) => {
-                        resource_paths.insert(resource_path);
+                        if is_auto_cleanup_candidate_resource_path(&resource_path) {
+                            resource_paths.insert(resource_path);
+                        }
                     }
                     Err(error) => {
                         failures.push(to_cleanup_failure(
@@ -3735,6 +3813,22 @@ fn cleanup_unreferenced_managed_resources_internal(
     root: &Path,
     connection: &Connection,
 ) -> Result<ManagedResourceCleanupResult, String> {
+    cleanup_unreferenced_managed_resources_internal_with_leases(
+        root,
+        connection,
+        &BTreeSet::new(),
+        ManagedResourceTrashSource::OrphanCleanup,
+        None,
+    )
+}
+
+fn cleanup_unreferenced_managed_resources_internal_with_leases(
+    root: &Path,
+    connection: &Connection,
+    leased_resource_paths: &BTreeSet<String>,
+    source: ManagedResourceTrashSource,
+    note_id: Option<i64>,
+) -> Result<ManagedResourceCleanupResult, String> {
     let mut candidate_paths = BTreeSet::new();
     let mut failures = Vec::new();
 
@@ -3751,10 +3845,13 @@ fn cleanup_unreferenced_managed_resources_internal(
         &mut failures,
     );
 
-    let mut result = cleanup_candidate_unreferenced_managed_resources(
+    let mut result = cleanup_candidate_unreferenced_managed_resources_with_leases(
         root,
         connection,
         &candidate_paths.into_iter().collect::<Vec<_>>(),
+        leased_resource_paths,
+        source,
+        note_id,
     )?;
     result.failed.extend(failures);
 
@@ -3765,6 +3862,8 @@ fn cleanup_unreferenced_managed_resources_best_effort<R: Runtime>(
     app: &AppHandle<R>,
     connection: &Connection,
     candidate_paths: &[String],
+    source: ManagedResourceTrashSource,
+    note_id: Option<i64>,
 ) {
     if candidate_paths.is_empty() {
         return;
@@ -3778,7 +3877,16 @@ fn cleanup_unreferenced_managed_resources_best_effort<R: Runtime>(
         }
     };
 
-    match cleanup_candidate_unreferenced_managed_resources(&root, connection, candidate_paths) {
+    let leased_resource_paths = snapshot_managed_resource_session_leases(app);
+
+    match cleanup_candidate_unreferenced_managed_resources_with_leases(
+        &root,
+        connection,
+        candidate_paths,
+        &leased_resource_paths,
+        source,
+        note_id,
+    ) {
         Ok(result) => {
             for failure in result.failed {
                 eprintln!(
@@ -3789,6 +3897,87 @@ fn cleanup_unreferenced_managed_resources_best_effort<R: Runtime>(
         }
         Err(error) => {
             eprintln!("[database_ops] 清理孤儿资源失败: {error}");
+        }
+    }
+}
+
+fn cleanup_removed_note_resources_after_save(
+    root: &Path,
+    connection: &Connection,
+    previous_resource_paths: Vec<String>,
+    note_id: i64,
+) -> Result<ManagedResourceCleanupResult, String> {
+    cleanup_removed_note_resources_after_save_with_leases(
+        root,
+        connection,
+        previous_resource_paths,
+        note_id,
+        &BTreeSet::new(),
+    )
+}
+
+fn cleanup_removed_note_resources_after_save_with_leases(
+    root: &Path,
+    connection: &Connection,
+    previous_resource_paths: Vec<String>,
+    note_id: i64,
+    leased_resource_paths: &BTreeSet<String>,
+) -> Result<ManagedResourceCleanupResult, String> {
+    let next_resource_paths = collect_managed_resource_paths_for_note(connection, note_id)?
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let removed_resource_paths = previous_resource_paths
+        .into_iter()
+        .filter(|resource_path| !next_resource_paths.contains(resource_path))
+        .collect::<Vec<_>>();
+
+    cleanup_candidate_unreferenced_managed_resources_with_leases(
+        root,
+        connection,
+        &removed_resource_paths,
+        leased_resource_paths,
+        ManagedResourceTrashSource::NoteBody,
+        Some(note_id),
+    )
+}
+
+fn cleanup_removed_note_resources_after_save_best_effort<R: Runtime>(
+    app: &AppHandle<R>,
+    connection: &Connection,
+    previous_resource_paths: Vec<String>,
+    note_id: i64,
+) {
+    if previous_resource_paths.is_empty() {
+        return;
+    }
+
+    let root = match resolve_app_root(app) {
+        Ok(root) => root,
+        Err(error) => {
+            eprintln!("[database_ops] 清理正文移除的孤儿资源失败 [读取应用数据目录]: {error}");
+            return;
+        }
+    };
+
+    let leased_resource_paths = snapshot_managed_resource_session_leases(app);
+
+    match cleanup_removed_note_resources_after_save_with_leases(
+        &root,
+        connection,
+        previous_resource_paths,
+        note_id,
+        &leased_resource_paths,
+    ) {
+        Ok(result) => {
+            for failure in result.failed {
+                eprintln!(
+                    "[database_ops] 清理正文移除的孤儿资源失败 [{}]: {}",
+                    failure.resource_path, failure.message
+                );
+            }
+        }
+        Err(error) => {
+            eprintln!("[database_ops] 清理正文移除的孤儿资源失败: {error}");
         }
     }
 }
@@ -3971,7 +4160,13 @@ pub fn delete_notebook_tx(app: AppHandle, notebook_id: i64) -> Result<(), String
     let mut connection = open_database_connection(&app)?;
     let candidate_paths = collect_managed_resource_paths_for_notebook(&connection, notebook_id)?;
     delete_notebook_tx_internal(&mut connection, notebook_id)?;
-    cleanup_unreferenced_managed_resources_best_effort(&app, &connection, &candidate_paths);
+    cleanup_unreferenced_managed_resources_best_effort(
+        &app,
+        &connection,
+        &candidate_paths,
+        ManagedResourceTrashSource::OrphanCleanup,
+        None,
+    );
     Ok(())
 }
 
@@ -3981,7 +4176,13 @@ pub fn delete_folder_tx(app: AppHandle, folder_id: i64) -> Result<(), String> {
     let candidate_paths =
         collect_managed_resource_paths_for_folder_subtree(&connection, folder_id)?;
     delete_folder_tx_internal(&mut connection, folder_id)?;
-    cleanup_unreferenced_managed_resources_best_effort(&app, &connection, &candidate_paths);
+    cleanup_unreferenced_managed_resources_best_effort(
+        &app,
+        &connection,
+        &candidate_paths,
+        ManagedResourceTrashSource::OrphanCleanup,
+        None,
+    );
     Ok(())
 }
 
@@ -4002,6 +4203,8 @@ pub fn update_notebook_cover_image_tx(
                 &app,
                 &connection,
                 &[previous_cover_path],
+                ManagedResourceTrashSource::Cover,
+                None,
             );
         }
     }
@@ -4023,6 +4226,8 @@ pub fn clear_notebook_cover_image_tx(
             &app,
             &connection,
             &[previous_cover_path],
+            ManagedResourceTrashSource::Cover,
+            None,
         );
     }
 
@@ -4053,7 +4258,18 @@ pub fn save_note_content_with_tags_tx(
     occurrences: Vec<NoteTagOccurrenceInput>,
 ) -> Result<NoteRecord, String> {
     let mut connection = open_database_connection(&app)?;
-    save_note_content_with_tags_tx_internal(&mut connection, note_id, &content, &occurrences)
+    let previous_resource_paths = collect_managed_resource_paths_for_note(&connection, note_id)?;
+    let saved_note =
+        save_note_content_with_tags_tx_internal(&mut connection, note_id, &content, &occurrences)?;
+
+    cleanup_removed_note_resources_after_save_best_effort(
+        &app,
+        &connection,
+        previous_resource_paths,
+        note_id,
+    );
+
+    Ok(saved_note)
 }
 
 #[tauri::command]
@@ -4061,7 +4277,13 @@ pub fn delete_note_tx(app: AppHandle, note_id: i64) -> Result<(), String> {
     let mut connection = open_database_connection(&app)?;
     let candidate_paths = collect_managed_resource_paths_for_note(&connection, note_id)?;
     delete_note_tx_internal(&mut connection, note_id)?;
-    cleanup_unreferenced_managed_resources_best_effort(&app, &connection, &candidate_paths);
+    cleanup_unreferenced_managed_resources_best_effort(
+        &app,
+        &connection,
+        &candidate_paths,
+        ManagedResourceTrashSource::OrphanCleanup,
+        None,
+    );
     Ok(())
 }
 
@@ -4071,7 +4293,14 @@ pub fn cleanup_unreferenced_managed_resources(
 ) -> Result<ManagedResourceCleanupResult, String> {
     let connection = open_database_connection(&app)?;
     let root = resolve_app_root(&app)?;
-    cleanup_unreferenced_managed_resources_internal(&root, &connection)
+    let leased_resource_paths = snapshot_managed_resource_session_leases(&app);
+    cleanup_unreferenced_managed_resources_internal_with_leases(
+        &root,
+        &connection,
+        &leased_resource_paths,
+        ManagedResourceTrashSource::OrphanCleanup,
+        None,
+    )
 }
 
 #[tauri::command]
@@ -4125,31 +4354,36 @@ pub fn set_review_task_completed_tx(
 mod tests {
     use super::{
         activate_note_review_schedule_tx_internal, add_days, add_tag_to_note_by_name_tx_internal,
-        bind_review_plan_to_note_tx_internal, cleanup_candidate_unreferenced_managed_resources,
-        cleanup_expired_review_schedules, cleanup_unreferenced_managed_resources_internal,
+        bind_review_plan_to_note_tx_internal,
+        cleanup_candidate_unreferenced_managed_resources_with_leases,
+        cleanup_expired_review_schedules, cleanup_removed_note_resources_after_save,
+        cleanup_removed_note_resources_after_save_with_leases,
+        cleanup_unreferenced_managed_resources_internal,
+        cleanup_unreferenced_managed_resources_internal_with_leases,
         clear_note_review_schedule_tx_internal, clear_notebook_cover_image_tx_internal,
-        collect_managed_resource_paths_for_folder_subtree,
+        collect_managed_resource_paths_for_folder_subtree, collect_managed_resource_paths_for_note,
         collect_managed_resource_paths_for_notebook, create_folder_tx_internal,
         create_note_tx_internal, create_notebook_tx_internal, create_review_plan_tx_internal,
         delete_folder_tx_internal, delete_note_tx_internal, delete_notebook_tx_internal,
         delete_review_plan_tx_internal, duplicate_note_above_tx_internal, ensure_app_meta_table,
         ensure_note_search_ready_internal, ensure_note_search_table,
-        ensure_notebook_tree_constraints_tx_internal,
-        ensure_review_feature_ready_internal, extract_indexable_plain_text,
-        extract_note_image_resource_paths, get_note_review_schedule_tx_internal,
-        get_review_schedule_dirty_note_ids, move_folder_to_notebook_top_tx_internal,
-        move_note_tx_internal, normalize_tag_color, rebuild_note_search_index_internal,
-        rename_review_plan_tx_internal,
+        ensure_notebook_tree_constraints_tx_internal, ensure_review_feature_ready_internal,
+        extract_indexable_plain_text, extract_note_image_resource_paths,
+        get_note_review_schedule_tx_internal, get_review_schedule_dirty_note_ids,
+        move_folder_to_notebook_top_tx_internal, move_note_tx_internal, normalize_tag_color,
+        rebuild_note_search_index_internal, rename_review_plan_tx_internal,
         reorder_folders_tx_internal, reorder_notebooks_tx_internal,
         save_note_content_with_tags_tx_internal, save_note_review_schedule_tx_internal,
         set_note_review_schedule_dirty_tx_internal, set_review_task_completed_tx_internal,
         today_local_date_key, update_notebook_cover_image_tx_internal,
-        update_review_schedule_dirty_note_id, NoteTagOccurrenceInput,
+        update_review_schedule_dirty_note_id, ManagedResourceCleanupResult,
+        ManagedResourceTrashSource, NoteTagOccurrenceInput,
         APP_META_KEY_REVIEW_FEATURE_REBUILD_V1_DONE, APP_META_KEY_REVIEW_SCHEDULE_DIRTY_NOTE_IDS,
         DEFAULT_REVIEW_PLAN_NAME, DEFAULT_TAG_COLOR,
     };
     use chrono::Local;
     use rusqlite::{params, Connection};
+    use std::collections::BTreeSet;
     use std::fs;
     use std::path::Path;
     use tempfile::tempdir;
@@ -4344,6 +4578,85 @@ mod tests {
         fs::write(absolute_path, b"resource").expect("write resource");
     }
 
+    fn assert_resource_moved_to_trash(root: &Path, resource_path: &str) {
+        assert!(
+            !root.join(resource_path).exists(),
+            "formal resource should be removed after moving to trash"
+        );
+
+        let (trash_subdir, extension) =
+            if let Some(file_name) = resource_path.strip_prefix("resources/images/") {
+                (
+                    "images",
+                    Path::new(file_name)
+                        .extension()
+                        .and_then(|value| value.to_str())
+                        .expect("image extension"),
+                )
+            } else if let Some(file_name) = resource_path.strip_prefix("resources/covers/") {
+                (
+                    "covers",
+                    Path::new(file_name)
+                        .extension()
+                        .and_then(|value| value.to_str())
+                        .expect("cover extension"),
+                )
+            } else {
+                panic!("unexpected resource path: {resource_path}");
+            };
+
+        let trash_root = root.join("resources_trash").join(trash_subdir);
+        let mut matches = 0;
+        for entry in fs::read_dir(&trash_root).expect("read resource trash dir") {
+            let entry = entry.expect("read resource trash item");
+            if !entry.path().is_dir() {
+                continue;
+            }
+
+            let manifest_path = entry.path().join("manifest.json");
+            let resource_file = entry.path().join(format!("resource.{extension}"));
+            if !manifest_path.is_file() || !resource_file.is_file() {
+                continue;
+            }
+
+            let manifest_content = fs::read_to_string(manifest_path).expect("read manifest");
+            if manifest_content.contains(&format!("\"originalPath\": \"{resource_path}\"")) {
+                matches += 1;
+            }
+        }
+
+        assert_eq!(matches, 1, "expected one trash item for {resource_path}");
+    }
+
+    fn cleanup_candidates_after_resource_grace(
+        root: &Path,
+        connection: &Connection,
+        candidate_paths: &[String],
+    ) -> Result<ManagedResourceCleanupResult, String> {
+        cleanup_candidates_after_resource_grace_with_leases(
+            root,
+            connection,
+            candidate_paths,
+            &BTreeSet::new(),
+        )
+    }
+
+    fn cleanup_candidates_after_resource_grace_with_leases(
+        root: &Path,
+        connection: &Connection,
+        candidate_paths: &[String],
+        leased_resource_paths: &BTreeSet<String>,
+    ) -> Result<ManagedResourceCleanupResult, String> {
+        cleanup_candidate_unreferenced_managed_resources_with_leases(
+            root,
+            connection,
+            candidate_paths,
+            leased_resource_paths,
+            ManagedResourceTrashSource::OrphanCleanup,
+            None,
+        )
+    }
+
     #[test]
     fn ensure_note_search_ready_marks_empty_database_initialized() {
         let mut connection = test_connection();
@@ -4454,13 +4767,20 @@ mod tests {
             "<p>正文</p>",
             "<img data-note-image=\"true\" data-resource-path=\"resources/images/demo-a.png\" alt=\"A\" />",
             "<img data-note-image=\"true\" data-resource-path=\" resources/images/demo-a.png \" alt=\"A 副本\" />",
+            "<img src=\"asset://localhost/%2Ftmp%2Ffight%2Fresources%2Fimages%2F33333333-3333-4333-8333-333333333333.png\" alt=\"asset\" />",
             "<img data-note-image=\"true\" data-resource-path=\"../escape.png\" alt=\"非法\" />",
             "<img data-note-image=\"true\" alt=\"缺路径\" />",
         );
 
         let paths = extract_note_image_resource_paths(content);
 
-        assert_eq!(paths, vec!["resources/images/demo-a.png".to_string()]);
+        assert_eq!(
+            paths,
+            vec![
+                "resources/images/33333333-3333-4333-8333-333333333333.png".to_string(),
+                "resources/images/demo-a.png".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -4505,7 +4825,7 @@ mod tests {
         let connection = test_connection();
         connection
             .execute(
-                "INSERT INTO notebooks (name, cover_image_path) VALUES ('测试本', 'resources/covers/cover-a.png')",
+                "INSERT INTO notebooks (name, cover_image_path) VALUES ('测试本', 'resources/covers/99999999-9999-4999-8999-999999999999.png')",
                 [],
             )
             .expect("insert notebook");
@@ -4533,7 +4853,7 @@ mod tests {
         assert_eq!(
             paths,
             vec![
-                "resources/covers/cover-a.png".to_string(),
+                "resources/covers/99999999-9999-4999-8999-999999999999.png".to_string(),
                 "resources/images/demo-a.png".to_string(),
             ]
         );
@@ -4545,10 +4865,10 @@ mod tests {
         ensure_test_resource_dirs(temp_dir.path());
 
         for resource_path in [
-            "resources/images/shared.png",
-            "resources/images/orphan.png",
-            "resources/covers/live-cover.png",
-            "resources/covers/orphan-cover.png",
+            "resources/images/11111111-1111-4111-8111-111111111111.png",
+            "resources/images/22222222-2222-4222-8222-222222222222.png",
+            "resources/covers/44444444-4444-4444-8444-444444444444.png",
+            "resources/covers/55555555-5555-4555-8555-555555555555.png",
         ] {
             write_test_resource(temp_dir.path(), resource_path);
         }
@@ -4556,7 +4876,7 @@ mod tests {
         let connection = test_connection();
         connection
             .execute(
-                "INSERT INTO notebooks (name, cover_image_path) VALUES ('测试本', 'resources/covers/live-cover.png')",
+                "INSERT INTO notebooks (name, cover_image_path) VALUES ('测试本', 'resources/covers/44444444-4444-4444-8444-444444444444.png')",
                 [],
             )
             .expect("insert notebook");
@@ -4573,38 +4893,50 @@ mod tests {
                     1_i64,
                     1_i64,
                     "共享图片文件",
-                    "<img data-note-image=\"true\" data-resource-path=\"resources/images/shared.png\" alt=\"共享图\" />",
+                    "<img data-note-image=\"true\" data-resource-path=\"resources/images/11111111-1111-4111-8111-111111111111.png\" alt=\"共享图\" />",
                 ),
             )
             .expect("insert note");
 
-        let result = cleanup_candidate_unreferenced_managed_resources(
+        let result = cleanup_candidates_after_resource_grace(
             temp_dir.path(),
             &connection,
             &[
-                "resources/images/shared.png".to_string(),
-                "resources/images/orphan.png".to_string(),
-                "resources/covers/live-cover.png".to_string(),
-                "resources/covers/orphan-cover.png".to_string(),
+                "resources/images/11111111-1111-4111-8111-111111111111.png".to_string(),
+                "resources/images/22222222-2222-4222-8222-222222222222.png".to_string(),
+                "resources/covers/44444444-4444-4444-8444-444444444444.png".to_string(),
+                "resources/covers/55555555-5555-4555-8555-555555555555.png".to_string(),
             ],
         )
         .expect("delete orphan resources");
 
         assert_eq!(result.deleted_count, 2);
+        assert_eq!(result.moved_to_trash_count, 2);
         assert!(result.failed.is_empty());
         assert!(temp_dir
             .path()
-            .join("resources/images/shared.png")
-            .is_file());
-        assert!(!temp_dir.path().join("resources/images/orphan.png").exists());
-        assert!(temp_dir
-            .path()
-            .join("resources/covers/live-cover.png")
+            .join("resources/images/11111111-1111-4111-8111-111111111111.png")
             .is_file());
         assert!(!temp_dir
             .path()
-            .join("resources/covers/orphan-cover.png")
+            .join("resources/images/22222222-2222-4222-8222-222222222222.png")
             .exists());
+        assert_resource_moved_to_trash(
+            temp_dir.path(),
+            "resources/images/22222222-2222-4222-8222-222222222222.png",
+        );
+        assert!(temp_dir
+            .path()
+            .join("resources/covers/44444444-4444-4444-8444-444444444444.png")
+            .is_file());
+        assert!(!temp_dir
+            .path()
+            .join("resources/covers/55555555-5555-4555-8555-555555555555.png")
+            .exists());
+        assert_resource_moved_to_trash(
+            temp_dir.path(),
+            "resources/covers/55555555-5555-4555-8555-555555555555.png",
+        );
     }
 
     #[test]
@@ -4614,7 +4946,7 @@ mod tests {
         write_test_resource(temp_dir.path(), "resources/images/kept.png");
         let connection = test_connection();
 
-        let result = cleanup_candidate_unreferenced_managed_resources(
+        let result = cleanup_candidates_after_resource_grace(
             temp_dir.path(),
             &connection,
             &[
@@ -4630,18 +4962,111 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_candidate_unreferenced_managed_resources_keeps_non_uuid_files() {
+        let temp_dir = tempdir().expect("create temp dir");
+        ensure_test_resource_dirs(temp_dir.path());
+        write_test_resource(temp_dir.path(), "resources/images/historical-image.png");
+        let connection = test_connection();
+
+        let result = cleanup_candidates_after_resource_grace(
+            temp_dir.path(),
+            &connection,
+            &["resources/images/historical-image.png".to_string()],
+        )
+        .expect("cleanup candidate resources");
+
+        assert_eq!(result.deleted_count, 0);
+        assert!(result.failed.is_empty());
+        assert!(temp_dir
+            .path()
+            .join("resources/images/historical-image.png")
+            .is_file());
+    }
+
+    #[test]
+    fn cleanup_candidate_unreferenced_managed_resources_keeps_leased_image() {
+        let temp_dir = tempdir().expect("create temp dir");
+        ensure_test_resource_dirs(temp_dir.path());
+        let leased_path = "resources/images/12121212-1212-4212-8212-121212121212.png";
+        write_test_resource(temp_dir.path(), leased_path);
+        let connection = test_connection();
+        let leases = BTreeSet::from([leased_path.to_string()]);
+
+        let leased_result = cleanup_candidates_after_resource_grace_with_leases(
+            temp_dir.path(),
+            &connection,
+            &[leased_path.to_string()],
+            &leases,
+        )
+        .expect("cleanup with lease");
+        assert_eq!(leased_result.deleted_count, 0);
+        assert!(leased_result.failed.is_empty());
+        assert!(temp_dir.path().join(leased_path).is_file());
+
+        let released_result = cleanup_candidates_after_resource_grace(
+            temp_dir.path(),
+            &connection,
+            &[leased_path.to_string()],
+        )
+        .expect("cleanup after release");
+        assert_eq!(released_result.deleted_count, 1);
+        assert_eq!(released_result.moved_to_trash_count, 1);
+        assert!(released_result.failed.is_empty());
+        assert_resource_moved_to_trash(temp_dir.path(), leased_path);
+    }
+
+    #[test]
+    fn cleanup_unreferenced_managed_resources_internal_skips_leased_images() {
+        let temp_dir = tempdir().expect("create temp dir");
+        ensure_test_resource_dirs(temp_dir.path());
+        let leased_path = "resources/images/13131313-1313-4313-8313-131313131313.png";
+        let orphan_path = "resources/images/14141414-1414-4414-8414-141414141414.png";
+        write_test_resource(temp_dir.path(), leased_path);
+        write_test_resource(temp_dir.path(), orphan_path);
+        let connection = test_connection();
+        let leases = BTreeSet::from([leased_path.to_string()]);
+
+        let result = cleanup_unreferenced_managed_resources_internal_with_leases(
+            temp_dir.path(),
+            &connection,
+            &leases,
+            ManagedResourceTrashSource::OrphanCleanup,
+            None,
+        )
+        .expect("cleanup unreferenced resources with leases");
+
+        assert_eq!(result.deleted_count, 1);
+        assert_eq!(result.moved_to_trash_count, 1);
+        assert!(result.failed.is_empty());
+        assert!(temp_dir.path().join(leased_path).is_file());
+        assert_resource_moved_to_trash(temp_dir.path(), orphan_path);
+    }
+
+    #[test]
     fn cleanup_unreferenced_managed_resources_internal_deletes_disk_orphans() {
         let temp_dir = tempdir().expect("create temp dir");
         ensure_test_resource_dirs(temp_dir.path());
-        write_test_resource(temp_dir.path(), "resources/images/referenced.png");
-        write_test_resource(temp_dir.path(), "resources/images/orphan.png");
-        write_test_resource(temp_dir.path(), "resources/covers/live-cover.png");
-        write_test_resource(temp_dir.path(), "resources/covers/orphan-cover.png");
+        write_test_resource(
+            temp_dir.path(),
+            "resources/images/33333333-3333-4333-8333-333333333333.png",
+        );
+        write_test_resource(
+            temp_dir.path(),
+            "resources/images/22222222-2222-4222-8222-222222222222.png",
+        );
+        write_test_resource(
+            temp_dir.path(),
+            "resources/covers/44444444-4444-4444-8444-444444444444.png",
+        );
+        write_test_resource(
+            temp_dir.path(),
+            "resources/covers/55555555-5555-4555-8555-555555555555.png",
+        );
 
         let connection = test_connection();
         connection
             .execute(
-                "INSERT INTO notebooks (name, cover_image_path) VALUES ('测试本', 'resources/covers/live-cover.png')",
+                "INSERT INTO notebooks (name, cover_image_path) VALUES ('测试本', 'resources/covers/44444444-4444-4444-8444-444444444444.png')",
                 [],
             )
             .expect("insert notebook");
@@ -4653,7 +5078,7 @@ mod tests {
             .expect("insert folder");
         connection
             .execute(
-                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', '<img data-note-image=\"true\" data-resource-path=\"resources/images/referenced.png\" alt=\"示意图\" />')",
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', '<img data-note-image=\"true\" data-resource-path=\"resources/images/33333333-3333-4333-8333-333333333333.png\" alt=\"示意图\" />')",
                 [],
             )
             .expect("insert note");
@@ -4662,20 +5087,32 @@ mod tests {
             .expect("cleanup unreferenced managed resources");
 
         assert_eq!(result.deleted_count, 2);
+        assert_eq!(result.moved_to_trash_count, 2);
         assert!(result.failed.is_empty());
         assert!(temp_dir
             .path()
-            .join("resources/images/referenced.png")
-            .is_file());
-        assert!(!temp_dir.path().join("resources/images/orphan.png").exists());
-        assert!(temp_dir
-            .path()
-            .join("resources/covers/live-cover.png")
+            .join("resources/images/33333333-3333-4333-8333-333333333333.png")
             .is_file());
         assert!(!temp_dir
             .path()
-            .join("resources/covers/orphan-cover.png")
+            .join("resources/images/22222222-2222-4222-8222-222222222222.png")
             .exists());
+        assert_resource_moved_to_trash(
+            temp_dir.path(),
+            "resources/images/22222222-2222-4222-8222-222222222222.png",
+        );
+        assert!(temp_dir
+            .path()
+            .join("resources/covers/44444444-4444-4444-8444-444444444444.png")
+            .is_file());
+        assert!(!temp_dir
+            .path()
+            .join("resources/covers/55555555-5555-4555-8555-555555555555.png")
+            .exists());
+        assert_resource_moved_to_trash(
+            temp_dir.path(),
+            "resources/covers/55555555-5555-4555-8555-555555555555.png",
+        );
     }
 
     #[test]
@@ -4856,8 +5293,14 @@ mod tests {
     fn delete_folder_cleanup_removes_unique_resources_and_keeps_shared_resources() {
         let temp_dir = tempdir().expect("create temp dir");
         ensure_test_resource_dirs(temp_dir.path());
-        write_test_resource(temp_dir.path(), "resources/images/folder-unique.png");
-        write_test_resource(temp_dir.path(), "resources/images/shared.png");
+        write_test_resource(
+            temp_dir.path(),
+            "resources/images/66666666-6666-4666-8666-666666666666.png",
+        );
+        write_test_resource(
+            temp_dir.path(),
+            "resources/images/11111111-1111-4111-8111-111111111111.png",
+        );
 
         let mut connection = test_connection();
         connection
@@ -4877,13 +5320,13 @@ mod tests {
             .expect("insert keep folder");
         connection
             .execute(
-                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '待删文件', '<img data-note-image=\"true\" data-resource-path=\"resources/images/folder-unique.png\" alt=\"独占图\" /><img data-note-image=\"true\" data-resource-path=\"resources/images/shared.png\" alt=\"共享图\" />')",
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '待删文件', '<img data-note-image=\"true\" data-resource-path=\"resources/images/66666666-6666-4666-8666-666666666666.png\" alt=\"独占图\" /><img data-note-image=\"true\" data-resource-path=\"resources/images/11111111-1111-4111-8111-111111111111.png\" alt=\"共享图\" />')",
                 [],
             )
             .expect("insert folder note");
         connection
             .execute(
-                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 2, '保留文件', '<img data-note-image=\"true\" data-resource-path=\"resources/images/shared.png\" alt=\"共享图\" />')",
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 2, '保留文件', '<img data-note-image=\"true\" data-resource-path=\"resources/images/11111111-1111-4111-8111-111111111111.png\" alt=\"共享图\" />')",
                 [],
             )
             .expect("insert keep note");
@@ -4891,22 +5334,20 @@ mod tests {
         let candidate_paths = collect_managed_resource_paths_for_folder_subtree(&connection, 1)
             .expect("collect folder subtree resource paths");
         delete_folder_tx_internal(&mut connection, 1).expect("delete folder subtree");
-        let result = cleanup_candidate_unreferenced_managed_resources(
-            temp_dir.path(),
-            &connection,
-            &candidate_paths,
-        )
-        .expect("cleanup deleted folder resources");
+        let result =
+            cleanup_candidates_after_resource_grace(temp_dir.path(), &connection, &candidate_paths)
+                .expect("cleanup deleted folder resources");
 
         assert_eq!(result.deleted_count, 1);
+        assert_eq!(result.moved_to_trash_count, 1);
         assert!(result.failed.is_empty());
-        assert!(!temp_dir
-            .path()
-            .join("resources/images/folder-unique.png")
-            .exists());
+        assert_resource_moved_to_trash(
+            temp_dir.path(),
+            "resources/images/66666666-6666-4666-8666-666666666666.png",
+        );
         assert!(temp_dir
             .path()
-            .join("resources/images/shared.png")
+            .join("resources/images/11111111-1111-4111-8111-111111111111.png")
             .is_file());
     }
 
@@ -4924,7 +5365,10 @@ mod tests {
     fn delete_note_cleanup_deletes_unique_note_image() {
         let temp_dir = tempdir().expect("create temp dir");
         ensure_test_resource_dirs(temp_dir.path());
-        write_test_resource(temp_dir.path(), "resources/images/note-only.png");
+        write_test_resource(
+            temp_dir.path(),
+            "resources/images/77777777-7777-4777-8777-777777777777.png",
+        );
 
         let mut connection = test_connection();
         connection
@@ -4938,32 +5382,36 @@ mod tests {
             .expect("insert folder");
         connection
             .execute(
-                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', '<img data-note-image=\"true\" data-resource-path=\"resources/images/note-only.png\" alt=\"独占图\" />')",
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', '<img data-note-image=\"true\" data-resource-path=\"resources/images/77777777-7777-4777-8777-777777777777.png\" alt=\"独占图\" />')",
                 [],
             )
             .expect("insert note");
 
         delete_note_tx_internal(&mut connection, 1).expect("delete note");
-        let result = cleanup_candidate_unreferenced_managed_resources(
+        let result = cleanup_candidates_after_resource_grace(
             temp_dir.path(),
             &connection,
-            &["resources/images/note-only.png".to_string()],
+            &["resources/images/77777777-7777-4777-8777-777777777777.png".to_string()],
         )
         .expect("cleanup deleted note resource");
 
         assert_eq!(result.deleted_count, 1);
+        assert_eq!(result.moved_to_trash_count, 1);
         assert!(result.failed.is_empty());
-        assert!(!temp_dir
-            .path()
-            .join("resources/images/note-only.png")
-            .exists());
+        assert_resource_moved_to_trash(
+            temp_dir.path(),
+            "resources/images/77777777-7777-4777-8777-777777777777.png",
+        );
     }
 
     #[test]
     fn delete_note_cleanup_keeps_resource_when_another_note_still_references_it() {
         let temp_dir = tempdir().expect("create temp dir");
         ensure_test_resource_dirs(temp_dir.path());
-        write_test_resource(temp_dir.path(), "resources/images/shared-note.png");
+        write_test_resource(
+            temp_dir.path(),
+            "resources/images/88888888-8888-4888-8888-888888888888.png",
+        );
 
         let mut connection = test_connection();
         connection
@@ -4977,22 +5425,22 @@ mod tests {
             .expect("insert folder");
         connection
             .execute(
-                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', '<img data-note-image=\"true\" data-resource-path=\"resources/images/shared-note.png\" alt=\"共享图\" />')",
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', '<img data-note-image=\"true\" data-resource-path=\"resources/images/88888888-8888-4888-8888-888888888888.png\" alt=\"共享图\" />')",
                 [],
             )
             .expect("insert first note");
         connection
             .execute(
-                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件二', '<img data-note-image=\"true\" data-resource-path=\"resources/images/shared-note.png\" alt=\"共享图\" />')",
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件二', '<img data-note-image=\"true\" data-resource-path=\"resources/images/88888888-8888-4888-8888-888888888888.png\" alt=\"共享图\" />')",
                 [],
             )
             .expect("insert second note");
 
         delete_note_tx_internal(&mut connection, 1).expect("delete first note");
-        let result = cleanup_candidate_unreferenced_managed_resources(
+        let result = cleanup_candidates_after_resource_grace(
             temp_dir.path(),
             &connection,
-            &["resources/images/shared-note.png".to_string()],
+            &["resources/images/88888888-8888-4888-8888-888888888888.png".to_string()],
         )
         .expect("cleanup shared note resource");
 
@@ -5000,7 +5448,7 @@ mod tests {
         assert!(result.failed.is_empty());
         assert!(temp_dir
             .path()
-            .join("resources/images/shared-note.png")
+            .join("resources/images/88888888-8888-4888-8888-888888888888.png")
             .is_file());
     }
 
@@ -6377,10 +6825,7 @@ mod tests {
             )
             .expect("insert tags");
         connection
-            .execute(
-                "INSERT INTO note_tags (note_id, tag_id) VALUES (1, 1)",
-                [],
-            )
+            .execute("INSERT INTO note_tags (note_id, tag_id) VALUES (1, 1)", [])
             .expect("insert legacy note_tags");
         connection
             .execute(
@@ -6419,12 +6864,18 @@ mod tests {
         .expect("save note with tags");
 
         let occurrence_count: i64 = connection
-            .query_row("SELECT COUNT(*) FROM note_tag_occurrences WHERE note_id = 1", [], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM note_tag_occurrences WHERE note_id = 1",
+                [],
+                |row| row.get(0),
+            )
             .expect("count occurrences");
         let note_tag_count: i64 = connection
-            .query_row("SELECT COUNT(*) FROM note_tags WHERE note_id = 1", [], |row| row.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM note_tags WHERE note_id = 1",
+                [],
+                |row| row.get(0),
+            )
             .expect("count note_tags");
         let stored_first_remark: Option<String> = connection
             .query_row(
@@ -6450,6 +6901,231 @@ mod tests {
     }
 
     #[test]
+    fn save_note_content_cleanup_removes_unreferenced_image_after_commit() {
+        let temp_dir = tempdir().expect("create temp dir");
+        ensure_test_resource_dirs(temp_dir.path());
+        let image_path = "resources/images/cccccccc-cccc-4ccc-8ccc-cccccccccccc.png";
+        write_test_resource(temp_dir.path(), image_path);
+
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (?1, ?2, ?3, ?4)",
+                (
+                    1_i64,
+                    1_i64,
+                    "文件一",
+                    format!(
+                        "<p>旧正文</p><img data-note-image=\"true\" data-resource-path=\"{image_path}\" alt=\"旧图\" />"
+                    ),
+                ),
+            )
+            .expect("insert note");
+
+        let previous_paths =
+            collect_managed_resource_paths_for_note(&connection, 1).expect("collect old paths");
+        save_note_content_with_tags_tx_internal(&mut connection, 1, "<p>新正文</p>", &[])
+            .expect("save note content");
+        let result = cleanup_removed_note_resources_after_save(
+            temp_dir.path(),
+            &connection,
+            previous_paths,
+            1,
+        )
+        .expect("cleanup removed image after save");
+
+        let stored_content: String = connection
+            .query_row(
+                "SELECT content_plaintext FROM notes WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read stored content");
+
+        assert_eq!(stored_content, "<p>新正文</p>");
+        assert_eq!(result.deleted_count, 1);
+        assert_eq!(result.moved_to_trash_count, 1);
+        assert!(result.failed.is_empty());
+        assert_resource_moved_to_trash(temp_dir.path(), image_path);
+    }
+
+    #[test]
+    fn save_note_content_cleanup_keeps_resource_when_another_note_references_it() {
+        let temp_dir = tempdir().expect("create temp dir");
+        ensure_test_resource_dirs(temp_dir.path());
+        let image_path = "resources/images/dddddddd-dddd-4ddd-8ddd-dddddddddddd.png";
+        write_test_resource(temp_dir.path(), image_path);
+        let image_html = format!(
+            "<img data-note-image=\"true\" data-resource-path=\"{image_path}\" alt=\"共享\" />"
+        );
+
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', ?1), (1, 1, '文件二', ?1)",
+                [image_html.as_str()],
+            )
+            .expect("insert shared notes");
+
+        let previous_paths =
+            collect_managed_resource_paths_for_note(&connection, 1).expect("collect old paths");
+        save_note_content_with_tags_tx_internal(&mut connection, 1, "<p>新正文</p>", &[])
+            .expect("save note content");
+        let result = cleanup_removed_note_resources_after_save(
+            temp_dir.path(),
+            &connection,
+            previous_paths,
+            1,
+        )
+        .expect("cleanup removed image after save");
+
+        assert_eq!(result.deleted_count, 0);
+        assert!(result.failed.is_empty());
+        assert!(temp_dir.path().join(image_path).is_file());
+    }
+
+    #[test]
+    fn save_note_content_cleanup_keeps_removed_image_when_session_leased() {
+        let temp_dir = tempdir().expect("create temp dir");
+        ensure_test_resource_dirs(temp_dir.path());
+        let image_path = "resources/images/15151515-1515-4515-8515-151515151515.png";
+        write_test_resource(temp_dir.path(), image_path);
+
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (?1, ?2, ?3, ?4)",
+                (
+                    1_i64,
+                    1_i64,
+                    "文件一",
+                    format!(
+                        "<p>旧正文</p><img data-note-image=\"true\" data-resource-path=\"{image_path}\" alt=\"旧图\" />"
+                    ),
+                ),
+            )
+            .expect("insert note");
+
+        let previous_paths =
+            collect_managed_resource_paths_for_note(&connection, 1).expect("collect old paths");
+        save_note_content_with_tags_tx_internal(&mut connection, 1, "<p>新正文</p>", &[])
+            .expect("save note content");
+        let leases = BTreeSet::from([image_path.to_string()]);
+        let leased_result = cleanup_removed_note_resources_after_save_with_leases(
+            temp_dir.path(),
+            &connection,
+            previous_paths.clone(),
+            1,
+            &leases,
+        )
+        .expect("cleanup removed image with lease");
+
+        assert_eq!(leased_result.deleted_count, 0);
+        assert!(leased_result.failed.is_empty());
+        assert!(temp_dir.path().join(image_path).is_file());
+
+        let released_result = cleanup_removed_note_resources_after_save(
+            temp_dir.path(),
+            &connection,
+            previous_paths,
+            1,
+        )
+        .expect("cleanup removed image after release");
+
+        assert_eq!(released_result.deleted_count, 1);
+        assert_eq!(released_result.moved_to_trash_count, 1);
+        assert!(released_result.failed.is_empty());
+        assert_resource_moved_to_trash(temp_dir.path(), image_path);
+    }
+
+    #[test]
+    fn save_note_content_failure_does_not_delete_referenced_resource() {
+        let temp_dir = tempdir().expect("create temp dir");
+        ensure_test_resource_dirs(temp_dir.path());
+        let image_path = "resources/images/eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee.png";
+        write_test_resource(temp_dir.path(), image_path);
+
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (?1, ?2, ?3, ?4)",
+                (
+                    1_i64,
+                    1_i64,
+                    "文件一",
+                    format!(
+                        "<p>旧正文</p><img data-note-image=\"true\" data-resource-path=\"{image_path}\" alt=\"旧图\" />"
+                    ),
+                ),
+            )
+            .expect("insert note");
+
+        let error = save_note_content_with_tags_tx_internal(
+            &mut connection,
+            1,
+            "<p>新正文</p>",
+            &[NoteTagOccurrenceInput {
+                tag_id: 999,
+                block_id: "blk_missing_tag_001".to_string(),
+                start_offset: 0,
+                end_offset: 2,
+                node_type: "paragraph".to_string(),
+                snippet_text: "新正".to_string(),
+                remark: None,
+                sort_order: 0,
+            }],
+        )
+        .expect_err("missing tag should fail");
+        let stored_content: String = connection
+            .query_row(
+                "SELECT content_plaintext FROM notes WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read stored content");
+
+        assert_eq!(error, "目标标签不存在。");
+        assert!(stored_content.contains(image_path));
+        assert!(temp_dir.path().join(image_path).is_file());
+    }
+
+    #[test]
     fn save_note_content_with_tags_path_rejects_zero_length_occurrence() {
         let mut connection = test_connection();
         connection
@@ -6468,7 +7144,10 @@ mod tests {
             )
             .expect("insert note");
         connection
-            .execute("INSERT INTO tags (name, color) VALUES ('重点', '#FF3B30')", [])
+            .execute(
+                "INSERT INTO tags (name, color) VALUES ('重点', '#FF3B30')",
+                [],
+            )
             .expect("insert tag");
 
         let error = save_note_content_with_tags_tx_internal(
@@ -6489,7 +7168,11 @@ mod tests {
         .expect_err("zero-length occurrence should fail");
 
         let stored_content: String = connection
-            .query_row("SELECT content_plaintext FROM notes WHERE id = 1", [], |row| row.get(0))
+            .query_row(
+                "SELECT content_plaintext FROM notes WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
             .expect("read stored content");
 
         assert_eq!(error, "标注数据无效，请重新应用标签后再保存。");
@@ -6515,7 +7198,10 @@ mod tests {
             )
             .expect("insert note");
         connection
-            .execute("INSERT INTO tags (name, color) VALUES ('重点', '#FF3B30')", [])
+            .execute(
+                "INSERT INTO tags (name, color) VALUES ('重点', '#FF3B30')",
+                [],
+            )
             .expect("insert tag");
 
         let error = save_note_content_with_tags_tx_internal(
@@ -6596,7 +7282,10 @@ mod tests {
             )
             .expect("insert note");
         connection
-            .execute("INSERT INTO tags (name, color) VALUES ('重点', '#FF3B30')", [])
+            .execute(
+                "INSERT INTO tags (name, color) VALUES ('重点', '#FF3B30')",
+                [],
+            )
             .expect("insert tag");
 
         let long_remark = "很长的批注".repeat(80);
@@ -6704,7 +7393,7 @@ mod tests {
         let notebook = update_notebook_cover_image_tx_internal(
             &mut connection,
             1,
-            "resources/covers/cover-a.png",
+            "resources/covers/99999999-9999-4999-8999-999999999999.png",
         )
         .expect("update notebook cover");
 
@@ -6719,11 +7408,11 @@ mod tests {
         assert_eq!(notebook.id, 1);
         assert_eq!(
             notebook.cover_image_path.as_deref(),
-            Some("resources/covers/cover-a.png")
+            Some("resources/covers/99999999-9999-4999-8999-999999999999.png")
         );
         assert_eq!(
             stored_cover_path.as_deref(),
-            Some("resources/covers/cover-a.png")
+            Some("resources/covers/99999999-9999-4999-8999-999999999999.png")
         );
     }
 
@@ -6731,35 +7420,46 @@ mod tests {
     fn cleanup_after_cover_update_deletes_old_cover_when_unreferenced() {
         let temp_dir = tempdir().expect("create temp dir");
         ensure_test_resource_dirs(temp_dir.path());
-        write_test_resource(temp_dir.path(), "resources/covers/cover-a.png");
-        write_test_resource(temp_dir.path(), "resources/covers/cover-b.png");
+        write_test_resource(
+            temp_dir.path(),
+            "resources/covers/99999999-9999-4999-8999-999999999999.png",
+        );
+        write_test_resource(
+            temp_dir.path(),
+            "resources/covers/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.png",
+        );
 
         let mut connection = test_connection();
         connection
             .execute(
-                "INSERT INTO notebooks (name, cover_image_path) VALUES ('测试本', 'resources/covers/cover-a.png')",
+                "INSERT INTO notebooks (name, cover_image_path) VALUES ('测试本', 'resources/covers/99999999-9999-4999-8999-999999999999.png')",
                 [],
             )
             .expect("insert notebook");
 
-        update_notebook_cover_image_tx_internal(&mut connection, 1, "resources/covers/cover-b.png")
-            .expect("update cover");
-        let result = cleanup_candidate_unreferenced_managed_resources(
+        update_notebook_cover_image_tx_internal(
+            &mut connection,
+            1,
+            "resources/covers/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.png",
+        )
+        .expect("update cover");
+        let result = cleanup_candidates_after_resource_grace(
             temp_dir.path(),
             &connection,
-            &["resources/covers/cover-a.png".to_string()],
+            &["resources/covers/99999999-9999-4999-8999-999999999999.png".to_string()],
         )
         .expect("cleanup old cover");
 
         assert_eq!(result.deleted_count, 1);
+        assert_eq!(result.moved_to_trash_count, 1);
         assert!(result.failed.is_empty());
-        assert!(!temp_dir
-            .path()
-            .join("resources/covers/cover-a.png")
-            .exists());
+        assert_resource_moved_to_trash(
+            temp_dir.path(),
+            "resources/covers/99999999-9999-4999-8999-999999999999.png",
+        );
         assert!(temp_dir
             .path()
-            .join("resources/covers/cover-b.png")
+            .join("resources/covers/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.png")
             .is_file());
     }
 
@@ -6767,13 +7467,19 @@ mod tests {
     fn cleanup_after_cover_update_keeps_old_cover_when_note_still_references_it() {
         let temp_dir = tempdir().expect("create temp dir");
         ensure_test_resource_dirs(temp_dir.path());
-        write_test_resource(temp_dir.path(), "resources/covers/shared-cover.png");
-        write_test_resource(temp_dir.path(), "resources/covers/cover-b.png");
+        write_test_resource(
+            temp_dir.path(),
+            "resources/covers/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.png",
+        );
+        write_test_resource(
+            temp_dir.path(),
+            "resources/covers/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.png",
+        );
 
         let mut connection = test_connection();
         connection
             .execute(
-                "INSERT INTO notebooks (name, cover_image_path) VALUES ('测试本', 'resources/covers/shared-cover.png')",
+                "INSERT INTO notebooks (name, cover_image_path) VALUES ('测试本', 'resources/covers/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.png')",
                 [],
             )
             .expect("insert notebook");
@@ -6785,17 +7491,21 @@ mod tests {
             .expect("insert folder");
         connection
             .execute(
-                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', '<img data-note-image=\"true\" data-resource-path=\"resources/covers/shared-cover.png\" alt=\"共享封面\" />')",
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', '<img data-note-image=\"true\" data-resource-path=\"resources/covers/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.png\" alt=\"共享封面\" />')",
                 [],
             )
             .expect("insert note");
 
-        update_notebook_cover_image_tx_internal(&mut connection, 1, "resources/covers/cover-b.png")
-            .expect("update cover");
-        let result = cleanup_candidate_unreferenced_managed_resources(
+        update_notebook_cover_image_tx_internal(
+            &mut connection,
+            1,
+            "resources/covers/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.png",
+        )
+        .expect("update cover");
+        let result = cleanup_candidates_after_resource_grace(
             temp_dir.path(),
             &connection,
-            &["resources/covers/shared-cover.png".to_string()],
+            &["resources/covers/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.png".to_string()],
         )
         .expect("cleanup old cover");
 
@@ -6803,7 +7513,7 @@ mod tests {
         assert!(result.failed.is_empty());
         assert!(temp_dir
             .path()
-            .join("resources/covers/shared-cover.png")
+            .join("resources/covers/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.png")
             .is_file());
     }
 
@@ -6841,7 +7551,7 @@ mod tests {
         let error = update_notebook_cover_image_tx_internal(
             &mut connection,
             999,
-            "resources/covers/cover-a.png",
+            "resources/covers/99999999-9999-4999-8999-999999999999.png",
         )
         .expect_err("missing notebook should fail");
 
@@ -6853,7 +7563,7 @@ mod tests {
         let mut connection = test_connection();
         connection
             .execute(
-                "INSERT INTO notebooks (name, cover_image_path) VALUES ('测试本', 'resources/covers/cover-a.png')",
+                "INSERT INTO notebooks (name, cover_image_path) VALUES ('测试本', 'resources/covers/99999999-9999-4999-8999-999999999999.png')",
                 [],
             )
             .expect("insert notebook with cover");
@@ -6878,12 +7588,15 @@ mod tests {
     fn clear_cover_cleanup_keeps_resource_when_note_still_references_it() {
         let temp_dir = tempdir().expect("create temp dir");
         ensure_test_resource_dirs(temp_dir.path());
-        write_test_resource(temp_dir.path(), "resources/covers/shared-cover.png");
+        write_test_resource(
+            temp_dir.path(),
+            "resources/covers/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.png",
+        );
 
         let mut connection = test_connection();
         connection
             .execute(
-                "INSERT INTO notebooks (name, cover_image_path) VALUES ('测试本', 'resources/covers/shared-cover.png')",
+                "INSERT INTO notebooks (name, cover_image_path) VALUES ('测试本', 'resources/covers/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.png')",
                 [],
             )
             .expect("insert notebook");
@@ -6895,16 +7608,16 @@ mod tests {
             .expect("insert folder");
         connection
             .execute(
-                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', '<img data-note-image=\"true\" data-resource-path=\"resources/covers/shared-cover.png\" alt=\"共享封面\" />')",
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', '<img data-note-image=\"true\" data-resource-path=\"resources/covers/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.png\" alt=\"共享封面\" />')",
                 [],
             )
             .expect("insert note");
 
         clear_notebook_cover_image_tx_internal(&mut connection, 1).expect("clear cover");
-        let result = cleanup_candidate_unreferenced_managed_resources(
+        let result = cleanup_candidates_after_resource_grace(
             temp_dir.path(),
             &connection,
-            &["resources/covers/shared-cover.png".to_string()],
+            &["resources/covers/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.png".to_string()],
         )
         .expect("cleanup cleared cover");
 
@@ -6912,7 +7625,7 @@ mod tests {
         assert!(result.failed.is_empty());
         assert!(temp_dir
             .path()
-            .join("resources/covers/shared-cover.png")
+            .join("resources/covers/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.png")
             .is_file());
     }
 
@@ -6920,12 +7633,15 @@ mod tests {
     fn delete_note_cleanup_keeps_resource_when_cover_still_references_it() {
         let temp_dir = tempdir().expect("create temp dir");
         ensure_test_resource_dirs(temp_dir.path());
-        write_test_resource(temp_dir.path(), "resources/covers/shared-cover.png");
+        write_test_resource(
+            temp_dir.path(),
+            "resources/covers/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.png",
+        );
 
         let mut connection = test_connection();
         connection
             .execute(
-                "INSERT INTO notebooks (name, cover_image_path) VALUES ('测试本', 'resources/covers/shared-cover.png')",
+                "INSERT INTO notebooks (name, cover_image_path) VALUES ('测试本', 'resources/covers/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.png')",
                 [],
             )
             .expect("insert notebook");
@@ -6937,16 +7653,16 @@ mod tests {
             .expect("insert folder");
         connection
             .execute(
-                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', '<img data-note-image=\"true\" data-resource-path=\"resources/covers/shared-cover.png\" alt=\"共享封面\" />')",
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', '<img data-note-image=\"true\" data-resource-path=\"resources/covers/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.png\" alt=\"共享封面\" />')",
                 [],
             )
             .expect("insert note");
 
         delete_note_tx_internal(&mut connection, 1).expect("delete note");
-        let result = cleanup_candidate_unreferenced_managed_resources(
+        let result = cleanup_candidates_after_resource_grace(
             temp_dir.path(),
             &connection,
-            &["resources/covers/shared-cover.png".to_string()],
+            &["resources/covers/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.png".to_string()],
         )
         .expect("cleanup deleted note");
 
@@ -6954,7 +7670,7 @@ mod tests {
         assert!(result.failed.is_empty());
         assert!(temp_dir
             .path()
-            .join("resources/covers/shared-cover.png")
+            .join("resources/covers/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.png")
             .is_file());
     }
 
@@ -6962,12 +7678,15 @@ mod tests {
     fn shared_resource_between_note_and_cover_is_deleted_only_after_both_references_are_removed() {
         let temp_dir = tempdir().expect("create temp dir");
         ensure_test_resource_dirs(temp_dir.path());
-        write_test_resource(temp_dir.path(), "resources/covers/shared-cover.png");
+        write_test_resource(
+            temp_dir.path(),
+            "resources/covers/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.png",
+        );
 
         let mut connection = test_connection();
         connection
             .execute(
-                "INSERT INTO notebooks (name, cover_image_path) VALUES ('测试本', 'resources/covers/shared-cover.png')",
+                "INSERT INTO notebooks (name, cover_image_path) VALUES ('测试本', 'resources/covers/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.png')",
                 [],
             )
             .expect("insert notebook");
@@ -6979,37 +7698,38 @@ mod tests {
             .expect("insert folder");
         connection
             .execute(
-                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', '<img data-note-image=\"true\" data-resource-path=\"resources/covers/shared-cover.png\" alt=\"共享封面\" />')",
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', '<img data-note-image=\"true\" data-resource-path=\"resources/covers/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.png\" alt=\"共享封面\" />')",
                 [],
             )
             .expect("insert note");
 
         delete_note_tx_internal(&mut connection, 1).expect("delete note");
-        let after_note = cleanup_candidate_unreferenced_managed_resources(
+        let after_note = cleanup_candidates_after_resource_grace(
             temp_dir.path(),
             &connection,
-            &["resources/covers/shared-cover.png".to_string()],
+            &["resources/covers/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.png".to_string()],
         )
         .expect("cleanup after note deletion");
         assert_eq!(after_note.deleted_count, 0);
         assert!(temp_dir
             .path()
-            .join("resources/covers/shared-cover.png")
+            .join("resources/covers/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.png")
             .is_file());
 
         clear_notebook_cover_image_tx_internal(&mut connection, 1).expect("clear cover");
-        let after_cover = cleanup_candidate_unreferenced_managed_resources(
+        let after_cover = cleanup_candidates_after_resource_grace(
             temp_dir.path(),
             &connection,
-            &["resources/covers/shared-cover.png".to_string()],
+            &["resources/covers/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.png".to_string()],
         )
         .expect("cleanup after cover removal");
         assert_eq!(after_cover.deleted_count, 1);
+        assert_eq!(after_cover.moved_to_trash_count, 1);
         assert!(after_cover.failed.is_empty());
-        assert!(!temp_dir
-            .path()
-            .join("resources/covers/shared-cover.png")
-            .exists());
+        assert_resource_moved_to_trash(
+            temp_dir.path(),
+            "resources/covers/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.png",
+        );
     }
 
     #[test]

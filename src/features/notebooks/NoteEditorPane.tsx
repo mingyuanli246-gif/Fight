@@ -27,10 +27,13 @@ import {
 } from "./editorCommands";
 import {
   clearManagedResourceResolution,
+  normalizeManagedResourcePath,
   primeManagedResourceResolution,
 } from "./editorResources";
 import {
+  clearManagedResourceSessionLeases,
   deleteManagedResource,
+  replaceManagedResourceSessionLeases,
   selectAndImportImage,
 } from "./resourceCommands";
 import { getNoteById, saveNoteContentWithTags } from "./repository";
@@ -55,6 +58,7 @@ import {
   type MathDisplayMode,
   type MathNodeName,
 } from "./mathSerialization";
+import { NOTE_IMAGE_NODE_NAME } from "./imageNodes";
 import {
   applyTextTagToOccurrence,
   applyTextTag,
@@ -98,6 +102,7 @@ const MAX_EDITOR_FONT_SIZE = 20;
 const DEFAULT_EDITOR_FONT_SIZE = 16;
 const LEGACY_DEFAULT_EDITOR_FONT_SIZE = 14;
 const LONG_TEXT_TAG_WIDTH_RATIO_THRESHOLD = 0.74;
+let editorResourceLeaseSessionCounter = 0;
 
 type TextTagClickFeedbackMode = "pulse" | "sweep" | "settle";
 
@@ -213,6 +218,41 @@ function getStoredEditorFontSize(noteId: number) {
   }
 
   return clampEditorFontSize(storedValue);
+}
+
+function createEditorResourceLeaseSessionId(noteId: number) {
+  editorResourceLeaseSessionCounter += 1;
+  return `note-${noteId}-${Date.now()}-${editorResourceLeaseSessionCounter}`;
+}
+
+function collectNoteImageResourcePathsFromHtml(content: string) {
+  if (typeof window === "undefined" || typeof window.DOMParser === "undefined") {
+    return [];
+  }
+
+  const document = new window.DOMParser().parseFromString(content, "text/html");
+  return Array.from(document.querySelectorAll("img[data-note-image='true']"))
+    .map((image) => image.getAttribute("data-resource-path") ?? "")
+    .filter((resourcePath) => resourcePath.trim().length > 0);
+}
+
+function collectNoteImageResourcePathsFromEditor(currentEditor: Editor | null) {
+  if (!currentEditor) {
+    return [];
+  }
+
+  const resourcePaths: string[] = [];
+  currentEditor.state.doc.descendants((node) => {
+    if (node.type.name === NOTE_IMAGE_NODE_NAME) {
+      const resourcePath = node.attrs.resourcePath;
+      if (typeof resourcePath === "string" && resourcePath.trim()) {
+        resourcePaths.push(resourcePath);
+      }
+    }
+    return true;
+  });
+
+  return resourcePaths;
 }
 
 function getTextTagOccurrenceListSignature(
@@ -338,6 +378,8 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
     const textTagInspectionPulseVariantRef = useRef<"A" | "B">("A");
     const textTagInspectionPulseTokenRef = useRef(0);
     const textTagInspectionEffectTokenRef = useRef(0);
+    const resourceLeaseSessionIdRef = useRef<string | null>(null);
+    const resourceLeasePathsRef = useRef<Set<string>>(new Set());
     const mathBridgeRef = useRef<EditorMathBridge>({
       onEditMathRequest() {
         // 运行时由当前组件覆写。
@@ -368,6 +410,65 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
       ],
     );
     const enabledInputRulesRef = useRef([...NOTE_EDITOR_ENABLED_INPUT_RULES]);
+
+    function getResourceLeasePathsSnapshot() {
+      return Array.from(resourceLeasePathsRef.current);
+    }
+
+    async function syncCurrentResourceLeaseSession() {
+      const sessionId = resourceLeaseSessionIdRef.current;
+
+      if (!sessionId) {
+        throw new Error("图片资源会话尚未就绪。");
+      }
+
+      await replaceManagedResourceSessionLeases(
+        sessionId,
+        getResourceLeasePathsSnapshot(),
+      );
+    }
+
+    function syncCurrentResourceLeaseSessionBestEffort() {
+      const sessionId = resourceLeaseSessionIdRef.current;
+
+      if (!sessionId) {
+        return;
+      }
+
+      void replaceManagedResourceSessionLeases(
+        sessionId,
+        getResourceLeasePathsSnapshot(),
+      ).catch((error) => {
+        console.warn("[notebooks.resources] 同步图片资源会话失败", error);
+      });
+    }
+
+    function addResourceLeasePaths(resourcePaths: string[]) {
+      let didChange = false;
+
+      for (const resourcePath of resourcePaths) {
+        try {
+          const normalizedPath = normalizeManagedResourcePath(resourcePath);
+          if (!resourceLeasePathsRef.current.has(normalizedPath)) {
+            resourceLeasePathsRef.current.add(normalizedPath);
+            didChange = true;
+          }
+        } catch (error) {
+          console.warn("[notebooks.resources] 忽略无效图片资源会话路径", {
+            resourcePath,
+            error,
+          });
+        }
+      }
+
+      if (didChange) {
+        syncCurrentResourceLeaseSessionBestEffort();
+      }
+    }
+
+    function addResourceLeasePathsFromEditor(currentEditor: Editor | null) {
+      addResourceLeasePaths(collectNoteImageResourcePathsFromEditor(currentEditor));
+    }
 
     function emitTextTagSelectionState(nextState?: TextTagSelectionState) {
       const resolvedState = nextState ?? getTextTagSelectionState(editorRef.current);
@@ -664,6 +765,7 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
         },
       },
       onUpdate({ editor: currentEditor }) {
+        addResourceLeasePathsFromEditor(currentEditor);
         syncPendingSaveSnapshot(currentEditor);
         const nextPanelState = getTextTagPanelState(currentEditor);
         emitTextTagSelectionState(nextPanelState.selection);
@@ -870,6 +972,7 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
         });
 
         if (insertResult.status === "handled") {
+          addResourceLeasePaths([importResult.resourcePath]);
           return;
         }
 
@@ -931,6 +1034,9 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
       snapshot: PendingSaveSnapshot,
     ) {
       try {
+        addResourceLeasePathsFromEditor(editorRef.current);
+        await syncCurrentResourceLeaseSession();
+
         const savedNote = await saveNoteContentWithTags(
           expectedNoteId,
           snapshot.content,
@@ -1194,6 +1300,9 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
     }, [editorFontState, note.id]);
 
     useEffect(() => {
+      const resourceLeaseSessionId = createEditorResourceLeaseSessionId(note.id);
+      resourceLeaseSessionIdRef.current = resourceLeaseSessionId;
+      resourceLeasePathsRef.current = new Set();
       activeNoteIdRef.current = note.id;
       requestVersionRef.current += 1;
       const requestVersion = requestVersionRef.current;
@@ -1254,6 +1363,7 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
           setLastSavedState(normalizedContent);
           setLastSavedAt(loadedNote.updatedAt);
           setEditorSessionContent(normalizedContent);
+          addResourceLeasePaths(collectNoteImageResourcePathsFromHtml(normalizedContent));
           setEditorSessionKey((current) => current + 1);
           setSaveStatus("unchanged");
           onNoteUpdatedRef.current(loadedNote);
@@ -1291,6 +1401,13 @@ export const NoteEditorPane = forwardRef<NoteEditorPaneRef, NoteEditorPaneProps>
         clearPendingSaveTimer();
         clearSavedStatusTimer();
         clearHighlightTimer();
+        void clearManagedResourceSessionLeases(resourceLeaseSessionId).catch((error) => {
+          console.warn("[notebooks.resources] 清理图片资源会话失败", error);
+        });
+        if (resourceLeaseSessionIdRef.current === resourceLeaseSessionId) {
+          resourceLeaseSessionIdRef.current = null;
+          resourceLeasePathsRef.current = new Set();
+        }
       };
     }, [note.id]);
 

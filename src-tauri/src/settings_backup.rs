@@ -3582,7 +3582,7 @@ mod tests {
     use std::process::Command;
     use std::time::{Duration, SystemTime};
     use tempfile::{tempdir, tempdir_in};
-    use zip::{CompressionMethod, ZipWriter};
+    use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
     fn create_temp_database(schema_sql: &str) -> std::path::PathBuf {
         let temp_dir = tempdir().expect("create temp dir");
@@ -4117,6 +4117,41 @@ mod tests {
         assert!(restored_resources.join("images/note-image.png").is_file());
         assert!(restored_resources.join("covers").is_dir());
         assert!(restored_resources.join("covers/cover-image.jpg").is_file());
+    }
+
+    #[test]
+    fn add_resources_to_zip_does_not_include_resources_trash_sibling() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let backup_path = temp_dir.path().join("resources.zip");
+        let resources_dir = temp_dir.path().join("resources");
+        let trash_dir = temp_dir
+            .path()
+            .join("resources_trash/images/11111111-1111-4111-8111-111111111111");
+        fs::create_dir_all(resources_dir.join("images")).expect("create resources images");
+        fs::create_dir_all(&trash_dir).expect("create resources trash");
+        fs::write(resources_dir.join("images/live.png"), b"live").expect("write live resource");
+        fs::write(trash_dir.join("resource.png"), b"trash").expect("write trash resource");
+
+        let file = File::create(&backup_path).expect("create archive");
+        let mut zip = ZipWriter::new(file);
+        add_resources_to_zip(&mut zip, &resources_dir, "resources").expect("add resources");
+        zip.finish().expect("finish archive");
+
+        let file = File::open(&backup_path).expect("open archive");
+        let mut archive = ZipArchive::new(file).expect("read archive");
+        let mut names = Vec::new();
+        for index in 0..archive.len() {
+            names.push(
+                archive
+                    .by_index(index)
+                    .expect("read entry")
+                    .name()
+                    .to_string(),
+            );
+        }
+
+        assert!(names.iter().any(|name| name == "resources/images/live.png"));
+        assert!(!names.iter().any(|name| name.contains("resources_trash")));
     }
 
     #[test]

@@ -33,6 +33,34 @@ export type ResolveManagedResourceResult =
   | ResolveManagedResourceResolvedResult
   | ResolveManagedResourceMissingResult;
 
+export interface ManagedResourceCleanupFailure {
+  resourcePath: string;
+  message: string;
+}
+
+export interface ManagedResourceCleanupResult {
+  deletedCount: number;
+  movedToTrashCount: number;
+  failed: ManagedResourceCleanupFailure[];
+}
+
+export type ResourceTrashKind = "image" | "cover";
+
+export interface ResourceTrashListItem {
+  trashId: string;
+  resourceKind: ResourceTrashKind;
+  originalPath: string | null;
+  trashPath: string | null;
+  deletedAt: string | null;
+  source: string | null;
+  extension: string | null;
+  fileExists: boolean;
+  manifestValid: boolean;
+  canRestore: boolean;
+  status: string;
+  message: string | null;
+}
+
 function getCommandErrorMessage(error: unknown, fallback: string) {
   if (error instanceof Error && error.message.trim()) {
     return error.message;
@@ -90,6 +118,88 @@ export async function deleteManagedResource(resourcePath: string) {
   } catch (error) {
     throw new Error(
       getCommandErrorMessage(error, "图片资源清理失败，请稍后重试。"),
+    );
+  }
+}
+
+export async function cleanupUnreferencedManagedResources() {
+  try {
+    return await invoke<ManagedResourceCleanupResult>(
+      "cleanup_unreferenced_managed_resources",
+    );
+  } catch (error) {
+    throw new Error(
+      getCommandErrorMessage(error, "孤儿图片资源清理失败，请稍后重试。"),
+    );
+  }
+}
+
+export async function replaceManagedResourceSessionLeases(
+  sessionId: string,
+  resourcePaths: string[],
+) {
+  try {
+    await invoke<void>("replace_managed_resource_session_leases", {
+      sessionId,
+      resourcePaths,
+    });
+  } catch (error) {
+    throw new Error(
+      getCommandErrorMessage(error, "同步图片资源会话失败，请稍后重试。"),
+    );
+  }
+}
+
+export async function clearManagedResourceSessionLeases(sessionId: string) {
+  try {
+    await invoke<void>("clear_managed_resource_session_leases", {
+      sessionId,
+    });
+  } catch (error) {
+    throw new Error(
+      getCommandErrorMessage(error, "清理图片资源会话失败，请稍后重试。"),
+    );
+  }
+}
+
+export async function listResourceTrashItems() {
+  try {
+    return await invoke<ResourceTrashListItem[]>("list_resource_trash_items");
+  } catch (error) {
+    throw new Error(
+      getCommandErrorMessage(error, "读取图片回收站失败，请稍后重试。"),
+    );
+  }
+}
+
+export async function restoreResourceTrashItem(
+  resourceKind: ResourceTrashKind,
+  trashId: string,
+) {
+  try {
+    return await invoke<string>("restore_resource_trash_item", {
+      resourceKind,
+      trashId,
+    });
+  } catch (error) {
+    throw new Error(
+      getCommandErrorMessage(error, "还原图片资源失败，请稍后重试。"),
+    );
+  }
+}
+
+export async function permanentlyDeleteResourceTrashItem(
+  resourceKind: ResourceTrashKind,
+  trashId: string,
+) {
+  try {
+    await invoke<void>("permanently_delete_resource_trash_item", {
+      resourceKind,
+      trashId,
+    });
+  } catch (error) {
+    throw new Error(
+      getCommandErrorMessage(error, "永久删除图片资源失败，请稍后重试。"),
     );
   }
 }
