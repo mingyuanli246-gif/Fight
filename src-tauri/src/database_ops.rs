@@ -1,7 +1,7 @@
 use crate::resource_ops::{
-    is_app_managed_image_resource_path, move_managed_resource_to_trash,
-    normalize_managed_resource_path, resolve_app_root, snapshot_managed_resource_session_leases,
-    ManagedResourceTrashSource,
+    delete_managed_resource_file_if_exists, is_app_managed_image_resource_path,
+    managed_resource_file_exists, move_managed_resource_to_trash, normalize_managed_resource_path,
+    resolve_app_root, snapshot_managed_resource_session_leases, ManagedResourceTrashSource,
 };
 use chrono::{Local, NaiveDate, Utc};
 use percent_encoding::percent_decode_str;
@@ -3258,30 +3258,111 @@ fn is_separator_tag(tag_name: &str) -> bool {
     )
 }
 
+fn is_tag_attribute_name_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'_' | b'-')
+}
+
+fn find_tag_attribute_value(tag: &str, name: &str) -> Option<Option<String>> {
+    let bytes = tag.as_bytes();
+    let mut index = 0;
+
+    while index < bytes.len() && bytes[index] != b'<' {
+        index += 1;
+    }
+    if index >= bytes.len() {
+        return None;
+    }
+    index += 1;
+
+    if index < bytes.len() && bytes[index] == b'/' {
+        index += 1;
+    }
+
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    while index < bytes.len() && is_tag_attribute_name_byte(bytes[index]) {
+        index += 1;
+    }
+
+    while index < bytes.len() {
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+
+        if index >= bytes.len() || bytes[index] == b'>' {
+            break;
+        }
+
+        if bytes[index] == b'/' {
+            index += 1;
+            continue;
+        }
+
+        let name_start = index;
+        while index < bytes.len() && is_tag_attribute_name_byte(bytes[index]) {
+            index += 1;
+        }
+
+        if name_start == index {
+            index += 1;
+            continue;
+        }
+
+        let attribute_name = &tag[name_start..index];
+
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+
+        let mut attribute_value = None;
+        if index < bytes.len() && bytes[index] == b'=' {
+            index += 1;
+            while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+                index += 1;
+            }
+
+            if index < bytes.len() && matches!(bytes[index], b'"' | b'\'') {
+                let quote = bytes[index];
+                index += 1;
+                let value_start = index;
+                while index < bytes.len() && bytes[index] != quote {
+                    index += 1;
+                }
+                attribute_value = Some(tag[value_start..index].to_string());
+                if index < bytes.len() {
+                    index += 1;
+                }
+            } else {
+                let value_start = index;
+                while index < bytes.len()
+                    && !bytes[index].is_ascii_whitespace()
+                    && bytes[index] != b'>'
+                {
+                    index += 1;
+                }
+                attribute_value = Some(tag[value_start..index].to_string());
+            }
+        }
+
+        if attribute_name.eq_ignore_ascii_case(name) {
+            return Some(attribute_value);
+        }
+    }
+
+    None
+}
+
+fn tag_has_attribute(tag: &str, name: &str) -> bool {
+    find_tag_attribute_value(tag, name).is_some()
+}
+
 fn extract_tag_attribute(tag: &str, name: &str) -> Option<String> {
-    let name_position = tag.find(name)?;
-    let remainder = &tag[name_position + name.len()..];
-    let remainder = remainder.trim_start();
-    let remainder = remainder.strip_prefix('=')?.trim_start();
-
-    if let Some(rest) = remainder.strip_prefix('"') {
-        let value_end = rest.find('"')?;
-        return Some(rest[..value_end].to_string());
-    }
-
-    if let Some(rest) = remainder.strip_prefix('\'') {
-        let value_end = rest.find('\'')?;
-        return Some(rest[..value_end].to_string());
-    }
-
-    let value_end = remainder
-        .find(|character: char| character.is_whitespace() || character == '>')
-        .unwrap_or(remainder.len());
-    Some(remainder[..value_end].to_string())
+    find_tag_attribute_value(tag, name).flatten()
 }
 
 fn extract_math_latex_from_tag(tag: &str) -> Option<String> {
-    if !tag.contains("data-note-math") {
+    if !tag_has_attribute(tag, "data-note-math") {
         return None;
     }
 
@@ -3290,7 +3371,7 @@ fn extract_math_latex_from_tag(tag: &str) -> Option<String> {
 }
 
 fn extract_image_alt_from_tag(tag: &str) -> Option<String> {
-    if !tag.contains("data-note-image") {
+    if !tag_has_attribute(tag, "data-note-image") {
         return None;
     }
 
@@ -3305,7 +3386,7 @@ fn extract_image_alt_from_tag(tag: &str) -> Option<String> {
 }
 
 fn extract_image_resource_path_from_tag(tag: &str) -> Option<String> {
-    let is_note_image = tag.contains("data-note-image");
+    let is_note_image = tag_has_attribute(tag, "data-note-image");
     let is_image_tag = extract_tag_name(tag).as_deref() == Some("img");
 
     if !is_note_image && !is_image_tag {
@@ -3358,6 +3439,26 @@ fn extract_managed_resource_path_fragment(value: &str) -> Option<String> {
     None
 }
 
+fn read_html_tag(characters: &mut std::iter::Peekable<std::str::Chars<'_>>) -> String {
+    let mut tag = String::from("<");
+    let mut active_quote = None;
+
+    while let Some(next_character) = characters.next() {
+        tag.push(next_character);
+
+        match active_quote {
+            Some(quote) if next_character == quote => active_quote = None,
+            None if next_character == '"' || next_character == '\'' => {
+                active_quote = Some(next_character)
+            }
+            None if next_character == '>' => break,
+            _ => {}
+        }
+    }
+
+    tag
+}
+
 fn extract_note_image_resource_paths(content: &str) -> Vec<String> {
     let mut resource_paths = BTreeSet::new();
     let mut characters = content.chars().peekable();
@@ -3366,15 +3467,7 @@ fn extract_note_image_resource_paths(content: &str) -> Vec<String> {
         if character != '<' {
             continue;
         }
-
-        let mut tag = String::from("<");
-
-        while let Some(next_character) = characters.next() {
-            tag.push(next_character);
-            if next_character == '>' {
-                break;
-            }
-        }
+        let tag = read_html_tag(&mut characters);
 
         if let Some(resource_path) = extract_image_resource_path_from_tag(&tag) {
             resource_paths.insert(resource_path);
@@ -3695,15 +3788,36 @@ fn cleanup_candidate_unreferenced_managed_resources_with_leases(
     source: ManagedResourceTrashSource,
     note_id: Option<i64>,
 ) -> Result<ManagedResourceCleanupResult, String> {
-    let mut normalized_candidates = BTreeSet::new();
-    for candidate_path in candidate_paths {
-        insert_normalized_resource_path(&mut normalized_candidates, candidate_path);
-    }
-
     let mut result = ManagedResourceCleanupResult {
         deleted_count: 0,
         moved_to_trash_count: 0,
         failed: Vec::new(),
+    };
+    let mut normalized_candidates = BTreeSet::new();
+
+    for candidate_path in candidate_paths {
+        match normalize_managed_resource_path(candidate_path) {
+            Ok(normalized_path) => {
+                normalized_candidates.insert(normalized_path);
+            }
+            Err(error) => {
+                result
+                    .failed
+                    .push(to_cleanup_failure(candidate_path, error));
+            }
+        }
+    }
+
+    let live_resource_paths = match list_live_managed_resource_paths(connection) {
+        Ok(paths) => paths,
+        Err(error) => {
+            for resource_path in normalized_candidates {
+                result
+                    .failed
+                    .push(to_cleanup_failure(resource_path, &error));
+            }
+            return Ok(result);
+        }
     };
 
     for resource_path in normalized_candidates {
@@ -3715,25 +3829,43 @@ fn cleanup_candidate_unreferenced_managed_resources_with_leases(
             continue;
         }
 
-        let live_resource_paths = match list_live_managed_resource_paths(connection) {
-            Ok(paths) => paths,
-            Err(error) => {
-                result.failed.push(to_cleanup_failure(resource_path, error));
-                continue;
-            }
-        };
-
         if live_resource_paths.contains(&resource_path) {
             continue;
         }
 
-        match move_managed_resource_to_trash(root, &resource_path, source, note_id) {
-            Ok(()) => {
-                result.deleted_count += 1;
-                result.moved_to_trash_count += 1;
+        match managed_resource_file_exists(root, &resource_path) {
+            Ok(false) => {
+                continue;
             }
+            Ok(true) => {}
             Err(error) => {
                 result.failed.push(to_cleanup_failure(resource_path, error));
+                continue;
+            }
+        }
+
+        match source {
+            ManagedResourceTrashSource::Cover => {
+                match move_managed_resource_to_trash(root, &resource_path, source, note_id) {
+                    Ok(()) => {
+                        result.deleted_count += 1;
+                        result.moved_to_trash_count += 1;
+                    }
+                    Err(error) => {
+                        result.failed.push(to_cleanup_failure(resource_path, error));
+                    }
+                }
+            }
+            ManagedResourceTrashSource::NoteBody | ManagedResourceTrashSource::OrphanCleanup => {
+                match delete_managed_resource_file_if_exists(root, &resource_path) {
+                    Ok(true) => {
+                        result.deleted_count += 1;
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        result.failed.push(to_cleanup_failure(resource_path, error));
+                    }
+                }
             }
         }
     }
@@ -3923,6 +4055,9 @@ fn cleanup_removed_note_resources_after_save_with_leases(
     note_id: i64,
     leased_resource_paths: &BTreeSet<String>,
 ) -> Result<ManagedResourceCleanupResult, String> {
+    // This diff must run after the save transaction commits. Otherwise the freshly-saved note body
+    // would be absent from both the note snapshot and the global live-reference scan below, and we
+    // could misclassify still-live images as orphaned.
     let next_resource_paths = collect_managed_resource_paths_for_note(connection, note_id)?
         .into_iter()
         .collect::<BTreeSet<_>>();
@@ -4262,6 +4397,8 @@ pub fn save_note_content_with_tags_tx(
     let saved_note =
         save_note_content_with_tags_tx_internal(&mut connection, note_id, &content, &occurrences)?;
 
+    // Keep cleanup inline. Callers should not observe a successful save before the post-commit
+    // orphan check for removed note-body images finishes.
     cleanup_removed_note_resources_after_save_best_effort(
         &app,
         &connection,
@@ -4368,9 +4505,10 @@ mod tests {
         delete_review_plan_tx_internal, duplicate_note_above_tx_internal, ensure_app_meta_table,
         ensure_note_search_ready_internal, ensure_note_search_table,
         ensure_notebook_tree_constraints_tx_internal, ensure_review_feature_ready_internal,
-        extract_indexable_plain_text, extract_note_image_resource_paths,
-        get_note_review_schedule_tx_internal, get_review_schedule_dirty_note_ids,
-        move_folder_to_notebook_top_tx_internal, move_note_tx_internal, normalize_tag_color,
+        extract_indexable_plain_text, extract_managed_resource_path_from_text,
+        extract_note_image_resource_paths, extract_tag_name, get_note_review_schedule_tx_internal,
+        get_review_schedule_dirty_note_ids, move_folder_to_notebook_top_tx_internal,
+        move_note_tx_internal, normalize_managed_resource_path, normalize_tag_color,
         rebuild_note_search_index_internal, rename_review_plan_tx_internal,
         reorder_folders_tx_internal, reorder_notebooks_tx_internal,
         save_note_content_with_tags_tx_internal, save_note_review_schedule_tx_internal,
@@ -4628,6 +4766,13 @@ mod tests {
         assert_eq!(matches, 1, "expected one trash item for {resource_path}");
     }
 
+    fn assert_resource_deleted_from_disk(root: &Path, resource_path: &str) {
+        assert!(
+            !root.join(resource_path).exists(),
+            "resource should be deleted from disk: {resource_path}"
+        );
+    }
+
     fn cleanup_candidates_after_resource_grace(
         root: &Path,
         connection: &Connection,
@@ -4655,6 +4800,87 @@ mod tests {
             ManagedResourceTrashSource::OrphanCleanup,
             None,
         )
+    }
+
+    fn cleanup_candidates_after_cover_cleanup(
+        root: &Path,
+        connection: &Connection,
+        candidate_paths: &[String],
+    ) -> Result<ManagedResourceCleanupResult, String> {
+        cleanup_candidate_unreferenced_managed_resources_with_leases(
+            root,
+            connection,
+            candidate_paths,
+            &BTreeSet::new(),
+            ManagedResourceTrashSource::Cover,
+            None,
+        )
+    }
+
+    fn extract_tag_attribute_legacy(tag: &str, name: &str) -> Option<String> {
+        let name_position = tag.find(name)?;
+        let remainder = &tag[name_position + name.len()..];
+        let remainder = remainder.trim_start();
+        let remainder = remainder.strip_prefix('=')?.trim_start();
+
+        if let Some(rest) = remainder.strip_prefix('"') {
+            let value_end = rest.find('"')?;
+            return Some(rest[..value_end].to_string());
+        }
+
+        if let Some(rest) = remainder.strip_prefix('\'') {
+            let value_end = rest.find('\'')?;
+            return Some(rest[..value_end].to_string());
+        }
+
+        let value_end = remainder
+            .find(|character: char| character.is_whitespace() || character == '>')
+            .unwrap_or(remainder.len());
+        Some(remainder[..value_end].to_string())
+    }
+
+    fn extract_image_resource_path_from_tag_legacy(tag: &str) -> Option<String> {
+        let is_note_image = tag.contains("data-note-image");
+        let is_image_tag = extract_tag_name(tag).as_deref() == Some("img");
+
+        if !is_note_image && !is_image_tag {
+            return None;
+        }
+
+        if let Some(resource_path) = extract_tag_attribute_legacy(tag, "data-resource-path") {
+            if let Ok(normalized_path) = normalize_managed_resource_path(&resource_path) {
+                return Some(normalized_path);
+            }
+        }
+
+        let src = extract_tag_attribute_legacy(tag, "src")?;
+        extract_managed_resource_path_from_text(&src)
+    }
+
+    fn extract_note_image_resource_paths_legacy(content: &str) -> Vec<String> {
+        let mut resource_paths = BTreeSet::new();
+        let mut characters = content.chars().peekable();
+
+        while let Some(character) = characters.next() {
+            if character != '<' {
+                continue;
+            }
+
+            let mut tag = String::from("<");
+
+            while let Some(next_character) = characters.next() {
+                tag.push(next_character);
+                if next_character == '>' {
+                    break;
+                }
+            }
+
+            if let Some(resource_path) = extract_image_resource_path_from_tag_legacy(&tag) {
+                resource_paths.insert(resource_path);
+            }
+        }
+
+        resource_paths.into_iter().collect()
     }
 
     #[test]
@@ -4781,6 +5007,63 @@ mod tests {
                 "resources/images/demo-a.png".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn extract_note_image_resource_paths_handles_attribute_order_quotes_and_src_fallback() {
+        let content = concat!(
+            "<img alt='A' data-width-px='320' data-note-image='true' data-resource-path='resources/images/demo-a.png' />",
+            "<img data-resource-path-extra='ignore-me' data-note-image=\"true\" alt=\"B\" data-resource-path=\"resources/images/demo-b.png\" />",
+            "<img src='asset://localhost/resources/images/demo-c.png?cache=1' alt='C' />",
+            "<img data-note-image=\"true\" data-resource-path=resources/images/demo-d.png alt=\"D\" />",
+        );
+
+        let paths = extract_note_image_resource_paths(content);
+
+        assert_eq!(
+            paths,
+            vec![
+                "resources/images/demo-a.png".to_string(),
+                "resources/images/demo-b.png".to_string(),
+                "resources/images/demo-c.png".to_string(),
+                "resources/images/demo-d.png".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_note_image_resource_paths_matches_legacy_parser_for_real_db_when_env_set() {
+        let Ok(database_path) = std::env::var("FIGHT_NOTES_REAL_DB_PATH") else {
+            return;
+        };
+        let connection =
+            Connection::open_with_flags(database_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .expect("open real database");
+        let mut statement = connection
+            .prepare(
+                "
+                  SELECT id, COALESCE(content_plaintext, '')
+                  FROM notes
+                  WHERE content_plaintext LIKE '%resources/images/%'
+                     OR content_plaintext LIKE '%resources/covers/%'
+                  ORDER BY id ASC
+                ",
+            )
+            .expect("prepare real db query");
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .expect("query real db rows");
+
+        for row in rows {
+            let (note_id, content) = row.expect("read real db row");
+            assert_eq!(
+                extract_note_image_resource_paths(&content),
+                extract_note_image_resource_paths_legacy(&content),
+                "real db note {note_id} should keep the same extracted resource paths",
+            );
+        }
     }
 
     #[test]
@@ -4911,17 +5194,13 @@ mod tests {
         .expect("delete orphan resources");
 
         assert_eq!(result.deleted_count, 2);
-        assert_eq!(result.moved_to_trash_count, 2);
+        assert_eq!(result.moved_to_trash_count, 0);
         assert!(result.failed.is_empty());
         assert!(temp_dir
             .path()
             .join("resources/images/11111111-1111-4111-8111-111111111111.png")
             .is_file());
-        assert!(!temp_dir
-            .path()
-            .join("resources/images/22222222-2222-4222-8222-222222222222.png")
-            .exists());
-        assert_resource_moved_to_trash(
+        assert_resource_deleted_from_disk(
             temp_dir.path(),
             "resources/images/22222222-2222-4222-8222-222222222222.png",
         );
@@ -4929,18 +5208,14 @@ mod tests {
             .path()
             .join("resources/covers/44444444-4444-4444-8444-444444444444.png")
             .is_file());
-        assert!(!temp_dir
-            .path()
-            .join("resources/covers/55555555-5555-4555-8555-555555555555.png")
-            .exists());
-        assert_resource_moved_to_trash(
+        assert_resource_deleted_from_disk(
             temp_dir.path(),
             "resources/covers/55555555-5555-4555-8555-555555555555.png",
         );
     }
 
     #[test]
-    fn cleanup_candidate_unreferenced_managed_resources_ignores_invalid_paths() {
+    fn cleanup_candidate_unreferenced_managed_resources_reports_invalid_paths_and_skips_them() {
         let temp_dir = tempdir().expect("create temp dir");
         ensure_test_resource_dirs(temp_dir.path());
         write_test_resource(temp_dir.path(), "resources/images/kept.png");
@@ -4957,7 +5232,11 @@ mod tests {
         .expect("cleanup candidate resources");
 
         assert_eq!(result.deleted_count, 0);
-        assert!(result.failed.is_empty());
+        assert_eq!(result.failed.len(), 2);
+        assert!(result
+            .failed
+            .iter()
+            .all(|failure| failure.message == "资源路径无效。"));
         assert!(temp_dir.path().join("resources/images/kept.png").is_file());
     }
 
@@ -5010,9 +5289,9 @@ mod tests {
         )
         .expect("cleanup after release");
         assert_eq!(released_result.deleted_count, 1);
-        assert_eq!(released_result.moved_to_trash_count, 1);
+        assert_eq!(released_result.moved_to_trash_count, 0);
         assert!(released_result.failed.is_empty());
-        assert_resource_moved_to_trash(temp_dir.path(), leased_path);
+        assert_resource_deleted_from_disk(temp_dir.path(), leased_path);
     }
 
     #[test]
@@ -5036,10 +5315,10 @@ mod tests {
         .expect("cleanup unreferenced resources with leases");
 
         assert_eq!(result.deleted_count, 1);
-        assert_eq!(result.moved_to_trash_count, 1);
+        assert_eq!(result.moved_to_trash_count, 0);
         assert!(result.failed.is_empty());
         assert!(temp_dir.path().join(leased_path).is_file());
-        assert_resource_moved_to_trash(temp_dir.path(), orphan_path);
+        assert_resource_deleted_from_disk(temp_dir.path(), orphan_path);
     }
 
     #[test]
@@ -5087,17 +5366,13 @@ mod tests {
             .expect("cleanup unreferenced managed resources");
 
         assert_eq!(result.deleted_count, 2);
-        assert_eq!(result.moved_to_trash_count, 2);
+        assert_eq!(result.moved_to_trash_count, 0);
         assert!(result.failed.is_empty());
         assert!(temp_dir
             .path()
             .join("resources/images/33333333-3333-4333-8333-333333333333.png")
             .is_file());
-        assert!(!temp_dir
-            .path()
-            .join("resources/images/22222222-2222-4222-8222-222222222222.png")
-            .exists());
-        assert_resource_moved_to_trash(
+        assert_resource_deleted_from_disk(
             temp_dir.path(),
             "resources/images/22222222-2222-4222-8222-222222222222.png",
         );
@@ -5105,11 +5380,7 @@ mod tests {
             .path()
             .join("resources/covers/44444444-4444-4444-8444-444444444444.png")
             .is_file());
-        assert!(!temp_dir
-            .path()
-            .join("resources/covers/55555555-5555-4555-8555-555555555555.png")
-            .exists());
-        assert_resource_moved_to_trash(
+        assert_resource_deleted_from_disk(
             temp_dir.path(),
             "resources/covers/55555555-5555-4555-8555-555555555555.png",
         );
@@ -5339,9 +5610,9 @@ mod tests {
                 .expect("cleanup deleted folder resources");
 
         assert_eq!(result.deleted_count, 1);
-        assert_eq!(result.moved_to_trash_count, 1);
+        assert_eq!(result.moved_to_trash_count, 0);
         assert!(result.failed.is_empty());
-        assert_resource_moved_to_trash(
+        assert_resource_deleted_from_disk(
             temp_dir.path(),
             "resources/images/66666666-6666-4666-8666-666666666666.png",
         );
@@ -5396,9 +5667,9 @@ mod tests {
         .expect("cleanup deleted note resource");
 
         assert_eq!(result.deleted_count, 1);
-        assert_eq!(result.moved_to_trash_count, 1);
+        assert_eq!(result.moved_to_trash_count, 0);
         assert!(result.failed.is_empty());
-        assert_resource_moved_to_trash(
+        assert_resource_deleted_from_disk(
             temp_dir.path(),
             "resources/images/77777777-7777-4777-8777-777777777777.png",
         );
@@ -6953,9 +7224,9 @@ mod tests {
 
         assert_eq!(stored_content, "<p>新正文</p>");
         assert_eq!(result.deleted_count, 1);
-        assert_eq!(result.moved_to_trash_count, 1);
+        assert_eq!(result.moved_to_trash_count, 0);
         assert!(result.failed.is_empty());
-        assert_resource_moved_to_trash(temp_dir.path(), image_path);
+        assert_resource_deleted_from_disk(temp_dir.path(), image_path);
     }
 
     #[test]
@@ -7060,9 +7331,56 @@ mod tests {
         .expect("cleanup removed image after release");
 
         assert_eq!(released_result.deleted_count, 1);
-        assert_eq!(released_result.moved_to_trash_count, 1);
+        assert_eq!(released_result.moved_to_trash_count, 0);
         assert!(released_result.failed.is_empty());
-        assert_resource_moved_to_trash(temp_dir.path(), image_path);
+        assert_resource_deleted_from_disk(temp_dir.path(), image_path);
+    }
+
+    #[test]
+    fn save_note_content_cleanup_treats_missing_file_as_success() {
+        let temp_dir = tempdir().expect("create temp dir");
+        ensure_test_resource_dirs(temp_dir.path());
+        let image_path = "resources/images/f0f0f0f0-f0f0-4f0f-8f0f-f0f0f0f0f0f0.png";
+
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (?1, ?2, ?3, ?4)",
+                (
+                    1_i64,
+                    1_i64,
+                    "文件一",
+                    format!(
+                        "<p>旧正文</p><img data-note-image=\"true\" data-resource-path=\"{image_path}\" alt=\"旧图\" />"
+                    ),
+                ),
+            )
+            .expect("insert note");
+
+        let previous_paths =
+            collect_managed_resource_paths_for_note(&connection, 1).expect("collect old paths");
+        save_note_content_with_tags_tx_internal(&mut connection, 1, "<p>新正文</p>", &[])
+            .expect("save note content");
+        let result = cleanup_removed_note_resources_after_save(
+            temp_dir.path(),
+            &connection,
+            previous_paths,
+            1,
+        )
+        .expect("cleanup removed image after save");
+
+        assert_eq!(result.deleted_count, 0);
+        assert_eq!(result.moved_to_trash_count, 0);
+        assert!(result.failed.is_empty());
     }
 
     #[test]
@@ -7443,7 +7761,7 @@ mod tests {
             "resources/covers/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.png",
         )
         .expect("update cover");
-        let result = cleanup_candidates_after_resource_grace(
+        let result = cleanup_candidates_after_cover_cleanup(
             temp_dir.path(),
             &connection,
             &["resources/covers/99999999-9999-4999-8999-999999999999.png".to_string()],
@@ -7502,7 +7820,7 @@ mod tests {
             "resources/covers/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.png",
         )
         .expect("update cover");
-        let result = cleanup_candidates_after_resource_grace(
+        let result = cleanup_candidates_after_cover_cleanup(
             temp_dir.path(),
             &connection,
             &["resources/covers/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.png".to_string()],
@@ -7614,7 +7932,7 @@ mod tests {
             .expect("insert note");
 
         clear_notebook_cover_image_tx_internal(&mut connection, 1).expect("clear cover");
-        let result = cleanup_candidates_after_resource_grace(
+        let result = cleanup_candidates_after_cover_cleanup(
             temp_dir.path(),
             &connection,
             &["resources/covers/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.png".to_string()],
@@ -7717,7 +8035,7 @@ mod tests {
             .is_file());
 
         clear_notebook_cover_image_tx_internal(&mut connection, 1).expect("clear cover");
-        let after_cover = cleanup_candidates_after_resource_grace(
+        let after_cover = cleanup_candidates_after_cover_cleanup(
             temp_dir.path(),
             &connection,
             &["resources/covers/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.png".to_string()],

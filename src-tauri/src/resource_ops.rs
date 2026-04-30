@@ -313,6 +313,24 @@ fn resource_subdir_path(root: &Path, subdir: &str) -> PathBuf {
     resources_root(root).join(subdir)
 }
 
+fn managed_resource_absolute_path_under_resources_root(
+    root: &Path,
+    resource_path: &str,
+) -> Result<PathBuf, String> {
+    let normalized_path = normalize_supported_image_resource_path(resource_path)?;
+    let relative_path = normalized_path
+        .strip_prefix(&format!("{RESOURCES_DIR_NAME}/"))
+        .ok_or_else(|| INVALID_RESOURCE_PATH_MESSAGE.to_string())?;
+    let resources_root = resources_root(root);
+    let absolute_path = resources_root.join(relative_path);
+
+    if !absolute_path.starts_with(&resources_root) {
+        return Err(INVALID_RESOURCE_PATH_MESSAGE.to_string());
+    }
+
+    Ok(absolute_path)
+}
+
 fn resource_trash_subdir_path(root: &Path, kind: ManagedResourceTrashKind) -> PathBuf {
     resources_trash_root(root).join(kind.trash_subdir())
 }
@@ -730,7 +748,7 @@ where
         return Err("资源路径不是可回收的 App 管理图片。".to_string());
     }
 
-    let source_path = root.join(&normalized_path);
+    let source_path = managed_resource_absolute_path_under_resources_root(root, &normalized_path)?;
     if !source_path.exists() {
         return Ok(());
     }
@@ -848,15 +866,31 @@ where
     Err(IMAGE_IMPORT_FAILED_MESSAGE.to_string())
 }
 
-pub(crate) fn delete_managed_resource_internal(
+pub(crate) fn managed_resource_file_exists(
     root: &Path,
     resource_path: &str,
-) -> Result<(), String> {
-    let normalized_path = normalize_supported_image_resource_path(resource_path)?;
-    let absolute_path = root.join(&normalized_path);
+) -> Result<bool, String> {
+    let absolute_path = managed_resource_absolute_path_under_resources_root(root, resource_path)?;
 
     if !absolute_path.exists() {
-        return Ok(());
+        return Ok(false);
+    }
+
+    if !absolute_path.is_file() {
+        return Err(INVALID_RESOURCE_PATH_MESSAGE.to_string());
+    }
+
+    Ok(true)
+}
+
+pub(crate) fn delete_managed_resource_file_if_exists(
+    root: &Path,
+    resource_path: &str,
+) -> Result<bool, String> {
+    let absolute_path = managed_resource_absolute_path_under_resources_root(root, resource_path)?;
+
+    if !absolute_path.exists() {
+        return Ok(false);
     }
 
     if !absolute_path.is_file() {
@@ -866,7 +900,19 @@ pub(crate) fn delete_managed_resource_internal(
     fs::remove_file(&absolute_path).map_err(|error| {
         log_resource_error("删除资源文件", &error);
         "图片资源清理失败，请稍后重试。".to_string()
-    })
+    })?;
+    if let Some(parent) = absolute_path.parent() {
+        sync_directory_best_effort(parent, "正式资源目录");
+    }
+
+    Ok(true)
+}
+
+pub(crate) fn delete_managed_resource_internal(
+    root: &Path,
+    resource_path: &str,
+) -> Result<(), String> {
+    delete_managed_resource_file_if_exists(root, resource_path).map(|_| ())
 }
 
 fn resolve_managed_resource_internal(
