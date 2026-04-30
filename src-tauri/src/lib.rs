@@ -4,13 +4,15 @@ mod settings_backup;
 
 use database_ops::{
     activate_note_review_schedule_tx, add_tag_to_note_by_name_tx,
-    cleanup_expired_review_schedules_tx, cleanup_unreferenced_managed_resources,
+    cleanup_expired_review_schedules_tx, cleanup_expired_trash_tx,
+    cleanup_unreferenced_managed_resources,
     clear_note_review_schedule_tx, clear_notebook_cover_image_tx, create_folder_tx, create_note_tx,
-    create_notebook_tx, delete_folder_tx, delete_note_tx, delete_notebook_tx,
-    duplicate_note_above_tx, ensure_note_search_ready, ensure_notebook_tree_constraints_tx,
-    ensure_review_feature_ready_tx, get_note_review_schedule_tx, move_folder_to_notebook_top_tx,
-    move_note_tx, remove_tag_from_note_tx, rename_note_tx, reorder_folders_tx,
-    reorder_notebooks_tx, save_note_content_with_tags_tx, save_note_review_schedule_tx,
+    create_notebook_tx, delete_folder_tx, delete_note_tx, delete_notebook_tx, duplicate_note_above_tx,
+    ensure_note_search_ready, ensure_notebook_tree_constraints_tx, ensure_review_feature_ready_tx,
+    get_note_review_schedule_tx, list_trash_roots_tx, move_folder_to_notebook_top_tx, move_folder_to_trash_tx,
+    move_note_to_trash_tx, move_note_tx, move_notebook_to_trash_tx, purge_trashed_item_tx,
+    remove_tag_from_note_tx, rename_note_tx, reorder_folders_tx, reorder_notebooks_tx,
+    restore_trashed_item_tx, save_note_content_with_tags_tx, save_note_review_schedule_tx,
     set_note_review_schedule_dirty_tx, update_note_content_tx, update_notebook_cover_image_tx,
 };
 use resource_ops::{
@@ -78,6 +80,12 @@ pub fn run() {
             sql: include_str!("../migrations/0008_note_tag_occurrence_remark.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 9,
+            description: "add_soft_delete_trash_columns",
+            sql: include_str!("../migrations/0009_soft_delete_trash.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
@@ -119,6 +127,13 @@ pub fn run() {
             update_note_content_tx,
             save_note_content_with_tags_tx,
             delete_note_tx,
+            move_note_to_trash_tx,
+            move_folder_to_trash_tx,
+            move_notebook_to_trash_tx,
+            list_trash_roots_tx,
+            restore_trashed_item_tx,
+            purge_trashed_item_tx,
+            cleanup_expired_trash_tx,
             cleanup_unreferenced_managed_resources,
             add_tag_to_note_by_name_tx,
             remove_tag_from_note_tx,

@@ -18,8 +18,11 @@ import type {
   Note,
   NoteSearchResult,
   Notebook,
+  RestoreTrashResult,
   Tag,
   TagContentPreviewResult,
+  TrashItemType,
+  TrashRootItem,
   TextTagOccurrenceDraft,
   TagWithCount,
 } from "./types";
@@ -106,6 +109,13 @@ function isRepositoryValidationMessage(message: string) {
     "目标文件夹不存在。",
     "目标文件夹不属于当前笔记本。",
     "目标文件不存在。",
+    "目标文件已在回收站。",
+    "目标文件夹已在回收站。",
+    "目标笔记本已在回收站。",
+    "系统恢复笔记本不能移入回收站。",
+    "目标回收站项目不存在或已被处理。",
+    "只能操作顶层回收站项目。",
+    "回收站项目类型无效。",
     "目标文件不在文件夹中。",
     "目标插入位置无效。",
     "目标标签不存在。",
@@ -182,12 +192,12 @@ async function ensureNotebookTreeConstraintsCommand() {
   return invoke<void>("ensure_notebook_tree_constraints_tx");
 }
 
-async function deleteNotebookCommand(notebookId: number) {
-  return invoke<void>("delete_notebook_tx", { notebookId });
+async function moveNotebookToTrashCommand(notebookId: number) {
+  return invoke<void>("move_notebook_to_trash_tx", { notebookId });
 }
 
-async function deleteFolderCommand(folderId: number) {
-  return invoke<void>("delete_folder_tx", { folderId });
+async function moveFolderToTrashCommand(folderId: number) {
+  return invoke<void>("move_folder_to_trash_tx", { folderId });
 }
 
 async function updateNotebookCoverImageCommand(
@@ -224,8 +234,24 @@ async function saveNoteContentWithTagsCommand(
   });
 }
 
-async function deleteNoteCommand(noteId: number) {
-  return invoke<void>("delete_note_tx", { noteId });
+async function moveNoteToTrashCommand(noteId: number) {
+  return invoke<void>("move_note_to_trash_tx", { noteId });
+}
+
+async function listTrashRootsCommand() {
+  return invoke<TrashRootItem[]>("list_trash_roots_tx");
+}
+
+async function restoreTrashedItemCommand(itemType: TrashItemType, itemId: number) {
+  return invoke<RestoreTrashResult>("restore_trashed_item_tx", { itemType, itemId });
+}
+
+async function purgeTrashedItemCommand(itemType: TrashItemType, itemId: number) {
+  return invoke<void>("purge_trashed_item_tx", { itemType, itemId });
+}
+
+async function cleanupExpiredTrashCommand() {
+  return invoke<void>("cleanup_expired_trash_tx");
 }
 
 async function reorderNotebooksCommand(orderedNotebookIds: number[]) {
@@ -459,7 +485,7 @@ async function fetchNotebookById(database: Database, id: number) {
         created_at AS createdAt,
         updated_at AS updatedAt
       FROM notebooks
-      WHERE id = $1
+      WHERE id = $1 AND deleted_at IS NULL
     `,
     [id],
     "目标笔记本不存在。",
@@ -479,7 +505,7 @@ async function fetchFolderById(database: Database, id: number) {
         created_at AS createdAt,
         updated_at AS updatedAt
       FROM folders
-      WHERE id = $1
+      WHERE id = $1 AND deleted_at IS NULL
     `,
     [id],
     "目标文件夹不存在。",
@@ -500,7 +526,7 @@ async function fetchNoteById(database: Database, id: number) {
         created_at AS createdAt,
         updated_at AS updatedAt
       FROM notes
-      WHERE id = $1
+      WHERE id = $1 AND deleted_at IS NULL
     `,
     [id],
     "目标文件不存在。",
@@ -650,6 +676,7 @@ export async function listNotebooks() {
           created_at AS createdAt,
           updated_at AS updatedAt
         FROM notebooks
+        WHERE deleted_at IS NULL
         ${NOTEBOOK_ORDER}
       `,
     );
@@ -672,7 +699,7 @@ export async function renameNotebook(id: number, name: string) {
       `
         UPDATE notebooks
         SET name = $1, updated_at = CURRENT_TIMESTAMP
-        WHERE id = $2
+        WHERE id = $2 AND deleted_at IS NULL
       `,
       [normalizedName, id],
     );
@@ -722,10 +749,10 @@ export async function clearNotebookCoverImage(id: number) {
   });
 }
 
-export async function deleteNotebook(id: number) {
-  return withRepositoryError("删除笔记本", async () => {
+export async function moveNotebookToTrash(id: number) {
+  return withRepositoryError("移入回收站", async () => {
     await getNotebookDatabase();
-    await deleteNotebookCommand(id);
+    await moveNotebookToTrashCommand(id);
   });
 }
 
@@ -745,6 +772,7 @@ export async function listFoldersByNotebook(notebookId: number) {
           updated_at AS updatedAt
         FROM folders
         WHERE notebook_id = $1
+          AND deleted_at IS NULL
         ${FOLDER_ORDER}
       `,
       [notebookId],
@@ -767,6 +795,7 @@ export async function listAllFolders() {
           created_at AS createdAt,
           updated_at AS updatedAt
         FROM folders
+        WHERE deleted_at IS NULL
         ${FOLDER_ORDER}
       `,
     );
@@ -789,7 +818,7 @@ export async function renameFolder(id: number, name: string) {
       `
         UPDATE folders
         SET name = $1, updated_at = CURRENT_TIMESTAMP
-        WHERE id = $2
+        WHERE id = $2 AND deleted_at IS NULL
       `,
       [normalizedName, id],
     );
@@ -802,10 +831,10 @@ export async function renameFolder(id: number, name: string) {
   });
 }
 
-export async function deleteFolder(id: number) {
-  return withRepositoryError("删除文件夹", async () => {
+export async function moveFolderToTrash(id: number) {
+  return withRepositoryError("移入回收站", async () => {
     await getNotebookDatabase();
-    await deleteFolderCommand(id);
+    await moveFolderToTrashCommand(id);
   });
 }
 
@@ -826,6 +855,7 @@ export async function listNotesByNotebook(notebookId: number) {
           updated_at AS updatedAt
         FROM notes
         WHERE notebook_id = $1
+          AND deleted_at IS NULL
         ${NOTE_ORDER}
       `,
       [notebookId],
@@ -922,10 +952,10 @@ export async function saveNoteContentWithTags(
   });
 }
 
-export async function deleteNote(id: number) {
-  return withRepositoryError("删除文件", async () => {
+export async function moveNoteToTrash(id: number) {
+  return withRepositoryError("移入回收站", async () => {
     await getNotebookDatabase();
-    await deleteNoteCommand(id);
+    await moveNoteToTrashCommand(id);
   });
 }
 
@@ -956,7 +986,7 @@ export async function searchNotes(query: string, limit = 20) {
       FROM note_search
       INNER JOIN notes ON notes.id = note_search.rowid
       INNER JOIN notebooks ON notebooks.id = notes.notebook_id
-      LEFT JOIN folders ON folders.id = notes.folder_id
+      LEFT JOIN folders ON folders.id = notes.folder_id AND folders.deleted_at IS NULL
     `;
 
     if (shouldUseLikeSearch(normalizedQuery)) {
@@ -964,8 +994,12 @@ export async function searchNotes(query: string, limit = 20) {
       const rows = await database.select<NoteSearchRow[]>(
         `
           ${baseSelect}
-          WHERE note_search.title LIKE $1 ESCAPE '\\'
-             OR note_search.body_plaintext LIKE $1 ESCAPE '\\'
+          WHERE notes.deleted_at IS NULL
+            AND notebooks.deleted_at IS NULL
+            AND (
+              note_search.title LIKE $1 ESCAPE '\\'
+              OR note_search.body_plaintext LIKE $1 ESCAPE '\\'
+            )
           ORDER BY notes.updated_at DESC
           LIMIT $2
         `,
@@ -984,7 +1018,9 @@ export async function searchNotes(query: string, limit = 20) {
     const rows = await database.select<NoteSearchRow[]>(
       `
         ${baseSelect}
-        WHERE note_search MATCH $1
+        WHERE notes.deleted_at IS NULL
+          AND notebooks.deleted_at IS NULL
+          AND note_search MATCH $1
         ORDER BY notes.updated_at DESC
         LIMIT $2
       `,
@@ -1007,9 +1043,10 @@ export async function listTagsWithCounts() {
           tags.color AS color,
           tags.created_at AS createdAt,
           tags.updated_at AS updatedAt,
-          COUNT(note_tags.note_id) AS noteCount
+          COUNT(notes.id) AS noteCount
         FROM tags
         LEFT JOIN note_tags ON note_tags.tag_id = tags.id
+        LEFT JOIN notes ON notes.id = note_tags.note_id AND notes.deleted_at IS NULL
         GROUP BY tags.id, tags.name, tags.color, tags.created_at, tags.updated_at
         ${TAG_ORDER}
       `,
@@ -1086,11 +1123,42 @@ export async function listTagContentPreviews(tagId: number) {
           ranked_occurrences.previewText AS previewText
         FROM ranked_occurrences
         INNER JOIN notes ON notes.id = ranked_occurrences.noteId
+        INNER JOIN notebooks ON notebooks.id = notes.notebook_id
         WHERE ranked_occurrences.occurrenceRank = 1
+          AND notes.deleted_at IS NULL
+          AND notebooks.deleted_at IS NULL
         ${TAGGED_NOTE_ORDER}
       `,
       [tagId],
     );
+  });
+}
+
+export async function listTrashRoots() {
+  return withRepositoryError("读取回收站", async () => {
+    await getNotebookDatabase();
+    return listTrashRootsCommand();
+  });
+}
+
+export async function restoreTrashedItem(itemType: TrashItemType, itemId: number) {
+  return withRepositoryError("恢复回收站项目", async () => {
+    await getNotebookDatabase();
+    return restoreTrashedItemCommand(itemType, itemId);
+  });
+}
+
+export async function purgeTrashedItem(itemType: TrashItemType, itemId: number) {
+  return withRepositoryError("永久删除回收站项目", async () => {
+    await getNotebookDatabase();
+    await purgeTrashedItemCommand(itemType, itemId);
+  });
+}
+
+export async function cleanupExpiredTrash() {
+  return withRepositoryError("清理过期回收站", async () => {
+    await getNotebookDatabase();
+    await cleanupExpiredTrashCommand();
   });
 }
 

@@ -141,6 +141,27 @@ export interface TagContentPreviewResult {
   previewText: string;
 }
 
+export type TrashItemType = "note" | "folder" | "notebook";
+
+export interface TrashRootItem {
+  id: number;
+  itemType: TrashItemType;
+  title: string;
+  deletedAt: string;
+  trashOriginPath: string | null;
+  descendantFolderCount: number;
+  descendantNoteCount: number;
+  canRestoreToOriginalLocation: boolean;
+}
+
+export interface RestoreTrashResult {
+  restoredEntityType: TrashItemType;
+  restoredEntityId: number;
+  targetNotebookId: number;
+  restoredToOriginalLocation: boolean;
+  userMessage: string | null;
+}
+
 export interface NoteOpenRequest {
   requestId: number;
   noteId: number;

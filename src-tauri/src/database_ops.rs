@@ -3,7 +3,7 @@ use crate::resource_ops::{
     managed_resource_file_exists, move_managed_resource_to_trash, normalize_managed_resource_path,
     resolve_app_root, snapshot_managed_resource_session_leases, ManagedResourceTrashSource,
 };
-use chrono::{Local, NaiveDate, Utc};
+use chrono::{Duration as ChronoDuration, Local, NaiveDate, SecondsFormat, Utc};
 use percent_encoding::percent_decode_str;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
@@ -171,6 +171,29 @@ pub struct ManagedResourceCleanupResult {
     pub failed: Vec<ManagedResourceCleanupFailure>,
 }
 
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TrashRootListItemRecord {
+    pub id: i64,
+    pub item_type: String,
+    pub title: String,
+    pub deleted_at: String,
+    pub trash_origin_path: Option<String>,
+    pub descendant_folder_count: usize,
+    pub descendant_note_count: usize,
+    pub can_restore_to_original_location: bool,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreTrashedItemResult {
+    pub restored_entity_type: String,
+    pub restored_entity_id: i64,
+    pub target_notebook_id: i64,
+    pub restored_to_original_location: bool,
+    pub user_message: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NoteTagOccurrenceInput {
@@ -213,6 +236,40 @@ fn to_command_error(action: &str, error: impl ToString) -> String {
     let message = error.to_string();
     log_database_error(action, &message);
     message
+}
+
+fn current_utc_timestamp_text() -> String {
+    Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+fn trash_cutoff_timestamp_text() -> String {
+    (Utc::now() - ChronoDuration::days(30)).to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrashEntityType {
+    Note,
+    Folder,
+    Notebook,
+}
+
+impl TrashEntityType {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Note => "note",
+            Self::Folder => "folder",
+            Self::Notebook => "notebook",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, String> {
+        match value.trim() {
+            "note" => Ok(Self::Note),
+            "folder" => Ok(Self::Folder),
+            "notebook" => Ok(Self::Notebook),
+            _ => Err("回收站项目类型无效。".to_string()),
+        }
+    }
 }
 
 fn resolve_database_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
@@ -417,7 +474,11 @@ fn ensure_note_search_ready_internal(connection: &mut Connection) -> Result<(), 
     Ok(())
 }
 
-fn fetch_note_by_id(connection: &Connection, note_id: i64) -> Result<NoteRecord, String> {
+fn fetch_note_by_id_internal(
+    connection: &Connection,
+    note_id: i64,
+    include_trashed: bool,
+) -> Result<NoteRecord, String> {
     connection
         .query_row(
             "
@@ -432,8 +493,9 @@ fn fetch_note_by_id(connection: &Connection, note_id: i64) -> Result<NoteRecord,
                 updated_at
               FROM notes
               WHERE id = ?1
+                AND (?2 = 1 OR deleted_at IS NULL)
             ",
-            [note_id],
+            params![note_id, include_trashed as i64],
             |row| {
                 Ok(NoteRecord {
                     id: row.get(0)?,
@@ -450,9 +512,21 @@ fn fetch_note_by_id(connection: &Connection, note_id: i64) -> Result<NoteRecord,
         .map_err(|error| to_command_error("读取新建文件", error))
 }
 
+fn fetch_note_by_id(connection: &Connection, note_id: i64) -> Result<NoteRecord, String> {
+    fetch_note_by_id_internal(connection, note_id, false)
+}
+
 fn fetch_notebook_by_id(
     connection: &Connection,
     notebook_id: i64,
+) -> Result<NotebookRecord, String> {
+    fetch_notebook_by_id_internal(connection, notebook_id, false)
+}
+
+fn fetch_notebook_by_id_internal(
+    connection: &Connection,
+    notebook_id: i64,
+    include_trashed: bool,
 ) -> Result<NotebookRecord, String> {
     connection
         .query_row(
@@ -466,8 +540,9 @@ fn fetch_notebook_by_id(
                 updated_at
               FROM notebooks
               WHERE id = ?1
+                AND (?2 = 1 OR deleted_at IS NULL)
             ",
-            [notebook_id],
+            params![notebook_id, include_trashed as i64],
             |row| {
                 Ok(NotebookRecord {
                     id: row.get(0)?,
@@ -492,6 +567,7 @@ fn fetch_notebook_cover_image_path(
               SELECT cover_image_path
               FROM notebooks
               WHERE id = ?1
+                AND deleted_at IS NULL
             ",
             [notebook_id],
             |row| row.get::<_, Option<String>>(0),
@@ -501,7 +577,11 @@ fn fetch_notebook_cover_image_path(
         .ok_or_else(|| "目标笔记本不存在。".to_string())
 }
 
-fn fetch_folder_by_id(connection: &Connection, folder_id: i64) -> Result<FolderRecord, String> {
+fn fetch_folder_by_id_internal(
+    connection: &Connection,
+    folder_id: i64,
+    include_trashed: bool,
+) -> Result<FolderRecord, String> {
     connection
         .query_row(
             "
@@ -515,8 +595,9 @@ fn fetch_folder_by_id(connection: &Connection, folder_id: i64) -> Result<FolderR
                 updated_at
               FROM folders
               WHERE id = ?1
+                AND (?2 = 1 OR deleted_at IS NULL)
             ",
-            [folder_id],
+            params![folder_id, include_trashed as i64],
             |row| {
                 Ok(FolderRecord {
                     id: row.get(0)?,
@@ -532,10 +613,14 @@ fn fetch_folder_by_id(connection: &Connection, folder_id: i64) -> Result<FolderR
         .map_err(|error| to_command_error("读取文件夹", error))
 }
 
+fn fetch_folder_by_id(connection: &Connection, folder_id: i64) -> Result<FolderRecord, String> {
+    fetch_folder_by_id_internal(connection, folder_id, false)
+}
+
 fn notebook_exists(connection: &Connection, notebook_id: i64) -> Result<bool, String> {
     connection
         .query_row(
-            "SELECT 1 FROM notebooks WHERE id = ?1 LIMIT 1",
+            "SELECT 1 FROM notebooks WHERE id = ?1 AND deleted_at IS NULL LIMIT 1",
             [notebook_id],
             |_| Ok(()),
         )
@@ -550,6 +635,7 @@ fn fetch_all_notebook_ids(connection: &Connection) -> Result<Vec<i64>, String> {
             "
               SELECT id
               FROM notebooks
+              WHERE deleted_at IS NULL
               ORDER BY custom_sort_order ASC, created_at ASC, id ASC
             ",
         )
@@ -576,7 +662,7 @@ fn fetch_top_level_folder_ids(
             "
               SELECT id
               FROM folders
-              WHERE notebook_id = ?1 AND parent_folder_id IS NULL
+              WHERE notebook_id = ?1 AND parent_folder_id IS NULL AND deleted_at IS NULL
               ORDER BY sort_order ASC, created_at ASC, id ASC
             ",
         )
@@ -605,6 +691,7 @@ fn fetch_folder_sibling_ids(
               SELECT id
               FROM folders
               WHERE notebook_id = ?1
+                AND deleted_at IS NULL
                 AND ((?2 IS NULL AND parent_folder_id IS NULL) OR parent_folder_id = ?2)
               ORDER BY sort_order ASC, created_at ASC, id ASC
             ",
@@ -631,7 +718,7 @@ fn fetch_note_ids_by_folder(connection: &Connection, folder_id: i64) -> Result<V
             "
               SELECT id
               FROM notes
-              WHERE folder_id = ?1
+              WHERE folder_id = ?1 AND deleted_at IS NULL
               ORDER BY sort_order ASC, created_at ASC, id ASC
             ",
         )
@@ -658,7 +745,7 @@ fn fetch_note_titles_by_folder(
             "
               SELECT title
               FROM notes
-              WHERE folder_id = ?1
+              WHERE folder_id = ?1 AND deleted_at IS NULL
             ",
         )
         .map_err(|error| to_command_error("读取文件标题", error))?;
@@ -769,6 +856,850 @@ fn validate_reorder_ids(
     Ok(())
 }
 
+#[derive(Debug)]
+struct NoteTrashState {
+    id: i64,
+    notebook_id: i64,
+    folder_id: Option<i64>,
+    title: String,
+    deleted_at: Option<String>,
+    is_trash_root: bool,
+    deleted_by_root_type: Option<String>,
+    deleted_by_root_id: Option<i64>,
+    original_notebook_id: Option<i64>,
+    original_folder_id: Option<i64>,
+    trash_origin_path: Option<String>,
+}
+
+#[derive(Debug)]
+struct FolderTrashState {
+    id: i64,
+    notebook_id: i64,
+    parent_folder_id: Option<i64>,
+    name: String,
+    deleted_at: Option<String>,
+    is_trash_root: bool,
+    deleted_by_root_type: Option<String>,
+    deleted_by_root_id: Option<i64>,
+    original_notebook_id: Option<i64>,
+    original_parent_folder_id: Option<i64>,
+    trash_origin_path: Option<String>,
+}
+
+#[derive(Debug)]
+struct NotebookTrashState {
+    id: i64,
+    name: String,
+    cover_image_path: Option<String>,
+    custom_sort_order: i64,
+    deleted_at: Option<String>,
+    is_trash_root: bool,
+    deleted_by_root_type: Option<String>,
+    deleted_by_root_id: Option<i64>,
+    trash_origin_path: Option<String>,
+    is_recovery_notebook: bool,
+}
+
+fn fetch_note_trash_state(connection: &Connection, note_id: i64) -> Result<NoteTrashState, String> {
+    connection
+        .query_row(
+            "
+              SELECT
+                id,
+                notebook_id,
+                folder_id,
+                title,
+                deleted_at,
+                is_trash_root,
+                deleted_by_root_type,
+                deleted_by_root_id,
+                original_notebook_id,
+                original_folder_id,
+                trash_origin_path
+              FROM notes
+              WHERE id = ?1
+            ",
+            [note_id],
+            |row| {
+                Ok(NoteTrashState {
+                    id: row.get(0)?,
+                    notebook_id: row.get(1)?,
+                    folder_id: row.get(2)?,
+                    title: row.get(3)?,
+                    deleted_at: row.get(4)?,
+                    is_trash_root: row.get::<_, i64>(5)? != 0,
+                    deleted_by_root_type: row.get(6)?,
+                    deleted_by_root_id: row.get(7)?,
+                    original_notebook_id: row.get(8)?,
+                    original_folder_id: row.get(9)?,
+                    trash_origin_path: row.get(10)?,
+                })
+            },
+        )
+        .map_err(|error| to_command_error("读取回收站文件", error))
+}
+
+fn fetch_folder_trash_state(
+    connection: &Connection,
+    folder_id: i64,
+) -> Result<FolderTrashState, String> {
+    connection
+        .query_row(
+            "
+              SELECT
+                id,
+                notebook_id,
+                parent_folder_id,
+                name,
+                deleted_at,
+                is_trash_root,
+                deleted_by_root_type,
+                deleted_by_root_id,
+                original_notebook_id,
+                original_parent_folder_id,
+                trash_origin_path
+              FROM folders
+              WHERE id = ?1
+            ",
+            [folder_id],
+            |row| {
+                Ok(FolderTrashState {
+                    id: row.get(0)?,
+                    notebook_id: row.get(1)?,
+                    parent_folder_id: row.get(2)?,
+                    name: row.get(3)?,
+                    deleted_at: row.get(4)?,
+                    is_trash_root: row.get::<_, i64>(5)? != 0,
+                    deleted_by_root_type: row.get(6)?,
+                    deleted_by_root_id: row.get(7)?,
+                    original_notebook_id: row.get(8)?,
+                    original_parent_folder_id: row.get(9)?,
+                    trash_origin_path: row.get(10)?,
+                })
+            },
+        )
+        .map_err(|error| to_command_error("读取回收站文件夹", error))
+}
+
+fn fetch_notebook_trash_state(
+    connection: &Connection,
+    notebook_id: i64,
+) -> Result<NotebookTrashState, String> {
+    connection
+        .query_row(
+            "
+              SELECT
+                id,
+                name,
+                cover_image_path,
+                custom_sort_order,
+                deleted_at,
+                is_trash_root,
+                deleted_by_root_type,
+                deleted_by_root_id,
+                trash_origin_path,
+                is_recovery_notebook
+              FROM notebooks
+              WHERE id = ?1
+            ",
+            [notebook_id],
+            |row| {
+                Ok(NotebookTrashState {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    cover_image_path: row.get(2)?,
+                    custom_sort_order: row.get(3)?,
+                    deleted_at: row.get(4)?,
+                    is_trash_root: row.get::<_, i64>(5)? != 0,
+                    deleted_by_root_type: row.get(6)?,
+                    deleted_by_root_id: row.get(7)?,
+                    trash_origin_path: row.get(8)?,
+                    is_recovery_notebook: row.get::<_, i64>(9)? != 0,
+                })
+            },
+        )
+        .map_err(|error| to_command_error("读取回收站笔记本", error))
+}
+
+fn fetch_notebook_name_including_trashed(
+    connection: &Connection,
+    notebook_id: i64,
+) -> Result<Option<String>, String> {
+    connection
+        .query_row(
+            "SELECT name FROM notebooks WHERE id = ?1",
+            [notebook_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| to_command_error("读取笔记本名称", error))
+}
+
+fn fetch_folder_name_and_parent_including_trashed(
+    connection: &Connection,
+    folder_id: i64,
+) -> Result<Option<(String, Option<i64>)>, String> {
+    connection
+        .query_row(
+            "SELECT name, parent_folder_id FROM folders WHERE id = ?1",
+            [folder_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?)),
+        )
+        .optional()
+        .map_err(|error| to_command_error("读取文件夹路径", error))
+}
+
+fn build_folder_name_chain_including_trashed(
+    connection: &Connection,
+    folder_id: i64,
+) -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    let mut current_folder_id = Some(folder_id);
+    let mut visited = BTreeSet::new();
+
+    while let Some(current_id) = current_folder_id {
+        if !visited.insert(current_id) {
+            return Err("文件夹层级无效。".to_string());
+        }
+
+        let Some((name, parent_folder_id)) =
+            fetch_folder_name_and_parent_including_trashed(connection, current_id)?
+        else {
+            break;
+        };
+        names.push(name);
+        current_folder_id = parent_folder_id;
+    }
+
+    names.reverse();
+    Ok(names)
+}
+
+fn build_trash_origin_path(
+    connection: &Connection,
+    notebook_id: i64,
+    folder_id: Option<i64>,
+) -> Result<String, String> {
+    let notebook_name = fetch_notebook_name_including_trashed(connection, notebook_id)?
+        .ok_or_else(|| "目标笔记本不存在。".to_string())?;
+
+    if let Some(folder_id) = folder_id {
+        let folder_chain = build_folder_name_chain_including_trashed(connection, folder_id)?;
+        if folder_chain.is_empty() {
+            return Ok(notebook_name);
+        }
+
+        return Ok(format!("{notebook_name} / {}", folder_chain.join(" / ")));
+    }
+
+    Ok(notebook_name)
+}
+
+fn validate_live_trash_root_note(connection: &Connection, note_id: i64) -> Result<NoteTrashState, String> {
+    let note = fetch_note_trash_state(connection, note_id)?;
+    if note.deleted_at.is_some() {
+        return Err("目标文件已在回收站。".to_string());
+    }
+    Ok(note)
+}
+
+fn validate_live_trash_root_folder(
+    connection: &Connection,
+    folder_id: i64,
+) -> Result<FolderTrashState, String> {
+    let folder = fetch_folder_trash_state(connection, folder_id)?;
+    if folder.deleted_at.is_some() {
+        return Err("目标文件夹已在回收站。".to_string());
+    }
+    Ok(folder)
+}
+
+fn validate_live_trash_root_notebook(
+    connection: &Connection,
+    notebook_id: i64,
+) -> Result<NotebookTrashState, String> {
+    let notebook = fetch_notebook_trash_state(connection, notebook_id)?;
+    if notebook.deleted_at.is_some() {
+        return Err("目标笔记本已在回收站。".to_string());
+    }
+    if notebook.is_recovery_notebook {
+        return Err("系统恢复笔记本不能移入回收站。".to_string());
+    }
+    Ok(notebook)
+}
+
+fn ensure_trashed_root_state(
+    connection: &Connection,
+    item_type: TrashEntityType,
+    item_id: i64,
+) -> Result<(), String> {
+    match item_type {
+        TrashEntityType::Note => {
+            let note = fetch_note_trash_state(connection, item_id)?;
+            if note.deleted_at.is_none() {
+                return Err("目标回收站项目不存在或已被处理。".to_string());
+            }
+            if !note.is_trash_root {
+                return Err("只能操作顶层回收站项目。".to_string());
+            }
+        }
+        TrashEntityType::Folder => {
+            let folder = fetch_folder_trash_state(connection, item_id)?;
+            if folder.deleted_at.is_none() {
+                return Err("目标回收站项目不存在或已被处理。".to_string());
+            }
+            if !folder.is_trash_root {
+                return Err("只能操作顶层回收站项目。".to_string());
+            }
+        }
+        TrashEntityType::Notebook => {
+            let notebook = fetch_notebook_trash_state(connection, item_id)?;
+            if notebook.deleted_at.is_none() {
+                return Err("目标回收站项目不存在或已被处理。".to_string());
+            }
+            if !notebook.is_trash_root {
+                return Err("只能操作顶层回收站项目。".to_string());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn count_trash_scope_descendants(
+    connection: &Connection,
+    item_type: TrashEntityType,
+    item_id: i64,
+) -> Result<(usize, usize), String> {
+    match item_type {
+        TrashEntityType::Note => Ok((0, 0)),
+        TrashEntityType::Folder => {
+            let folder_count: i64 = connection
+                .query_row(
+                    "
+                      SELECT COUNT(*)
+                      FROM folders
+                      WHERE deleted_by_root_type = 'folder'
+                        AND deleted_by_root_id = ?1
+                        AND id != ?1
+                    ",
+                    params![item_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| to_command_error("统计回收站文件夹子项", error))?;
+            let note_count: i64 = connection
+                .query_row(
+                    "
+                      SELECT COUNT(*)
+                      FROM notes
+                      WHERE deleted_by_root_type = 'folder'
+                        AND deleted_by_root_id = ?1
+                    ",
+                    params![item_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| to_command_error("统计回收站文件子项", error))?;
+            Ok((folder_count as usize, note_count as usize))
+        }
+        TrashEntityType::Notebook => {
+            let folder_count: i64 = connection
+                .query_row(
+                    "
+                      SELECT COUNT(*)
+                      FROM folders
+                      WHERE deleted_by_root_type = 'notebook'
+                        AND deleted_by_root_id = ?1
+                    ",
+                    params![item_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| to_command_error("统计回收站文件夹子项", error))?;
+            let note_count: i64 = connection
+                .query_row(
+                    "
+                      SELECT COUNT(*)
+                      FROM notes
+                      WHERE deleted_by_root_type = 'notebook'
+                        AND deleted_by_root_id = ?1
+                    ",
+                    params![item_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| to_command_error("统计回收站文件子项", error))?;
+            Ok((folder_count as usize, note_count as usize))
+        }
+    }
+}
+
+fn can_restore_note_to_original_location(
+    connection: &Connection,
+    note: &NoteTrashState,
+) -> Result<bool, String> {
+    let Some(original_notebook_id) = note.original_notebook_id else {
+        return Ok(false);
+    };
+
+    if !notebook_exists(connection, original_notebook_id)? {
+        return Ok(false);
+    }
+
+    let Some(original_folder_id) = note.original_folder_id else {
+        return Ok(true);
+    };
+
+    match fetch_folder_by_id(connection, original_folder_id) {
+        Ok(_) => Ok(true),
+        Err(_) => Ok(false),
+    }
+}
+
+fn can_restore_folder_to_original_location(
+    connection: &Connection,
+    folder: &FolderTrashState,
+) -> Result<bool, String> {
+    let Some(original_notebook_id) = folder.original_notebook_id else {
+        return Ok(false);
+    };
+
+    if !notebook_exists(connection, original_notebook_id)? {
+        return Ok(false);
+    }
+
+    let Some(original_parent_folder_id) = folder.original_parent_folder_id else {
+        return Ok(true);
+    };
+
+    match fetch_folder_by_id(connection, original_parent_folder_id) {
+        Ok(_) => Ok(true),
+        Err(_) => Ok(false),
+    }
+}
+
+fn build_restore_message(restored_to_original_location: bool, used_recovery_notebook: bool) -> Option<String> {
+    if restored_to_original_location {
+        return None;
+    }
+
+    if used_recovery_notebook {
+        return Some("原笔记本不可用，已恢复到“已恢复”笔记本。".to_string());
+    }
+
+    Some("原位置不可用，已恢复到当前笔记本根目录。".to_string())
+}
+
+fn ensure_recovery_notebook(connection: &Connection) -> Result<i64, String> {
+    let mut statement = connection
+        .prepare(
+            "
+              SELECT id
+              FROM notebooks
+              WHERE is_recovery_notebook = 1
+                AND deleted_at IS NULL
+              ORDER BY created_at ASC, id ASC
+            ",
+        )
+        .map_err(|error| to_command_error("读取系统恢复笔记本", error))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, i64>(0))
+        .map_err(|error| to_command_error("读取系统恢复笔记本", error))?;
+
+    let mut recovery_ids = Vec::new();
+    for row in rows {
+        recovery_ids.push(row.map_err(|error| to_command_error("读取系统恢复笔记本", error))?);
+    }
+
+    if let Some(recovery_id) = recovery_ids.first().copied() {
+        return Ok(recovery_id);
+    }
+
+    let custom_sort_order = connection
+        .query_row(
+            "SELECT COALESCE(MAX(custom_sort_order), -1) + 1 FROM notebooks WHERE deleted_at IS NULL",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| to_command_error("计算恢复笔记本排序", error))?;
+
+    connection
+        .execute(
+            "
+              INSERT INTO notebooks (
+                name,
+                cover_image_path,
+                custom_sort_order,
+                is_recovery_notebook
+              )
+              VALUES (?1, NULL, ?2, 1)
+            ",
+            params!["已恢复", custom_sort_order],
+        )
+        .map_err(|error| to_command_error("创建系统恢复笔记本", error))?;
+
+    Ok(connection.last_insert_rowid())
+}
+
+fn fetch_folder_subtree_ids_including_trashed(
+    connection: &Connection,
+    root_folder_id: i64,
+) -> Result<Vec<i64>, String> {
+    let mut statement = connection
+        .prepare(
+            "
+              WITH RECURSIVE folder_tree(id) AS (
+                SELECT id
+                FROM folders
+                WHERE id = ?1
+                UNION ALL
+                SELECT child.id
+                FROM folders AS child
+                INNER JOIN folder_tree ON child.parent_folder_id = folder_tree.id
+              )
+              SELECT id
+              FROM folder_tree
+            ",
+        )
+        .map_err(|error| to_command_error("读取文件夹子树", error))?;
+    let rows = statement
+        .query_map([root_folder_id], |row| row.get::<_, i64>(0))
+        .map_err(|error| to_command_error("读取文件夹子树", error))?;
+
+    let mut folder_ids = Vec::new();
+    for row in rows {
+        folder_ids.push(row.map_err(|error| to_command_error("读取文件夹子树", error))?);
+    }
+
+    Ok(folder_ids)
+}
+
+fn fetch_note_ids_for_trash_scope(
+    connection: &Connection,
+    item_type: TrashEntityType,
+    item_id: i64,
+) -> Result<Vec<i64>, String> {
+    match item_type {
+        TrashEntityType::Note => Ok(vec![item_id]),
+        TrashEntityType::Folder => {
+            let mut statement = connection
+                .prepare(
+                    "
+                      SELECT id
+                      FROM notes
+                      WHERE deleted_by_root_type = 'folder'
+                        AND deleted_by_root_id = ?1
+                    ",
+                )
+                .map_err(|error| to_command_error("读取回收站文件作用域", error))?;
+            let rows = statement
+                .query_map([item_id], |row| row.get::<_, i64>(0))
+                .map_err(|error| to_command_error("读取回收站文件作用域", error))?;
+            let mut note_ids = Vec::new();
+            for row in rows {
+                note_ids.push(row.map_err(|error| to_command_error("读取回收站文件作用域", error))?);
+            }
+            Ok(note_ids)
+        }
+        TrashEntityType::Notebook => {
+            let mut statement = connection
+                .prepare(
+                    "
+                      SELECT id
+                      FROM notes
+                      WHERE deleted_by_root_type = 'notebook'
+                        AND deleted_by_root_id = ?1
+                    ",
+                )
+                .map_err(|error| to_command_error("读取回收站文件作用域", error))?;
+            let rows = statement
+                .query_map([item_id], |row| row.get::<_, i64>(0))
+                .map_err(|error| to_command_error("读取回收站文件作用域", error))?;
+            let mut note_ids = Vec::new();
+            for row in rows {
+                note_ids.push(row.map_err(|error| to_command_error("读取回收站文件作用域", error))?);
+            }
+            Ok(note_ids)
+        }
+    }
+}
+
+fn collect_managed_resource_paths_for_note_ids(
+    connection: &Connection,
+    note_ids: &[i64],
+) -> Result<Vec<String>, String> {
+    let mut resource_paths = BTreeSet::new();
+
+    for note_id in note_ids {
+        let content = connection
+            .query_row(
+                "
+                  SELECT COALESCE(content_plaintext, '')
+                  FROM notes
+                  WHERE id = ?1
+                ",
+                [note_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| to_command_error("读取文件资源引用", error))?;
+
+        if let Some(content) = content {
+            extend_resource_paths_from_note_content(&mut resource_paths, &content);
+        }
+    }
+
+    Ok(resource_paths.into_iter().collect())
+}
+
+fn collect_managed_resource_paths_for_trash_root(
+    connection: &Connection,
+    item_type: TrashEntityType,
+    item_id: i64,
+) -> Result<Vec<String>, String> {
+    match item_type {
+        TrashEntityType::Note => collect_managed_resource_paths_for_note(connection, item_id),
+        TrashEntityType::Folder => {
+            let note_ids = fetch_note_ids_for_trash_scope(connection, item_type, item_id)?;
+            collect_managed_resource_paths_for_note_ids(connection, &note_ids)
+        }
+        TrashEntityType::Notebook => {
+            let mut resource_paths = BTreeSet::new();
+            let note_ids = fetch_note_ids_for_trash_scope(connection, item_type, item_id)?;
+            for resource_path in collect_managed_resource_paths_for_note_ids(connection, &note_ids)? {
+                resource_paths.insert(resource_path);
+            }
+            if let Some(cover_path) = fetch_notebook_trash_state(connection, item_id)?.cover_image_path {
+                insert_normalized_resource_path(&mut resource_paths, &cover_path);
+            }
+            Ok(resource_paths.into_iter().collect())
+        }
+    }
+}
+
+fn detach_preserved_trash_roots_for_folder_purge(
+    connection: &Connection,
+    root_folder_id: i64,
+) -> Result<(), String> {
+    let current_root_type = TrashEntityType::Folder.as_str();
+    let subtree_folder_ids = fetch_folder_subtree_ids_including_trashed(connection, root_folder_id)?;
+    let subtree_folder_set = subtree_folder_ids.iter().copied().collect::<BTreeSet<_>>();
+
+    let mut preserved_folder_statement = connection
+        .prepare(
+            "
+              WITH RECURSIVE folder_tree(id) AS (
+                SELECT id FROM folders WHERE id = ?1
+                UNION ALL
+                SELECT child.id
+                FROM folders AS child
+                INNER JOIN folder_tree ON child.parent_folder_id = folder_tree.id
+              )
+              SELECT id, parent_folder_id
+              FROM folders
+              WHERE id IN (SELECT id FROM folder_tree)
+                AND deleted_at IS NOT NULL
+                AND NOT (deleted_by_root_type = ?2 AND deleted_by_root_id = ?1)
+            ",
+        )
+        .map_err(|error| to_command_error("读取保留的回收站文件夹", error))?;
+    let preserved_folder_rows = preserved_folder_statement
+        .query_map(params![root_folder_id, current_root_type], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?))
+        })
+        .map_err(|error| to_command_error("读取保留的回收站文件夹", error))?;
+
+    let mut preserved_folder_ids = BTreeSet::new();
+    let mut preserved_folder_parents = Vec::new();
+    for row in preserved_folder_rows {
+        let (folder_id, parent_folder_id) =
+            row.map_err(|error| to_command_error("读取保留的回收站文件夹", error))?;
+        preserved_folder_ids.insert(folder_id);
+        preserved_folder_parents.push((folder_id, parent_folder_id));
+    }
+
+    for (folder_id, parent_folder_id) in preserved_folder_parents {
+        let parent_is_preserved = parent_folder_id
+            .map(|id| preserved_folder_ids.contains(&id))
+            .unwrap_or(false);
+        if !parent_is_preserved {
+            connection
+                .execute(
+                    "
+                      UPDATE folders
+                      SET parent_folder_id = NULL, updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                      WHERE id = ?1
+                    ",
+                    [folder_id],
+                )
+                .map_err(|error| to_command_error("分离保留的回收站文件夹", error))?;
+        }
+    }
+
+    let mut preserved_note_statement = connection
+        .prepare(
+            "
+              SELECT id, folder_id
+              FROM notes
+              WHERE deleted_at IS NOT NULL
+                AND folder_id IS NOT NULL
+                AND folder_id IN (
+                  WITH RECURSIVE folder_tree(id) AS (
+                    SELECT id FROM folders WHERE id = ?1
+                    UNION ALL
+                    SELECT child.id
+                    FROM folders AS child
+                    INNER JOIN folder_tree ON child.parent_folder_id = folder_tree.id
+                  )
+                  SELECT id FROM folder_tree
+                )
+                AND NOT (deleted_by_root_type = ?2 AND deleted_by_root_id = ?1)
+            ",
+        )
+        .map_err(|error| to_command_error("读取保留的回收站文件", error))?;
+    let preserved_note_rows = preserved_note_statement
+        .query_map(params![root_folder_id, current_root_type], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?))
+        })
+        .map_err(|error| to_command_error("读取保留的回收站文件", error))?;
+
+    for row in preserved_note_rows {
+        let (note_id, folder_id) =
+            row.map_err(|error| to_command_error("读取保留的回收站文件", error))?;
+        let Some(folder_id) = folder_id else {
+            continue;
+        };
+        if subtree_folder_set.contains(&folder_id) && !preserved_folder_ids.contains(&folder_id) {
+            connection
+                .execute(
+                    "
+                      UPDATE notes
+                      SET folder_id = NULL, updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                      WHERE id = ?1
+                    ",
+                    [note_id],
+                )
+                .map_err(|error| to_command_error("分离保留的回收站文件", error))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn detach_preserved_trash_roots_for_notebook_purge(
+    connection: &Connection,
+    notebook_id: i64,
+    recovery_notebook_id: i64,
+) -> Result<(), String> {
+    let current_root_type = TrashEntityType::Notebook.as_str();
+    let mut preserved_folder_statement = connection
+        .prepare(
+            "
+              SELECT id, parent_folder_id
+              FROM folders
+              WHERE notebook_id = ?1
+                AND deleted_at IS NOT NULL
+                AND NOT (deleted_by_root_type = ?2 AND deleted_by_root_id = ?1)
+            ",
+        )
+        .map_err(|error| to_command_error("读取保留的回收站文件夹", error))?;
+    let preserved_folder_rows = preserved_folder_statement
+        .query_map(params![notebook_id, current_root_type], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?))
+        })
+        .map_err(|error| to_command_error("读取保留的回收站文件夹", error))?;
+
+    let mut preserved_folder_ids = BTreeSet::new();
+    let mut preserved_folder_parents = Vec::new();
+    for row in preserved_folder_rows {
+        let (folder_id, parent_folder_id) =
+            row.map_err(|error| to_command_error("读取保留的回收站文件夹", error))?;
+        preserved_folder_ids.insert(folder_id);
+        preserved_folder_parents.push((folder_id, parent_folder_id));
+    }
+
+    for folder_id in &preserved_folder_ids {
+        connection
+            .execute(
+                "
+                  UPDATE folders
+                  SET notebook_id = ?1, updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                  WHERE id = ?2
+                ",
+                params![recovery_notebook_id, folder_id],
+            )
+            .map_err(|error| to_command_error("迁移保留的回收站文件夹", error))?;
+    }
+
+    for (folder_id, parent_folder_id) in preserved_folder_parents {
+        let parent_is_preserved = parent_folder_id
+            .map(|id| preserved_folder_ids.contains(&id))
+            .unwrap_or(false);
+        if !parent_is_preserved {
+            connection
+                .execute(
+                    "
+                      UPDATE folders
+                      SET parent_folder_id = NULL, updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                      WHERE id = ?1
+                    ",
+                    [folder_id],
+                )
+                .map_err(|error| to_command_error("重挂保留的回收站文件夹", error))?;
+        }
+    }
+
+    let mut preserved_note_statement = connection
+        .prepare(
+            "
+              SELECT id, folder_id
+              FROM notes
+              WHERE notebook_id = ?1
+                AND deleted_at IS NOT NULL
+                AND NOT (deleted_by_root_type = ?2 AND deleted_by_root_id = ?1)
+            ",
+        )
+        .map_err(|error| to_command_error("读取保留的回收站文件", error))?;
+    let preserved_note_rows = preserved_note_statement
+        .query_map(params![notebook_id, current_root_type], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?))
+        })
+        .map_err(|error| to_command_error("读取保留的回收站文件", error))?;
+
+    for row in preserved_note_rows {
+        let (note_id, folder_id) =
+            row.map_err(|error| to_command_error("读取保留的回收站文件", error))?;
+        if let Some(folder_id) = folder_id {
+            if preserved_folder_ids.contains(&folder_id) {
+                connection
+                    .execute(
+                        "
+                          UPDATE notes
+                          SET notebook_id = ?1, updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                          WHERE id = ?2
+                        ",
+                        params![recovery_notebook_id, note_id],
+                    )
+                    .map_err(|error| to_command_error("迁移保留的回收站文件", error))?;
+                continue;
+            }
+        }
+
+        connection
+            .execute(
+                "
+                  UPDATE notes
+                  SET
+                    notebook_id = ?1,
+                    folder_id = NULL,
+                    updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                  WHERE id = ?2
+                ",
+                params![recovery_notebook_id, note_id],
+            )
+            .map_err(|error| to_command_error("迁移保留的回收站文件", error))?;
+    }
+
+    Ok(())
+}
+
 fn create_unique_name(base_name: &str, existing_values: &BTreeSet<String>) -> String {
     if !existing_values.contains(base_name) {
         return base_name.to_string();
@@ -859,7 +1790,7 @@ fn fetch_orphan_note_ids_by_notebook(
             "
               SELECT id
               FROM notes
-              WHERE notebook_id = ?1 AND folder_id IS NULL
+              WHERE notebook_id = ?1 AND folder_id IS NULL AND deleted_at IS NULL
               ORDER BY created_at ASC, id ASC
             ",
         )
@@ -929,7 +1860,7 @@ fn create_notebook_tx_internal(
 
     let custom_sort_order = transaction
         .query_row(
-            "SELECT COALESCE(MAX(custom_sort_order), -1) + 1 FROM notebooks",
+            "SELECT COALESCE(MAX(custom_sort_order), -1) + 1 FROM notebooks WHERE deleted_at IS NULL",
             [],
             |row| row.get::<_, i64>(0),
         )
@@ -956,7 +1887,7 @@ fn create_notebook_tx_internal(
 fn ensure_note_exists(connection: &Connection, note_id: i64) -> Result<(), String> {
     let exists = connection
         .query_row(
-            "SELECT 1 FROM notes WHERE id = ?1 LIMIT 1",
+            "SELECT 1 FROM notes WHERE id = ?1 AND deleted_at IS NULL LIMIT 1",
             [note_id],
             |_| Ok(()),
         )
@@ -977,7 +1908,7 @@ fn ensure_folder_belongs_to_notebook(
 ) -> Result<(), String> {
     let folder_notebook_id = connection
         .query_row(
-            "SELECT notebook_id FROM folders WHERE id = ?1 LIMIT 1",
+            "SELECT notebook_id FROM folders WHERE id = ?1 AND deleted_at IS NULL LIMIT 1",
             [folder_id],
             |row| row.get::<_, i64>(0),
         )
@@ -1007,6 +1938,7 @@ fn fetch_note_index_payload(
                 COALESCE(content_plaintext, '')
               FROM notes
               WHERE id = ?1
+                AND deleted_at IS NULL
             ",
             [note_id],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
@@ -1415,7 +2347,14 @@ fn collect_review_note_ids(connection: &Connection) -> Result<BTreeSet<i64>, Str
     let mut note_ids = BTreeSet::new();
 
     let mut binding_statement = connection
-        .prepare("SELECT note_id FROM note_review_bindings")
+        .prepare(
+            "
+              SELECT note_review_bindings.note_id
+              FROM note_review_bindings
+              INNER JOIN notes ON notes.id = note_review_bindings.note_id
+              WHERE notes.deleted_at IS NULL
+            ",
+        )
         .map_err(|error| to_command_error("读取复习绑定", error))?;
     let binding_rows = binding_statement
         .query_map([], |row| row.get::<_, i64>(0))
@@ -1425,7 +2364,14 @@ fn collect_review_note_ids(connection: &Connection) -> Result<BTreeSet<i64>, Str
     }
 
     let mut task_statement = connection
-        .prepare("SELECT DISTINCT note_id FROM review_tasks")
+        .prepare(
+            "
+              SELECT DISTINCT review_tasks.note_id
+              FROM review_tasks
+              INNER JOIN notes ON notes.id = review_tasks.note_id
+              WHERE notes.deleted_at IS NULL
+            ",
+        )
         .map_err(|error| to_command_error("读取复习任务", error))?;
     let task_rows = task_statement
         .query_map([], |row| row.get::<_, i64>(0))
@@ -1440,7 +2386,7 @@ fn collect_review_note_ids(connection: &Connection) -> Result<BTreeSet<i64>, Str
 fn note_exists(connection: &Connection, note_id: i64) -> Result<bool, String> {
     let count: i64 = connection
         .query_row(
-            "SELECT COUNT(*) FROM notes WHERE id = ?1",
+            "SELECT COUNT(*) FROM notes WHERE id = ?1 AND deleted_at IS NULL",
             [note_id],
             |row| row.get(0),
         )
@@ -1559,7 +2505,9 @@ fn collect_empty_review_binding_note_ids(
                 "
                   SELECT note_review_bindings.note_id
                   FROM note_review_bindings
+                  INNER JOIN notes ON notes.id = note_review_bindings.note_id
                   WHERE note_review_bindings.note_id = ?1
+                    AND notes.deleted_at IS NULL
                     AND NOT EXISTS (
                       SELECT 1
                       FROM review_tasks
@@ -1585,12 +2533,14 @@ fn collect_empty_review_binding_note_ids(
             "
               SELECT note_review_bindings.note_id
               FROM note_review_bindings
+              INNER JOIN notes ON notes.id = note_review_bindings.note_id
               WHERE NOT EXISTS (
                 SELECT 1
                 FROM review_tasks
                 WHERE review_tasks.note_id = note_review_bindings.note_id
                   AND review_tasks.plan_id = note_review_bindings.plan_id
               )
+                AND notes.deleted_at IS NULL
             ",
         )
         .map_err(|error| to_command_error("读取空复习绑定", error))?;
@@ -1619,7 +2569,19 @@ fn cleanup_expired_review_schedules(
             .map_err(|error| to_command_error("清理过期复习任务", error))?;
     } else {
         transaction
-            .execute("DELETE FROM review_tasks WHERE due_date < ?1", [today])
+            .execute(
+                "
+                  DELETE FROM review_tasks
+                  WHERE id IN (
+                    SELECT review_tasks.id
+                    FROM review_tasks
+                    INNER JOIN notes ON notes.id = review_tasks.note_id
+                    WHERE review_tasks.due_date < ?1
+                      AND notes.deleted_at IS NULL
+                  )
+                ",
+                [today],
+            )
             .map_err(|error| to_command_error("清理过期复习任务", error))?;
     }
 
@@ -2162,6 +3124,7 @@ fn move_note_tx_internal(
               SELECT notebook_id, folder_id
               FROM notes
               WHERE id = ?1
+                AND deleted_at IS NULL
             ",
             [note_id],
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?)),
@@ -2172,7 +3135,7 @@ fn move_note_tx_internal(
 
     let target_notebook_id = transaction
         .query_row(
-            "SELECT notebook_id FROM folders WHERE id = ?1 LIMIT 1",
+            "SELECT notebook_id FROM folders WHERE id = ?1 AND deleted_at IS NULL LIMIT 1",
             [target_folder_id],
             |row| row.get::<_, i64>(0),
         )
@@ -2237,6 +3200,7 @@ fn move_folder_to_notebook_top_tx_internal(
               SELECT notebook_id, parent_folder_id
               FROM folders
               WHERE id = ?1
+                AND deleted_at IS NULL
             ",
             [folder_id],
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?)),
@@ -2264,6 +3228,7 @@ fn move_folder_to_notebook_top_tx_internal(
               UPDATE folders
               SET sort_order = sort_order + 1
               WHERE notebook_id = ?1 AND parent_folder_id IS NULL
+                AND deleted_at IS NULL
             ",
             [target_notebook_id],
         )
@@ -2343,6 +3308,7 @@ fn duplicate_note_above_tx_internal(
               SELECT notebook_id, folder_id, sort_order, title, content_plaintext
               FROM notes
               WHERE id = ?1
+                AND deleted_at IS NULL
             ",
             [note_id],
             |row| {
@@ -2370,7 +3336,7 @@ fn duplicate_note_above_tx_internal(
             "
               UPDATE notes
               SET sort_order = sort_order + 1
-              WHERE folder_id = ?1 AND sort_order >= ?2
+              WHERE folder_id = ?1 AND sort_order >= ?2 AND deleted_at IS NULL
             ",
             params![folder_id, sort_order],
         )
@@ -2657,6 +3623,19 @@ fn set_review_task_completed_tx_internal(
     fetch_review_task_by_id(connection, task_id)
 }
 
+fn delete_notebook_tx_in_transaction(connection: &Connection, notebook_id: i64) -> Result<(), String> {
+    delete_notebook_search_entries(connection, notebook_id)?;
+    let deleted = connection
+        .execute("DELETE FROM notebooks WHERE id = ?1", [notebook_id])
+        .map_err(|error| to_command_error("删除笔记本", error))?;
+
+    if deleted == 0 {
+        return Err("目标笔记本不存在。".to_string());
+    }
+
+    Ok(())
+}
+
 fn delete_notebook_tx_internal(
     connection: &mut Connection,
     notebook_id: i64,
@@ -2666,18 +3645,24 @@ fn delete_notebook_tx_internal(
     let transaction = connection
         .transaction()
         .map_err(|error| to_command_error("开启删除笔记本事务", error))?;
-    delete_notebook_search_entries(&transaction, notebook_id)?;
-    let deleted = transaction
-        .execute("DELETE FROM notebooks WHERE id = ?1", [notebook_id])
-        .map_err(|error| to_command_error("删除笔记本", error))?;
-
-    if deleted == 0 {
-        return Err("目标笔记本不存在。".to_string());
-    }
-
+    delete_notebook_tx_in_transaction(&transaction, notebook_id)?;
     transaction
         .commit()
         .map_err(|error| to_command_error("提交删除笔记本事务", error))?;
+    Ok(())
+}
+
+fn delete_folder_tx_in_transaction(connection: &Connection, folder_id: i64) -> Result<(), String> {
+    delete_folder_search_entries(connection, folder_id)?;
+    delete_notes_by_folder_subtree(connection, folder_id)?;
+    let deleted = connection
+        .execute("DELETE FROM folders WHERE id = ?1", [folder_id])
+        .map_err(|error| to_command_error("删除文件夹", error))?;
+
+    if deleted == 0 {
+        return Err("目标文件夹不存在。".to_string());
+    }
+
     Ok(())
 }
 
@@ -2687,16 +3672,7 @@ fn delete_folder_tx_internal(connection: &mut Connection, folder_id: i64) -> Res
     let transaction = connection
         .transaction()
         .map_err(|error| to_command_error("开启删除文件夹事务", error))?;
-    delete_folder_search_entries(&transaction, folder_id)?;
-    delete_notes_by_folder_subtree(&transaction, folder_id)?;
-    let deleted = transaction
-        .execute("DELETE FROM folders WHERE id = ?1", [folder_id])
-        .map_err(|error| to_command_error("删除文件夹", error))?;
-
-    if deleted == 0 {
-        return Err("目标文件夹不存在。".to_string());
-    }
-
+    delete_folder_tx_in_transaction(&transaction, folder_id)?;
     transaction
         .commit()
         .map_err(|error| to_command_error("提交删除文件夹事务", error))?;
@@ -2725,6 +3701,7 @@ fn update_notebook_cover_image_tx_internal(
               UPDATE notebooks
               SET cover_image_path = ?1, updated_at = CURRENT_TIMESTAMP
               WHERE id = ?2
+                AND deleted_at IS NULL
             ",
             params![normalized_path, notebook_id],
         )
@@ -2754,6 +3731,7 @@ fn clear_notebook_cover_image_tx_internal(
               UPDATE notebooks
               SET cover_image_path = NULL, updated_at = CURRENT_TIMESTAMP
               WHERE id = ?1
+                AND deleted_at IS NULL
             ",
             [notebook_id],
         )
@@ -2786,6 +3764,7 @@ fn rename_note_tx_internal(
               UPDATE notes
               SET title = ?1, updated_at = CURRENT_TIMESTAMP
               WHERE id = ?2
+                AND deleted_at IS NULL
             ",
             params![title, note_id],
         )
@@ -2820,6 +3799,7 @@ fn update_note_content_tx_internal(
               UPDATE notes
               SET content_plaintext = ?1, updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
               WHERE id = ?2
+                AND deleted_at IS NULL
             ",
             params![content, note_id],
         )
@@ -2856,6 +3836,7 @@ fn save_note_content_with_tags_tx_internal(
               UPDATE notes
               SET content_plaintext = ?1, updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
               WHERE id = ?2
+                AND deleted_at IS NULL
             ",
             params![content, note_id],
         )
@@ -2940,13 +3921,8 @@ fn save_note_content_with_tags_tx_internal(
     fetch_note_by_id(connection, note_id)
 }
 
-fn delete_note_tx_internal(connection: &mut Connection, note_id: i64) -> Result<(), String> {
-    ensure_note_search_ready_internal(connection)?;
-
-    let transaction = connection
-        .transaction()
-        .map_err(|error| to_command_error("开启删除文件事务", error))?;
-    let deleted = transaction
+fn delete_note_tx_in_transaction(connection: &Connection, note_id: i64) -> Result<(), String> {
+    let deleted = connection
         .execute("DELETE FROM notes WHERE id = ?1", [note_id])
         .map_err(|error| to_command_error("删除文件", error))?;
 
@@ -2954,7 +3930,17 @@ fn delete_note_tx_internal(connection: &mut Connection, note_id: i64) -> Result<
         return Err("目标文件不存在。".to_string());
     }
 
-    delete_note_search_entry(&transaction, note_id)?;
+    delete_note_search_entry(connection, note_id)?;
+    Ok(())
+}
+
+fn delete_note_tx_internal(connection: &mut Connection, note_id: i64) -> Result<(), String> {
+    ensure_note_search_ready_internal(connection)?;
+
+    let transaction = connection
+        .transaction()
+        .map_err(|error| to_command_error("开启删除文件事务", error))?;
+    delete_note_tx_in_transaction(&transaction, note_id)?;
     transaction
         .commit()
         .map_err(|error| to_command_error("提交删除文件事务", error))?;
@@ -4122,6 +5108,724 @@ fn cleanup_removed_note_resources_after_save_best_effort<R: Runtime>(
     }
 }
 
+fn move_note_to_trash_tx_internal(
+    connection: &mut Connection,
+    note_id: i64,
+) -> Result<(), String> {
+    ensure_note_search_ready_internal(connection)?;
+    let note = validate_live_trash_root_note(connection, note_id)?;
+    let deleted_at = current_utc_timestamp_text();
+    let trash_origin_path = build_trash_origin_path(connection, note.notebook_id, note.folder_id)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| to_command_error("开启移入回收站事务", error))?;
+
+    transaction
+        .execute(
+            "
+              UPDATE notes
+              SET
+                deleted_at = ?1,
+                is_trash_root = 1,
+                deleted_by_root_type = 'note',
+                deleted_by_root_id = id,
+                original_notebook_id = notebook_id,
+                original_folder_id = folder_id,
+                trash_origin_path = ?2,
+                updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+              WHERE id = ?3
+                AND deleted_at IS NULL
+            ",
+            params![deleted_at, trash_origin_path, note_id],
+        )
+        .map_err(|error| to_command_error("移入回收站", error))?;
+
+    delete_note_search_entry(&transaction, note_id)?;
+    transaction
+        .commit()
+        .map_err(|error| to_command_error("提交移入回收站事务", error))?;
+    Ok(())
+}
+
+fn move_folder_to_trash_tx_internal(
+    connection: &mut Connection,
+    folder_id: i64,
+) -> Result<(), String> {
+    ensure_note_search_ready_internal(connection)?;
+    let folder = validate_live_trash_root_folder(connection, folder_id)?;
+    let deleted_at = current_utc_timestamp_text();
+    let trash_origin_path =
+        build_trash_origin_path(connection, folder.notebook_id, folder.parent_folder_id)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| to_command_error("开启移入回收站事务", error))?;
+
+    transaction
+        .execute(
+            "
+              UPDATE folders
+              SET
+                deleted_at = ?1,
+                is_trash_root = 1,
+                deleted_by_root_type = 'folder',
+                deleted_by_root_id = id,
+                original_notebook_id = notebook_id,
+                original_parent_folder_id = parent_folder_id,
+                trash_origin_path = ?2,
+                updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+              WHERE id = ?3
+                AND deleted_at IS NULL
+            ",
+            params![deleted_at, trash_origin_path, folder_id],
+        )
+        .map_err(|error| to_command_error("移入回收站", error))?;
+
+    transaction
+        .execute(
+            "
+              WITH RECURSIVE folder_tree(id) AS (
+                SELECT id
+                FROM folders
+                WHERE parent_folder_id = ?1
+                  AND deleted_at IS NULL
+                UNION ALL
+                SELECT child.id
+                FROM folders AS child
+                INNER JOIN folder_tree ON child.parent_folder_id = folder_tree.id
+                WHERE child.deleted_at IS NULL
+              )
+              UPDATE folders
+              SET
+                deleted_at = ?2,
+                is_trash_root = 0,
+                deleted_by_root_type = 'folder',
+                deleted_by_root_id = ?1,
+                original_notebook_id = notebook_id,
+                original_parent_folder_id = parent_folder_id,
+                updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+              WHERE id IN (SELECT id FROM folder_tree)
+            ",
+            params![folder_id, deleted_at],
+        )
+        .map_err(|error| to_command_error("移入回收站", error))?;
+
+    transaction
+        .execute(
+            "
+              WITH RECURSIVE folder_tree(id) AS (
+                SELECT id
+                FROM folders
+                WHERE id = ?1
+                UNION ALL
+                SELECT child.id
+                FROM folders AS child
+                INNER JOIN folder_tree ON child.parent_folder_id = folder_tree.id
+                WHERE child.deleted_at IS NULL
+              )
+              UPDATE notes
+              SET
+                deleted_at = ?2,
+                is_trash_root = 0,
+                deleted_by_root_type = 'folder',
+                deleted_by_root_id = ?1,
+                original_notebook_id = notebook_id,
+                original_folder_id = folder_id,
+                updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+              WHERE deleted_at IS NULL
+                AND folder_id IN (SELECT id FROM folder_tree)
+            ",
+            params![folder_id, deleted_at],
+        )
+        .map_err(|error| to_command_error("移入回收站", error))?;
+
+    delete_folder_search_entries(&transaction, folder_id)?;
+    transaction
+        .commit()
+        .map_err(|error| to_command_error("提交移入回收站事务", error))?;
+    Ok(())
+}
+
+fn move_notebook_to_trash_tx_internal(
+    connection: &mut Connection,
+    notebook_id: i64,
+) -> Result<(), String> {
+    ensure_note_search_ready_internal(connection)?;
+    let notebook = validate_live_trash_root_notebook(connection, notebook_id)?;
+    let deleted_at = current_utc_timestamp_text();
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| to_command_error("开启移入回收站事务", error))?;
+
+    transaction
+        .execute(
+            "
+              UPDATE notebooks
+              SET
+                deleted_at = ?1,
+                is_trash_root = 1,
+                deleted_by_root_type = 'notebook',
+                deleted_by_root_id = id,
+                trash_origin_path = name,
+                updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+              WHERE id = ?2
+                AND deleted_at IS NULL
+            ",
+            params![deleted_at, notebook_id],
+        )
+        .map_err(|error| to_command_error("移入回收站", error))?;
+
+    transaction
+        .execute(
+            "
+              UPDATE folders
+              SET
+                deleted_at = ?2,
+                is_trash_root = 0,
+                deleted_by_root_type = 'notebook',
+                deleted_by_root_id = ?1,
+                original_notebook_id = notebook_id,
+                original_parent_folder_id = parent_folder_id,
+                updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+              WHERE notebook_id = ?1
+                AND deleted_at IS NULL
+            ",
+            params![notebook_id, deleted_at],
+        )
+        .map_err(|error| to_command_error("移入回收站", error))?;
+
+    transaction
+        .execute(
+            "
+              UPDATE notes
+              SET
+                deleted_at = ?2,
+                is_trash_root = 0,
+                deleted_by_root_type = 'notebook',
+                deleted_by_root_id = ?1,
+                original_notebook_id = notebook_id,
+                original_folder_id = folder_id,
+                updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+              WHERE notebook_id = ?1
+                AND deleted_at IS NULL
+            ",
+            params![notebook_id, deleted_at],
+        )
+        .map_err(|error| to_command_error("移入回收站", error))?;
+
+    delete_notebook_search_entries(&transaction, notebook_id)?;
+    transaction
+        .commit()
+        .map_err(|error| to_command_error("提交移入回收站事务", error))?;
+    let _ = notebook;
+    Ok(())
+}
+
+fn list_trash_roots_tx_internal(connection: &Connection) -> Result<Vec<TrashRootListItemRecord>, String> {
+    let mut items = Vec::new();
+
+    let mut note_statement = connection
+        .prepare(
+            "
+              SELECT id, title, deleted_at, trash_origin_path
+              FROM notes
+              WHERE deleted_at IS NOT NULL
+                AND is_trash_root = 1
+              ORDER BY deleted_at DESC, id DESC
+            ",
+        )
+        .map_err(|error| to_command_error("读取回收站", error))?;
+    let note_rows = note_statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })
+        .map_err(|error| to_command_error("读取回收站", error))?;
+    for row in note_rows {
+        let (id, title, deleted_at, trash_origin_path) =
+            row.map_err(|error| to_command_error("读取回收站", error))?;
+        let note = fetch_note_trash_state(connection, id)?;
+        items.push(TrashRootListItemRecord {
+            id,
+            item_type: TrashEntityType::Note.as_str().to_string(),
+            title,
+            deleted_at,
+            trash_origin_path,
+            descendant_folder_count: 0,
+            descendant_note_count: 0,
+            can_restore_to_original_location: can_restore_note_to_original_location(connection, &note)?,
+        });
+    }
+
+    let mut folder_statement = connection
+        .prepare(
+            "
+              SELECT id, name, deleted_at, trash_origin_path
+              FROM folders
+              WHERE deleted_at IS NOT NULL
+                AND is_trash_root = 1
+              ORDER BY deleted_at DESC, id DESC
+            ",
+        )
+        .map_err(|error| to_command_error("读取回收站", error))?;
+    let folder_rows = folder_statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })
+        .map_err(|error| to_command_error("读取回收站", error))?;
+    for row in folder_rows {
+        let (id, name, deleted_at, trash_origin_path) =
+            row.map_err(|error| to_command_error("读取回收站", error))?;
+        let folder = fetch_folder_trash_state(connection, id)?;
+        let (descendant_folder_count, descendant_note_count) =
+            count_trash_scope_descendants(connection, TrashEntityType::Folder, id)?;
+        items.push(TrashRootListItemRecord {
+            id,
+            item_type: TrashEntityType::Folder.as_str().to_string(),
+            title: name,
+            deleted_at,
+            trash_origin_path,
+            descendant_folder_count,
+            descendant_note_count,
+            can_restore_to_original_location: can_restore_folder_to_original_location(connection, &folder)?,
+        });
+    }
+
+    let mut notebook_statement = connection
+        .prepare(
+            "
+              SELECT id, name, deleted_at, trash_origin_path
+              FROM notebooks
+              WHERE deleted_at IS NOT NULL
+                AND is_trash_root = 1
+              ORDER BY deleted_at DESC, id DESC
+            ",
+        )
+        .map_err(|error| to_command_error("读取回收站", error))?;
+    let notebook_rows = notebook_statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })
+        .map_err(|error| to_command_error("读取回收站", error))?;
+    for row in notebook_rows {
+        let (id, name, deleted_at, trash_origin_path) =
+            row.map_err(|error| to_command_error("读取回收站", error))?;
+        let (descendant_folder_count, descendant_note_count) =
+            count_trash_scope_descendants(connection, TrashEntityType::Notebook, id)?;
+        items.push(TrashRootListItemRecord {
+            id,
+            item_type: TrashEntityType::Notebook.as_str().to_string(),
+            title: name,
+            deleted_at,
+            trash_origin_path,
+            descendant_folder_count,
+            descendant_note_count,
+            can_restore_to_original_location: true,
+        });
+    }
+
+    items.sort_by(|left, right| {
+        right
+            .deleted_at
+            .cmp(&left.deleted_at)
+            .then_with(|| left.item_type.cmp(&right.item_type))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
+    Ok(items)
+}
+
+fn restore_trashed_item_tx_internal(
+    connection: &mut Connection,
+    item_type: TrashEntityType,
+    item_id: i64,
+) -> Result<RestoreTrashedItemResult, String> {
+    ensure_note_search_ready_internal(connection)?;
+    ensure_trashed_root_state(connection, item_type, item_id)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| to_command_error("开启恢复回收站项目事务", error))?;
+
+    let result = match item_type {
+        TrashEntityType::Note => {
+            let note = fetch_note_trash_state(&transaction, item_id)?;
+            let original_notebook_id = note.original_notebook_id;
+            let original_folder_id = note.original_folder_id;
+            let original_notebook_available = original_notebook_id
+                .map(|id| notebook_exists(&transaction, id))
+                .transpose()?
+                .unwrap_or(false);
+            let original_folder_available = if let Some(original_folder_id) = original_folder_id {
+                fetch_folder_by_id(&transaction, original_folder_id).is_ok()
+            } else {
+                true
+            };
+
+            let (target_notebook_id, target_folder_id, restored_to_original_location, used_recovery) =
+                if original_notebook_available && original_folder_available {
+                    (original_notebook_id.unwrap(), original_folder_id, true, false)
+                } else if original_notebook_available {
+                    (original_notebook_id.unwrap(), None, false, false)
+                } else {
+                    let recovery_notebook_id = ensure_recovery_notebook(&transaction)?;
+                    (recovery_notebook_id, None, false, true)
+                };
+
+            transaction
+                .execute(
+                    "
+                      UPDATE notes
+                      SET
+                        notebook_id = ?1,
+                        folder_id = ?2,
+                        deleted_at = NULL,
+                        is_trash_root = 0,
+                        deleted_by_root_type = NULL,
+                        deleted_by_root_id = NULL,
+                        original_notebook_id = NULL,
+                        original_folder_id = NULL,
+                        trash_origin_path = NULL,
+                        updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                      WHERE id = ?3
+                    ",
+                    params![target_notebook_id, target_folder_id, item_id],
+                )
+                .map_err(|error| to_command_error("恢复回收站文件", error))?;
+            let (title, content_plaintext) = fetch_note_index_payload(&transaction, item_id)?;
+            upsert_note_search_entry(&transaction, item_id, &title, &content_plaintext)?;
+
+            RestoreTrashedItemResult {
+                restored_entity_type: TrashEntityType::Note.as_str().to_string(),
+                restored_entity_id: item_id,
+                target_notebook_id,
+                restored_to_original_location,
+                user_message: build_restore_message(restored_to_original_location, used_recovery),
+            }
+        }
+        TrashEntityType::Folder => {
+            let folder = fetch_folder_trash_state(&transaction, item_id)?;
+            let original_notebook_id = folder.original_notebook_id;
+            let original_parent_folder_id = folder.original_parent_folder_id;
+            let original_notebook_available = original_notebook_id
+                .map(|id| notebook_exists(&transaction, id))
+                .transpose()?
+                .unwrap_or(false);
+            let original_parent_available =
+                if let Some(original_parent_folder_id) = original_parent_folder_id {
+                    fetch_folder_by_id(&transaction, original_parent_folder_id).is_ok()
+                } else {
+                    true
+                };
+
+            let scope_folder_ids = {
+                let mut statement = transaction
+                    .prepare(
+                        "
+                          SELECT id
+                          FROM folders
+                          WHERE deleted_by_root_type = 'folder'
+                            AND deleted_by_root_id = ?1
+                        ",
+                    )
+                    .map_err(|error| to_command_error("读取回收站文件夹作用域", error))?;
+                let rows = statement
+                    .query_map([item_id], |row| row.get::<_, i64>(0))
+                    .map_err(|error| to_command_error("读取回收站文件夹作用域", error))?;
+                let mut ids = Vec::new();
+                for row in rows {
+                    ids.push(row.map_err(|error| to_command_error("读取回收站文件夹作用域", error))?);
+                }
+                ids
+            };
+            let scope_folder_set = scope_folder_ids.iter().copied().collect::<BTreeSet<_>>();
+
+            let scope_note_ids = fetch_note_ids_for_trash_scope(&transaction, TrashEntityType::Folder, item_id)?;
+
+            let (target_notebook_id, target_parent_folder_id, restored_to_original_location, used_recovery) =
+                if original_notebook_available && original_parent_available {
+                    (original_notebook_id.unwrap(), original_parent_folder_id, true, false)
+                } else if original_notebook_available {
+                    (original_notebook_id.unwrap(), None, false, false)
+                } else {
+                    let recovery_notebook_id = ensure_recovery_notebook(&transaction)?;
+                    (recovery_notebook_id, None, false, true)
+                };
+
+            for folder_id in &scope_folder_ids {
+                let next_parent = if *folder_id == item_id {
+                    target_parent_folder_id
+                } else {
+                    let current = fetch_folder_trash_state(&transaction, *folder_id)?;
+                    match current.parent_folder_id {
+                        Some(parent_id) if scope_folder_set.contains(&parent_id) => Some(parent_id),
+                        _ => None,
+                    }
+                };
+                transaction
+                    .execute(
+                        "
+                          UPDATE folders
+                          SET
+                            notebook_id = ?1,
+                            parent_folder_id = ?2,
+                            deleted_at = NULL,
+                            is_trash_root = 0,
+                            deleted_by_root_type = NULL,
+                            deleted_by_root_id = NULL,
+                            original_notebook_id = NULL,
+                            original_parent_folder_id = NULL,
+                            trash_origin_path = NULL,
+                            updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                          WHERE id = ?3
+                        ",
+                        params![target_notebook_id, next_parent, folder_id],
+                    )
+                    .map_err(|error| to_command_error("恢复回收站文件夹", error))?;
+            }
+
+            for note_id in &scope_note_ids {
+                let current = fetch_note_trash_state(&transaction, *note_id)?;
+                let next_folder_id = current
+                    .folder_id
+                    .filter(|folder_id| scope_folder_set.contains(folder_id));
+                transaction
+                    .execute(
+                        "
+                          UPDATE notes
+                          SET
+                            notebook_id = ?1,
+                            folder_id = ?2,
+                            deleted_at = NULL,
+                            is_trash_root = 0,
+                            deleted_by_root_type = NULL,
+                            deleted_by_root_id = NULL,
+                            original_notebook_id = NULL,
+                            original_folder_id = NULL,
+                            trash_origin_path = NULL,
+                            updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                          WHERE id = ?3
+                        ",
+                        params![target_notebook_id, next_folder_id, note_id],
+                    )
+                    .map_err(|error| to_command_error("恢复回收站文件", error))?;
+                let (title, content_plaintext) = fetch_note_index_payload(&transaction, *note_id)?;
+                upsert_note_search_entry(&transaction, *note_id, &title, &content_plaintext)?;
+            }
+
+            RestoreTrashedItemResult {
+                restored_entity_type: TrashEntityType::Folder.as_str().to_string(),
+                restored_entity_id: item_id,
+                target_notebook_id,
+                restored_to_original_location,
+                user_message: build_restore_message(restored_to_original_location, used_recovery),
+            }
+        }
+        TrashEntityType::Notebook => {
+            let notebook = fetch_notebook_trash_state(&transaction, item_id)?;
+            let scope_note_ids =
+                fetch_note_ids_for_trash_scope(&transaction, TrashEntityType::Notebook, item_id)?;
+            let mut scope_folder_statement = transaction
+                .prepare(
+                    "
+                      SELECT id
+                      FROM folders
+                      WHERE deleted_by_root_type = 'notebook'
+                        AND deleted_by_root_id = ?1
+                    ",
+                )
+                .map_err(|error| to_command_error("读取回收站文件夹作用域", error))?;
+            let scope_folder_rows = scope_folder_statement
+                .query_map([item_id], |row| row.get::<_, i64>(0))
+                .map_err(|error| to_command_error("读取回收站文件夹作用域", error))?;
+            let mut scope_folder_ids = Vec::new();
+            for row in scope_folder_rows {
+                scope_folder_ids.push(row.map_err(|error| to_command_error("读取回收站文件夹作用域", error))?);
+            }
+
+            transaction
+                .execute(
+                    "
+                      UPDATE notebooks
+                      SET
+                        deleted_at = NULL,
+                        is_trash_root = 0,
+                        deleted_by_root_type = NULL,
+                        deleted_by_root_id = NULL,
+                        trash_origin_path = NULL,
+                        updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                      WHERE id = ?1
+                    ",
+                    [item_id],
+                )
+                .map_err(|error| to_command_error("恢复回收站笔记本", error))?;
+
+            for folder_id in scope_folder_ids {
+                transaction
+                    .execute(
+                        "
+                          UPDATE folders
+                          SET
+                            notebook_id = ?1,
+                            deleted_at = NULL,
+                            is_trash_root = 0,
+                            deleted_by_root_type = NULL,
+                            deleted_by_root_id = NULL,
+                            original_notebook_id = NULL,
+                            original_parent_folder_id = NULL,
+                            trash_origin_path = NULL,
+                            updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                          WHERE id = ?2
+                        ",
+                        params![item_id, folder_id],
+                    )
+                    .map_err(|error| to_command_error("恢复回收站文件夹", error))?;
+            }
+
+            for note_id in scope_note_ids {
+                transaction
+                    .execute(
+                        "
+                          UPDATE notes
+                          SET
+                            notebook_id = ?1,
+                            deleted_at = NULL,
+                            is_trash_root = 0,
+                            deleted_by_root_type = NULL,
+                            deleted_by_root_id = NULL,
+                            original_notebook_id = NULL,
+                            original_folder_id = NULL,
+                            trash_origin_path = NULL,
+                            updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                          WHERE id = ?2
+                        ",
+                        params![item_id, note_id],
+                    )
+                    .map_err(|error| to_command_error("恢复回收站文件", error))?;
+                let (title, content_plaintext) = fetch_note_index_payload(&transaction, note_id)?;
+                upsert_note_search_entry(&transaction, note_id, &title, &content_plaintext)?;
+            }
+
+            let _ = notebook;
+            RestoreTrashedItemResult {
+                restored_entity_type: TrashEntityType::Notebook.as_str().to_string(),
+                restored_entity_id: item_id,
+                target_notebook_id: item_id,
+                restored_to_original_location: true,
+                user_message: None,
+            }
+        }
+    };
+
+    transaction
+        .commit()
+        .map_err(|error| to_command_error("提交恢复回收站项目事务", error))?;
+    Ok(result)
+}
+
+fn purge_trashed_item_tx_internal<R: Runtime>(
+    app: &AppHandle<R>,
+    connection: &mut Connection,
+    item_type: TrashEntityType,
+    item_id: i64,
+) -> Result<(), String> {
+    ensure_note_search_ready_internal(connection)?;
+    ensure_trashed_root_state(connection, item_type, item_id)?;
+    let candidate_paths = collect_managed_resource_paths_for_trash_root(connection, item_type, item_id)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| to_command_error("开启永久删除回收站项目事务", error))?;
+
+    match item_type {
+        TrashEntityType::Note => {
+            delete_note_tx_in_transaction(&transaction, item_id)?;
+        }
+        TrashEntityType::Folder => {
+            detach_preserved_trash_roots_for_folder_purge(&transaction, item_id)?;
+            delete_folder_tx_in_transaction(&transaction, item_id)?;
+        }
+        TrashEntityType::Notebook => {
+            let recovery_notebook_id = ensure_recovery_notebook(&transaction)?;
+            detach_preserved_trash_roots_for_notebook_purge(&transaction, item_id, recovery_notebook_id)?;
+            delete_notebook_tx_in_transaction(&transaction, item_id)?;
+        }
+    }
+
+    transaction
+        .commit()
+        .map_err(|error| to_command_error("提交永久删除回收站项目事务", error))?;
+
+    cleanup_unreferenced_managed_resources_best_effort(
+        app,
+        connection,
+        &candidate_paths,
+        ManagedResourceTrashSource::OrphanCleanup,
+        None,
+    );
+    Ok(())
+}
+
+fn cleanup_expired_trash_tx_internal<R: Runtime>(
+    app: &AppHandle<R>,
+    connection: &mut Connection,
+) -> Result<(), String> {
+    let cutoff = trash_cutoff_timestamp_text();
+    let mut statement = connection
+        .prepare(
+            "
+              SELECT item_type, id
+              FROM (
+                SELECT 'note' AS item_type, id, deleted_at
+                FROM notes
+                WHERE deleted_at IS NOT NULL AND is_trash_root = 1
+                UNION ALL
+                SELECT 'folder' AS item_type, id, deleted_at
+                FROM folders
+                WHERE deleted_at IS NOT NULL AND is_trash_root = 1
+                UNION ALL
+                SELECT 'notebook' AS item_type, id, deleted_at
+                FROM notebooks
+                WHERE deleted_at IS NOT NULL AND is_trash_root = 1
+              )
+              WHERE deleted_at < ?1
+              ORDER BY deleted_at ASC, id ASC
+            ",
+        )
+        .map_err(|error| to_command_error("读取过期回收站项目", error))?;
+    let rows = statement
+        .query_map([cutoff], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(|error| to_command_error("读取过期回收站项目", error))?;
+
+    let mut expired_items = Vec::new();
+    for row in rows {
+        let (item_type, item_id) =
+            row.map_err(|error| to_command_error("读取过期回收站项目", error))?;
+        expired_items.push((TrashEntityType::parse(&item_type)?, item_id));
+    }
+
+    drop(statement);
+
+    for (item_type, item_id) in expired_items {
+        purge_trashed_item_tx_internal(app, connection, item_type, item_id)?;
+    }
+
+    Ok(())
+}
+
 #[tauri::command]
 pub fn ensure_note_search_ready(app: AppHandle) -> Result<(), String> {
     let mut connection = open_database_connection(&app)?;
@@ -4293,6 +5997,58 @@ pub fn rename_review_plan_tx(
 pub fn delete_review_plan_tx(app: AppHandle, plan_id: i64) -> Result<(), String> {
     let mut connection = open_database_connection(&app)?;
     delete_review_plan_tx_internal(&mut connection, plan_id)
+}
+
+#[tauri::command]
+pub fn move_note_to_trash_tx(app: AppHandle, note_id: i64) -> Result<(), String> {
+    let mut connection = open_database_connection(&app)?;
+    move_note_to_trash_tx_internal(&mut connection, note_id)
+}
+
+#[tauri::command]
+pub fn move_folder_to_trash_tx(app: AppHandle, folder_id: i64) -> Result<(), String> {
+    let mut connection = open_database_connection(&app)?;
+    move_folder_to_trash_tx_internal(&mut connection, folder_id)
+}
+
+#[tauri::command]
+pub fn move_notebook_to_trash_tx(app: AppHandle, notebook_id: i64) -> Result<(), String> {
+    let mut connection = open_database_connection(&app)?;
+    move_notebook_to_trash_tx_internal(&mut connection, notebook_id)
+}
+
+#[tauri::command]
+pub fn list_trash_roots_tx(app: AppHandle) -> Result<Vec<TrashRootListItemRecord>, String> {
+    let connection = open_database_connection(&app)?;
+    list_trash_roots_tx_internal(&connection)
+}
+
+#[tauri::command]
+pub fn restore_trashed_item_tx(
+    app: AppHandle,
+    item_type: String,
+    item_id: i64,
+) -> Result<RestoreTrashedItemResult, String> {
+    let mut connection = open_database_connection(&app)?;
+    let item_type = TrashEntityType::parse(&item_type)?;
+    restore_trashed_item_tx_internal(&mut connection, item_type, item_id)
+}
+
+#[tauri::command]
+pub fn purge_trashed_item_tx(
+    app: AppHandle,
+    item_type: String,
+    item_id: i64,
+) -> Result<(), String> {
+    let mut connection = open_database_connection(&app)?;
+    let item_type = TrashEntityType::parse(&item_type)?;
+    purge_trashed_item_tx_internal(&app, &mut connection, item_type, item_id)
+}
+
+#[tauri::command]
+pub fn cleanup_expired_trash_tx(app: AppHandle) -> Result<(), String> {
+    let mut connection = open_database_connection(&app)?;
+    cleanup_expired_trash_tx_internal(&app, &mut connection)
 }
 
 #[tauri::command]
@@ -4515,19 +6271,22 @@ mod tests {
         create_note_tx_internal, create_notebook_tx_internal, create_review_plan_tx_internal,
         delete_folder_tx_internal, delete_note_tx_internal, delete_notebook_tx_internal,
         delete_review_plan_tx_internal, duplicate_note_above_tx_internal, ensure_app_meta_table,
-        ensure_note_search_ready_internal, ensure_note_search_table,
+        ensure_note_search_ready_internal, ensure_note_search_table, ensure_recovery_notebook,
         ensure_notebook_tree_constraints_tx_internal, ensure_review_feature_ready_internal,
         extract_indexable_plain_text, extract_managed_resource_path_from_text,
-        extract_note_image_resource_paths, extract_tag_name, get_note_review_schedule_tx_internal,
-        get_review_schedule_dirty_note_ids, move_folder_to_notebook_top_tx_internal,
-        move_note_tx_internal, normalize_managed_resource_path, normalize_tag_color,
+        extract_note_image_resource_paths, extract_tag_name, fetch_folder_trash_state,
+        fetch_note_trash_state, get_note_review_schedule_tx_internal,
+        get_review_schedule_dirty_note_ids, list_trash_roots_tx_internal,
+        move_folder_to_notebook_top_tx_internal, move_folder_to_trash_tx_internal,
+        move_note_to_trash_tx_internal, move_note_tx_internal, normalize_managed_resource_path,
+        normalize_tag_color, restore_trashed_item_tx_internal,
         rebuild_note_search_index_internal, rename_review_plan_tx_internal,
         reorder_folders_tx_internal, reorder_notebooks_tx_internal,
         save_note_content_with_tags_tx_internal, save_note_review_schedule_tx_internal,
         set_note_review_schedule_dirty_tx_internal, set_review_task_completed_tx_internal,
         today_local_date_key, update_notebook_cover_image_tx_internal,
         update_review_schedule_dirty_note_id, ManagedResourceCleanupResult,
-        ManagedResourceTrashSource, NoteTagOccurrenceInput,
+        ManagedResourceTrashSource, NoteTagOccurrenceInput, TrashEntityType,
         APP_META_KEY_REVIEW_FEATURE_REBUILD_V1_DONE, APP_META_KEY_REVIEW_SCHEDULE_DIRTY_NOTE_IDS,
         DEFAULT_REVIEW_PLAN_NAME, DEFAULT_TAG_COLOR,
     };
@@ -4551,6 +6310,12 @@ mod tests {
                   name TEXT NOT NULL,
                   cover_image_path TEXT,
                   custom_sort_order INTEGER NOT NULL DEFAULT 0,
+                  deleted_at TEXT,
+                  is_trash_root INTEGER NOT NULL DEFAULT 0,
+                  deleted_by_root_type TEXT,
+                  deleted_by_root_id INTEGER,
+                  trash_origin_path TEXT,
+                  is_recovery_notebook INTEGER NOT NULL DEFAULT 0,
                   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
@@ -4560,6 +6325,13 @@ mod tests {
                   parent_folder_id INTEGER,
                   name TEXT NOT NULL,
                   sort_order INTEGER NOT NULL DEFAULT 0,
+                  deleted_at TEXT,
+                  is_trash_root INTEGER NOT NULL DEFAULT 0,
+                  deleted_by_root_type TEXT,
+                  deleted_by_root_id INTEGER,
+                  original_notebook_id INTEGER,
+                  original_parent_folder_id INTEGER,
+                  trash_origin_path TEXT,
                   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                   FOREIGN KEY (notebook_id) REFERENCES notebooks(id) ON DELETE CASCADE,
@@ -4572,6 +6344,13 @@ mod tests {
                   sort_order INTEGER NOT NULL DEFAULT 0,
                   title TEXT NOT NULL,
                   content_plaintext TEXT,
+                  deleted_at TEXT,
+                  is_trash_root INTEGER NOT NULL DEFAULT 0,
+                  deleted_by_root_type TEXT,
+                  deleted_by_root_id INTEGER,
+                  original_notebook_id INTEGER,
+                  original_folder_id INTEGER,
+                  trash_origin_path TEXT,
                   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                   FOREIGN KEY (notebook_id) REFERENCES notebooks(id) ON DELETE CASCADE,
@@ -8176,5 +9955,212 @@ mod tests {
             assert_eq!(task.is_completed, completed);
             assert_eq!(task.completed_at.is_some(), completed);
         }
+    }
+
+    #[test]
+    fn move_folder_to_trash_keeps_existing_independent_trash_roots_visible() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, parent_folder_id, name, sort_order) VALUES (1, NULL, '文件夹A', 0)",
+                [],
+            )
+            .expect("insert root folder");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, parent_folder_id, name, sort_order) VALUES (1, 1, '子文件夹', 0)",
+                [],
+            )
+            .expect("insert child folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', NULL)",
+                [],
+            )
+            .expect("insert note one");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 2, '文件二', NULL)",
+                [],
+            )
+            .expect("insert note two");
+
+        move_note_to_trash_tx_internal(&mut connection, 2).expect("trash note root");
+        move_folder_to_trash_tx_internal(&mut connection, 1).expect("trash folder root");
+
+        let trash_roots = list_trash_roots_tx_internal(&connection).expect("list trash roots");
+        assert_eq!(trash_roots.len(), 2);
+        assert!(trash_roots
+            .iter()
+            .any(|item| item.item_type == "note" && item.id == 2));
+        let folder_root = trash_roots
+            .iter()
+            .find(|item| item.item_type == "folder" && item.id == 1)
+            .expect("folder root should stay visible");
+        assert_eq!(folder_root.descendant_folder_count, 1);
+        assert_eq!(folder_root.descendant_note_count, 1);
+
+        let note_two = fetch_note_trash_state(&connection, 2).expect("fetch trashed note");
+        assert!(note_two.deleted_at.is_some());
+        assert!(note_two.is_trash_root);
+        assert_eq!(note_two.deleted_by_root_type.as_deref(), Some("note"));
+        assert_eq!(note_two.deleted_by_root_id, Some(2));
+    }
+
+    #[test]
+    fn restore_folder_root_does_not_restore_independent_child_trash_root() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, parent_folder_id, name, sort_order) VALUES (1, NULL, '文件夹A', 0)",
+                [],
+            )
+            .expect("insert root folder");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, parent_folder_id, name, sort_order) VALUES (1, 1, '子文件夹', 0)",
+                [],
+            )
+            .expect("insert child folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', NULL)",
+                [],
+            )
+            .expect("insert note one");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 2, '文件二', NULL)",
+                [],
+            )
+            .expect("insert note two");
+
+        move_note_to_trash_tx_internal(&mut connection, 2).expect("trash note root");
+        move_folder_to_trash_tx_internal(&mut connection, 1).expect("trash folder root");
+        let restore =
+            restore_trashed_item_tx_internal(&mut connection, TrashEntityType::Folder, 1)
+                .expect("restore folder root");
+
+        assert_eq!(restore.restored_entity_type, "folder");
+        assert!(restore.restored_to_original_location);
+        assert!(fetch_folder_trash_state(&connection, 1)
+            .expect("fetch folder")
+            .deleted_at
+            .is_none());
+        assert!(fetch_note_trash_state(&connection, 1)
+            .expect("fetch restored note")
+            .deleted_at
+            .is_none());
+
+        let note_two = fetch_note_trash_state(&connection, 2).expect("fetch note two");
+        assert!(note_two.deleted_at.is_some());
+        assert!(note_two.is_trash_root);
+        assert_eq!(note_two.deleted_by_root_type.as_deref(), Some("note"));
+    }
+
+    #[test]
+    fn restore_trashed_note_uses_original_notebook_after_detachment() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('原笔记本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', NULL)",
+                [],
+            )
+            .expect("insert note");
+
+        move_note_to_trash_tx_internal(&mut connection, 1).expect("trash note");
+        let recovery_notebook_id = ensure_recovery_notebook(&connection).expect("ensure recovery notebook");
+        connection
+            .execute(
+                "
+                  UPDATE notes
+                  SET notebook_id = ?1, folder_id = NULL
+                  WHERE id = 1
+                ",
+                [recovery_notebook_id],
+            )
+            .expect("detach note to recovery notebook");
+        delete_notebook_tx_internal(&mut connection, 1).expect("delete original notebook");
+
+        let restore =
+            restore_trashed_item_tx_internal(&mut connection, TrashEntityType::Note, 1)
+                .expect("restore note");
+
+        assert!(!restore.restored_to_original_location);
+        assert_eq!(restore.target_notebook_id, recovery_notebook_id);
+        assert_eq!(
+            restore.user_message.as_deref(),
+            Some("原笔记本不可用，已恢复到“已恢复”笔记本。")
+        );
+
+        let note = fetch_note_trash_state(&connection, 1).expect("fetch restored note");
+        assert!(note.deleted_at.is_none());
+        assert_eq!(note.notebook_id, recovery_notebook_id);
+        assert_eq!(note.original_notebook_id, None);
+    }
+
+    #[test]
+    fn removed_live_image_is_kept_when_only_trashed_note_still_references_it() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let image_path = temp_dir
+            .path()
+            .join("resources/images/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.png");
+        fs::create_dir_all(image_path.parent().expect("image parent")).expect("create images dir");
+        fs::write(&image_path, b"image").expect("write image");
+
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', '<img data-note-image=\"true\" data-resource-path=\"resources/images/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.png\" />')",
+                [],
+            )
+            .expect("insert note one");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件二', '<img data-note-image=\"true\" data-resource-path=\"resources/images/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.png\" />')",
+                [],
+            )
+            .expect("insert note two");
+
+        move_note_to_trash_tx_internal(&mut connection, 2).expect("trash note two");
+        let previous_resource_paths =
+            collect_managed_resource_paths_for_note(&connection, 1).expect("collect old paths");
+        save_note_content_with_tags_tx_internal(&mut connection, 1, "<p>正文</p>", &[])
+            .expect("save note without image");
+
+        let result = cleanup_removed_note_resources_after_save(
+            temp_dir.path(),
+            &connection,
+            previous_resource_paths,
+            1,
+        )
+        .expect("cleanup removed image");
+
+        assert_eq!(result.deleted_count, 0);
+        assert!(image_path.is_file());
     }
 }

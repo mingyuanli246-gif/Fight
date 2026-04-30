@@ -16,6 +16,7 @@ import { NotebooksPage } from "../../pages/NotebooksPage";
 import { ReviewCalendarPage } from "../../pages/ReviewCalendarPage";
 import { SettingsPage } from "../../pages/SettingsPage";
 import { TagPlazaPage } from "../../pages/TagPlazaPage";
+import { TrashPage } from "../../pages/TrashPage";
 import type { AppSection } from "../sections";
 import styles from "./AppShell.module.css";
 
@@ -55,6 +56,8 @@ function renderPage(
       return <ReviewCalendarPage onOpenNote={onOpenNote} />;
     case "tagPlaza":
       return <TagPlazaPage onOpenNote={onOpenNote} />;
+    case "trash":
+      return <TrashPage />;
     case "settings":
       return (
         <SettingsPage

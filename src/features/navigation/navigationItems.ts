@@ -5,6 +5,7 @@ import {
   NotebookIcon,
   SettingsIcon,
   TagIcon,
+  TrashIcon,
 } from "./NavigationIcons";
 
 export interface NavigationItem {
@@ -28,6 +29,11 @@ export const navigationItems: NavigationItem[] = [
     key: "tagPlaza",
     label: "标签广场",
     Icon: TagIcon,
+  },
+  {
+    key: "trash",
+    label: "回收站",
+    Icon: TrashIcon,
   },
   {
     key: "settings",

@@ -238,15 +238,15 @@ export function NotebookDetailsPane({
             </section>
 
             <section className={styles.actionCard}>
-              <h4 className={styles.cardTitle}>删除确认</h4>
+              <h4 className={styles.cardTitle}>回收站</h4>
               {selectedNotebook ? (
                 <p className={styles.cardText}>
-                  删除后，该笔记本及其全部文件夹和文件会一起移除。
+                  该笔记本会被移入回收站，内部文件夹和文件会一起进入回收站。
                 </p>
               ) : null}
               {selectedFolder ? (
                 <p className={styles.cardText}>
-                  删除后，该文件夹及其子文件夹中的文件会一起移除。
+                  该文件夹会被移入回收站，内部子文件夹和文件会一起进入回收站。
                 </p>
               ) : null}
 
@@ -257,11 +257,11 @@ export function NotebookDetailsPane({
                   onClick={() => setIsConfirmingDelete(true)}
                   disabled={disabled}
                 >
-                  删除当前项
+                  移入回收站
                 </button>
               ) : (
                 <div className={styles.confirmBox}>
-                  <p className={styles.confirmText}>确认删除当前选中对象吗？</p>
+                  <p className={styles.confirmText}>确认将当前选中对象移入回收站吗？</p>
                   <div className={styles.formActions}>
                     <button
                       type="button"
@@ -277,7 +277,7 @@ export function NotebookDetailsPane({
                       onClick={handleDelete}
                       disabled={disabled}
                     >
-                      确认删除
+                      确认移入
                     </button>
                   </div>
                 </div>

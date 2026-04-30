@@ -15,9 +15,6 @@ import {
   createFolder,
   createNote,
   createNotebook,
-  deleteFolder,
-  deleteNote,
-  deleteNotebook,
   duplicateNoteAbove,
   getNoteById,
   initializeNotebookDatabase,
@@ -25,8 +22,11 @@ import {
   listFoldersByNotebook,
   listNotesByNotebook,
   listNotebooks,
+  moveFolderToTrash,
   moveFolderToNotebookTop,
+  moveNoteToTrash,
   moveNote,
+  moveNotebookToTrash,
   renameFolder,
   renameNote,
   renameNotebook,
@@ -1158,7 +1158,7 @@ export const NotebookWorkspace = forwardRef<
     }
 
     await runMutation(async () => {
-      await deleteNotebook(id);
+      await moveNotebookToTrash(id);
       await syncWorkspace();
       setShellMode("home");
       setHighlightRequest(null);
@@ -1252,7 +1252,7 @@ export const NotebookWorkspace = forwardRef<
     }
 
     await runMutation(async () => {
-      await deleteFolder(id);
+      await moveFolderToTrash(id);
       await syncWorkspace(selectedNotebookId, {
         kind: "notebook",
         id: selectedNotebookId,
@@ -1291,7 +1291,7 @@ export const NotebookWorkspace = forwardRef<
     }
 
     await runMutation(async () => {
-      await deleteNote(id);
+      await moveNoteToTrash(id);
       await syncWorkspace(selectedNotebookId, fallbackSelection);
     });
     return true;
@@ -1351,7 +1351,7 @@ export const NotebookWorkspace = forwardRef<
         setDeleteTarget({
           kind: "notebook",
           id: notebook.id,
-          title: "确定删除这个笔记本吗",
+          title: "确定将这个笔记本移入回收站吗？",
         });
         return;
       }
@@ -1361,7 +1361,7 @@ export const NotebookWorkspace = forwardRef<
         setDeleteTarget({
           kind: "folder",
           id: selectedEntity.id,
-          title: "确定删除这个文件夹吗",
+          title: "确定将这个文件夹移入回收站吗？",
         });
       }
 
@@ -1370,7 +1370,7 @@ export const NotebookWorkspace = forwardRef<
         setDeleteTarget({
           kind: "note",
           id: selectedEntity.id,
-          title: "确定删除这个文件吗",
+          title: "确定将这个文件移入回收站吗？",
         });
       }
     }
@@ -1508,7 +1508,7 @@ export const NotebookWorkspace = forwardRef<
             setDeleteTarget({
               kind: "notebook",
               id: notebook.id,
-              title: "确定删除这个笔记本吗",
+              title: "确定将这个笔记本移入回收站吗？",
             })
           }
           onSetNotebookCoverImage={handleSetNotebookCoverImage}
@@ -1548,14 +1548,14 @@ export const NotebookWorkspace = forwardRef<
             setDeleteTarget({
               kind: "folder",
               id: folder.id,
-              title: "确定删除这个文件夹吗",
+              title: "确定将这个文件夹移入回收站吗？",
             })
           }
           onRequestDeleteNote={(note) =>
             setDeleteTarget({
               kind: "note",
               id: note.id,
-              title: "确定删除这个文件吗",
+              title: "确定将这个文件移入回收站吗？",
             })
           }
           onDuplicateNote={(note) => {
@@ -1627,7 +1627,7 @@ export const NotebookWorkspace = forwardRef<
       {deleteTarget ? (
         <div className={styles.dialogOverlay}>
           <div className={styles.deleteDialog}>
-            <h3 className={styles.dialogTitle}>删除确认</h3>
+            <h3 className={styles.dialogTitle}>移入回收站</h3>
             <p className={styles.dialogText}>{deleteTarget.title}</p>
             <div className={styles.dialogActions}>
               <button
@@ -1646,7 +1646,7 @@ export const NotebookWorkspace = forwardRef<
                 }}
                 disabled={isBusy}
               >
-                确认删除
+                确认移入
               </button>
             </div>
           </div>

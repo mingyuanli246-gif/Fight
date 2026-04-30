@@ -69,6 +69,20 @@ export function TagIcon(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+export function TrashIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" {...props}>
+      <path
+        d="M5.5 7.5h13M9 4.75h6M9.5 10.25v6M14.5 10.25v6M7.5 7.5l.6 9.1A2 2 0 0 0 10.1 18.5h3.8a2 2 0 0 0 2-1.9l.6-9.1"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 export function SettingsIcon(props: SVGProps<SVGSVGElement>) {
   return (
     <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" {...props}>

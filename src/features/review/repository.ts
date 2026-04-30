@@ -211,6 +211,7 @@ export async function listTodayReviewTasks() {
             name AS folderPath
           FROM folders
           WHERE parent_folder_id IS NULL
+            AND deleted_at IS NULL
 
           UNION ALL
 
@@ -222,6 +223,7 @@ export async function listTodayReviewTasks() {
             folder_paths.folderPath || ' / ' || child.name AS folderPath
           FROM folders AS child
           INNER JOIN folder_paths ON folder_paths.id = child.parent_folder_id
+          WHERE child.deleted_at IS NULL
         ),
         today_task_notes AS (
           SELECT
@@ -246,8 +248,8 @@ export async function listTodayReviewTasks() {
           END AS folderPath,
           today_task_notes.dueDate AS dueDate
         FROM today_task_notes
-        INNER JOIN notes ON notes.id = today_task_notes.noteId
-        INNER JOIN notebooks ON notebooks.id = notes.notebook_id
+        INNER JOIN notes ON notes.id = today_task_notes.noteId AND notes.deleted_at IS NULL
+        INNER JOIN notebooks ON notebooks.id = notes.notebook_id AND notebooks.deleted_at IS NULL
         LEFT JOIN folder_paths ON folder_paths.id = notes.folder_id
       `,
       [today],
