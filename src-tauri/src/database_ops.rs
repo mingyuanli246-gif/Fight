@@ -3765,6 +3765,14 @@ fn is_auto_cleanup_candidate_resource_path(resource_path: &str) -> bool {
     is_app_managed_image_resource_path(resource_path)
 }
 
+fn should_move_cleanup_candidate_to_trash(
+    resource_path: &str,
+    source: ManagedResourceTrashSource,
+) -> bool {
+    matches!(source, ManagedResourceTrashSource::Cover)
+        || resource_path.starts_with("resources/covers/")
+}
+
 fn cleanup_candidate_unreferenced_managed_resources(
     root: &Path,
     connection: &Connection,
@@ -3844,27 +3852,24 @@ fn cleanup_candidate_unreferenced_managed_resources_with_leases(
             }
         }
 
-        match source {
-            ManagedResourceTrashSource::Cover => {
-                match move_managed_resource_to_trash(root, &resource_path, source, note_id) {
-                    Ok(()) => {
-                        result.deleted_count += 1;
-                        result.moved_to_trash_count += 1;
-                    }
-                    Err(error) => {
-                        result.failed.push(to_cleanup_failure(resource_path, error));
-                    }
+        if should_move_cleanup_candidate_to_trash(&resource_path, source) {
+            match move_managed_resource_to_trash(root, &resource_path, source, note_id) {
+                Ok(()) => {
+                    result.deleted_count += 1;
+                    result.moved_to_trash_count += 1;
+                }
+                Err(error) => {
+                    result.failed.push(to_cleanup_failure(resource_path, error));
                 }
             }
-            ManagedResourceTrashSource::NoteBody | ManagedResourceTrashSource::OrphanCleanup => {
-                match delete_managed_resource_file_if_exists(root, &resource_path) {
-                    Ok(true) => {
-                        result.deleted_count += 1;
-                    }
-                    Ok(false) => {}
-                    Err(error) => {
-                        result.failed.push(to_cleanup_failure(resource_path, error));
-                    }
+        } else {
+            match delete_managed_resource_file_if_exists(root, &resource_path) {
+                Ok(true) => {
+                    result.deleted_count += 1;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    result.failed.push(to_cleanup_failure(resource_path, error));
                 }
             }
         }
@@ -4295,6 +4300,9 @@ pub fn delete_notebook_tx(app: AppHandle, notebook_id: i64) -> Result<(), String
     let mut connection = open_database_connection(&app)?;
     let candidate_paths = collect_managed_resource_paths_for_notebook(&connection, notebook_id)?;
     delete_notebook_tx_internal(&mut connection, notebook_id)?;
+    // This path is for permanent deletion only. If the product later gains notebook trash / soft
+    // delete semantics, that flow must keep the notebook rows and skip this orphan cleanup so note
+    // bodies and their resources remain restorable together.
     cleanup_unreferenced_managed_resources_best_effort(
         &app,
         &connection,
@@ -4311,6 +4319,8 @@ pub fn delete_folder_tx(app: AppHandle, folder_id: i64) -> Result<(), String> {
     let candidate_paths =
         collect_managed_resource_paths_for_folder_subtree(&connection, folder_id)?;
     delete_folder_tx_internal(&mut connection, folder_id)?;
+    // This path is for permanent deletion only. A future folder trash / soft delete flow must not
+    // reuse it, otherwise note-body resources could be cleaned up before the folder is restored.
     cleanup_unreferenced_managed_resources_best_effort(
         &app,
         &connection,
@@ -4414,6 +4424,8 @@ pub fn delete_note_tx(app: AppHandle, note_id: i64) -> Result<(), String> {
     let mut connection = open_database_connection(&app)?;
     let candidate_paths = collect_managed_resource_paths_for_note(&connection, note_id)?;
     delete_note_tx_internal(&mut connection, note_id)?;
+    // This path is for permanent deletion only. A future note trash / soft delete flow must not
+    // call this orphan cleanup until the note is truly purged from storage.
     cleanup_unreferenced_managed_resources_best_effort(
         &app,
         &connection,
@@ -5194,7 +5206,7 @@ mod tests {
         .expect("delete orphan resources");
 
         assert_eq!(result.deleted_count, 2);
-        assert_eq!(result.moved_to_trash_count, 0);
+        assert_eq!(result.moved_to_trash_count, 1);
         assert!(result.failed.is_empty());
         assert!(temp_dir
             .path()
@@ -5208,7 +5220,7 @@ mod tests {
             .path()
             .join("resources/covers/44444444-4444-4444-8444-444444444444.png")
             .is_file());
-        assert_resource_deleted_from_disk(
+        assert_resource_moved_to_trash(
             temp_dir.path(),
             "resources/covers/55555555-5555-4555-8555-555555555555.png",
         );
@@ -5366,7 +5378,7 @@ mod tests {
             .expect("cleanup unreferenced managed resources");
 
         assert_eq!(result.deleted_count, 2);
-        assert_eq!(result.moved_to_trash_count, 0);
+        assert_eq!(result.moved_to_trash_count, 1);
         assert!(result.failed.is_empty());
         assert!(temp_dir
             .path()
@@ -5380,7 +5392,7 @@ mod tests {
             .path()
             .join("resources/covers/44444444-4444-4444-8444-444444444444.png")
             .is_file());
-        assert_resource_deleted_from_disk(
+        assert_resource_moved_to_trash(
             temp_dir.path(),
             "resources/covers/55555555-5555-4555-8555-555555555555.png",
         );
@@ -5620,6 +5632,82 @@ mod tests {
             .path()
             .join("resources/images/11111111-1111-4111-8111-111111111111.png")
             .is_file());
+    }
+
+    #[test]
+    fn delete_notebook_cleanup_on_permanent_delete_keeps_shared_note_images_and_trashes_cover() {
+        let temp_dir = tempdir().expect("create temp dir");
+        ensure_test_resource_dirs(temp_dir.path());
+        write_test_resource(
+            temp_dir.path(),
+            "resources/images/91919191-9191-4919-8919-919191919191.png",
+        );
+        write_test_resource(
+            temp_dir.path(),
+            "resources/images/92929292-9292-4929-8929-929292929292.png",
+        );
+        write_test_resource(
+            temp_dir.path(),
+            "resources/covers/93939393-9393-4939-8939-939393939393.png",
+        );
+
+        let mut connection = test_connection();
+        connection
+            .execute(
+                "INSERT INTO notebooks (name, cover_image_path) VALUES ('待删笔记本', 'resources/covers/93939393-9393-4939-8939-939393939393.png')",
+                [],
+            )
+            .expect("insert deleted notebook");
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('保留笔记本')", [])
+            .expect("insert keep notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '待删文件夹', 0)",
+                [],
+            )
+            .expect("insert deleted folder");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (2, '保留文件夹', 0)",
+                [],
+            )
+            .expect("insert keep folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '待删文件', '<img data-note-image=\"true\" data-resource-path=\"resources/images/91919191-9191-4919-8919-919191919191.png\" alt=\"独占图\" /><img data-note-image=\"true\" data-resource-path=\"resources/images/92929292-9292-4929-8929-929292929292.png\" alt=\"共享图\" />')",
+                [],
+            )
+            .expect("insert deleted note");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (2, 2, '保留文件', '<img data-note-image=\"true\" data-resource-path=\"resources/images/92929292-9292-4929-8929-929292929292.png\" alt=\"共享图\" />')",
+                [],
+            )
+            .expect("insert keep note");
+
+        let candidate_paths = collect_managed_resource_paths_for_notebook(&connection, 1)
+            .expect("collect notebook resource paths");
+        delete_notebook_tx_internal(&mut connection, 1).expect("permanently delete notebook");
+        let result =
+            cleanup_candidates_after_resource_grace(temp_dir.path(), &connection, &candidate_paths)
+                .expect("cleanup deleted notebook resources");
+
+        assert_eq!(result.deleted_count, 2);
+        assert_eq!(result.moved_to_trash_count, 1);
+        assert!(result.failed.is_empty());
+        assert_resource_deleted_from_disk(
+            temp_dir.path(),
+            "resources/images/91919191-9191-4919-8919-919191919191.png",
+        );
+        assert!(temp_dir
+            .path()
+            .join("resources/images/92929292-9292-4929-8929-929292929292.png")
+            .is_file());
+        assert_resource_moved_to_trash(
+            temp_dir.path(),
+            "resources/covers/93939393-9393-4939-8939-939393939393.png",
+        );
     }
 
     #[test]
