@@ -1095,7 +1095,10 @@ fn build_trash_origin_path(
     Ok(notebook_name)
 }
 
-fn validate_live_trash_root_note(connection: &Connection, note_id: i64) -> Result<NoteTrashState, String> {
+fn validate_live_trash_root_note(
+    connection: &Connection,
+    note_id: i64,
+) -> Result<NoteTrashState, String> {
     let note = fetch_note_trash_state(connection, note_id)?;
     if note.deleted_at.is_some() {
         return Err("目标文件已在回收站。".to_string());
@@ -1275,7 +1278,10 @@ fn can_restore_folder_to_original_location(
     }
 }
 
-fn build_restore_message(restored_to_original_location: bool, used_recovery_notebook: bool) -> Option<String> {
+fn build_restore_message(
+    restored_to_original_location: bool,
+    used_recovery_notebook: bool,
+) -> Option<String> {
     if restored_to_original_location {
         return None;
     }
@@ -1394,7 +1400,8 @@ fn fetch_note_ids_for_trash_scope(
                 .map_err(|error| to_command_error("读取回收站文件作用域", error))?;
             let mut note_ids = Vec::new();
             for row in rows {
-                note_ids.push(row.map_err(|error| to_command_error("读取回收站文件作用域", error))?);
+                note_ids
+                    .push(row.map_err(|error| to_command_error("读取回收站文件作用域", error))?);
             }
             Ok(note_ids)
         }
@@ -1414,7 +1421,8 @@ fn fetch_note_ids_for_trash_scope(
                 .map_err(|error| to_command_error("读取回收站文件作用域", error))?;
             let mut note_ids = Vec::new();
             for row in rows {
-                note_ids.push(row.map_err(|error| to_command_error("读取回收站文件作用域", error))?);
+                note_ids
+                    .push(row.map_err(|error| to_command_error("读取回收站文件作用域", error))?);
             }
             Ok(note_ids)
         }
@@ -1463,10 +1471,13 @@ fn collect_managed_resource_paths_for_trash_root(
         TrashEntityType::Notebook => {
             let mut resource_paths = BTreeSet::new();
             let note_ids = fetch_note_ids_for_trash_scope(connection, item_type, item_id)?;
-            for resource_path in collect_managed_resource_paths_for_note_ids(connection, &note_ids)? {
+            for resource_path in collect_managed_resource_paths_for_note_ids(connection, &note_ids)?
+            {
                 resource_paths.insert(resource_path);
             }
-            if let Some(cover_path) = fetch_notebook_trash_state(connection, item_id)?.cover_image_path {
+            if let Some(cover_path) =
+                fetch_notebook_trash_state(connection, item_id)?.cover_image_path
+            {
                 insert_normalized_resource_path(&mut resource_paths, &cover_path);
             }
             Ok(resource_paths.into_iter().collect())
@@ -1479,7 +1490,8 @@ fn detach_preserved_trash_roots_for_folder_purge(
     root_folder_id: i64,
 ) -> Result<(), String> {
     let current_root_type = TrashEntityType::Folder.as_str();
-    let subtree_folder_ids = fetch_folder_subtree_ids_including_trashed(connection, root_folder_id)?;
+    let subtree_folder_ids =
+        fetch_folder_subtree_ids_including_trashed(connection, root_folder_id)?;
     let subtree_folder_set = subtree_folder_ids.iter().copied().collect::<BTreeSet<_>>();
 
     let mut preserved_folder_statement = connection
@@ -3623,7 +3635,10 @@ fn set_review_task_completed_tx_internal(
     fetch_review_task_by_id(connection, task_id)
 }
 
-fn delete_notebook_tx_in_transaction(connection: &Connection, notebook_id: i64) -> Result<(), String> {
+fn delete_notebook_tx_in_transaction(
+    connection: &Connection,
+    notebook_id: i64,
+) -> Result<(), String> {
     delete_notebook_search_entries(connection, notebook_id)?;
     let deleted = connection
         .execute("DELETE FROM notebooks WHERE id = ?1", [notebook_id])
@@ -5108,10 +5123,7 @@ fn cleanup_removed_note_resources_after_save_best_effort<R: Runtime>(
     }
 }
 
-fn move_note_to_trash_tx_internal(
-    connection: &mut Connection,
-    note_id: i64,
-) -> Result<(), String> {
+fn move_note_to_trash_tx_internal(connection: &mut Connection, note_id: i64) -> Result<(), String> {
     ensure_note_search_ready_internal(connection)?;
     let note = validate_live_trash_root_note(connection, note_id)?;
     let deleted_at = current_utc_timestamp_text();
@@ -5320,7 +5332,9 @@ fn move_notebook_to_trash_tx_internal(
     Ok(())
 }
 
-fn list_trash_roots_tx_internal(connection: &Connection) -> Result<Vec<TrashRootListItemRecord>, String> {
+fn list_trash_roots_tx_internal(
+    connection: &Connection,
+) -> Result<Vec<TrashRootListItemRecord>, String> {
     let mut items = Vec::new();
 
     let mut note_statement = connection
@@ -5356,7 +5370,9 @@ fn list_trash_roots_tx_internal(connection: &Connection) -> Result<Vec<TrashRoot
             trash_origin_path,
             descendant_folder_count: 0,
             descendant_note_count: 0,
-            can_restore_to_original_location: can_restore_note_to_original_location(connection, &note)?,
+            can_restore_to_original_location: can_restore_note_to_original_location(
+                connection, &note,
+            )?,
         });
     }
 
@@ -5395,7 +5411,9 @@ fn list_trash_roots_tx_internal(connection: &Connection) -> Result<Vec<TrashRoot
             trash_origin_path,
             descendant_folder_count,
             descendant_note_count,
-            can_restore_to_original_location: can_restore_folder_to_original_location(connection, &folder)?,
+            can_restore_to_original_location: can_restore_folder_to_original_location(
+                connection, &folder,
+            )?,
         });
     }
 
@@ -5474,15 +5492,24 @@ fn restore_trashed_item_tx_internal(
                 true
             };
 
-            let (target_notebook_id, target_folder_id, restored_to_original_location, used_recovery) =
-                if original_notebook_available && original_folder_available {
-                    (original_notebook_id.unwrap(), original_folder_id, true, false)
-                } else if original_notebook_available {
-                    (original_notebook_id.unwrap(), None, false, false)
-                } else {
-                    let recovery_notebook_id = ensure_recovery_notebook(&transaction)?;
-                    (recovery_notebook_id, None, false, true)
-                };
+            let (
+                target_notebook_id,
+                target_folder_id,
+                restored_to_original_location,
+                used_recovery,
+            ) = if original_notebook_available && original_folder_available {
+                (
+                    original_notebook_id.unwrap(),
+                    original_folder_id,
+                    true,
+                    false,
+                )
+            } else if original_notebook_available {
+                (original_notebook_id.unwrap(), None, false, false)
+            } else {
+                let recovery_notebook_id = ensure_recovery_notebook(&transaction)?;
+                (recovery_notebook_id, None, false, true)
+            };
 
             transaction
                 .execute(
@@ -5546,23 +5573,35 @@ fn restore_trashed_item_tx_internal(
                     .map_err(|error| to_command_error("读取回收站文件夹作用域", error))?;
                 let mut ids = Vec::new();
                 for row in rows {
-                    ids.push(row.map_err(|error| to_command_error("读取回收站文件夹作用域", error))?);
+                    ids.push(
+                        row.map_err(|error| to_command_error("读取回收站文件夹作用域", error))?,
+                    );
                 }
                 ids
             };
             let scope_folder_set = scope_folder_ids.iter().copied().collect::<BTreeSet<_>>();
 
-            let scope_note_ids = fetch_note_ids_for_trash_scope(&transaction, TrashEntityType::Folder, item_id)?;
+            let scope_note_ids =
+                fetch_note_ids_for_trash_scope(&transaction, TrashEntityType::Folder, item_id)?;
 
-            let (target_notebook_id, target_parent_folder_id, restored_to_original_location, used_recovery) =
-                if original_notebook_available && original_parent_available {
-                    (original_notebook_id.unwrap(), original_parent_folder_id, true, false)
-                } else if original_notebook_available {
-                    (original_notebook_id.unwrap(), None, false, false)
-                } else {
-                    let recovery_notebook_id = ensure_recovery_notebook(&transaction)?;
-                    (recovery_notebook_id, None, false, true)
-                };
+            let (
+                target_notebook_id,
+                target_parent_folder_id,
+                restored_to_original_location,
+                used_recovery,
+            ) = if original_notebook_available && original_parent_available {
+                (
+                    original_notebook_id.unwrap(),
+                    original_parent_folder_id,
+                    true,
+                    false,
+                )
+            } else if original_notebook_available {
+                (original_notebook_id.unwrap(), None, false, false)
+            } else {
+                let recovery_notebook_id = ensure_recovery_notebook(&transaction)?;
+                (recovery_notebook_id, None, false, true)
+            };
 
             for folder_id in &scope_folder_ids {
                 let next_parent = if *folder_id == item_id {
@@ -5652,7 +5691,8 @@ fn restore_trashed_item_tx_internal(
                 .map_err(|error| to_command_error("读取回收站文件夹作用域", error))?;
             let mut scope_folder_ids = Vec::new();
             for row in scope_folder_rows {
-                scope_folder_ids.push(row.map_err(|error| to_command_error("读取回收站文件夹作用域", error))?);
+                scope_folder_ids
+                    .push(row.map_err(|error| to_command_error("读取回收站文件夹作用域", error))?);
             }
 
             transaction
@@ -5743,7 +5783,8 @@ fn purge_trashed_item_tx_internal<R: Runtime>(
 ) -> Result<(), String> {
     ensure_note_search_ready_internal(connection)?;
     ensure_trashed_root_state(connection, item_type, item_id)?;
-    let candidate_paths = collect_managed_resource_paths_for_trash_root(connection, item_type, item_id)?;
+    let candidate_paths =
+        collect_managed_resource_paths_for_trash_root(connection, item_type, item_id)?;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| to_command_error("开启永久删除回收站项目事务", error))?;
@@ -5758,7 +5799,11 @@ fn purge_trashed_item_tx_internal<R: Runtime>(
         }
         TrashEntityType::Notebook => {
             let recovery_notebook_id = ensure_recovery_notebook(&transaction)?;
-            detach_preserved_trash_roots_for_notebook_purge(&transaction, item_id, recovery_notebook_id)?;
+            detach_preserved_trash_roots_for_notebook_purge(
+                &transaction,
+                item_id,
+                recovery_notebook_id,
+            )?;
             delete_notebook_tx_in_transaction(&transaction, item_id)?;
         }
     }
@@ -6271,24 +6316,23 @@ mod tests {
         create_note_tx_internal, create_notebook_tx_internal, create_review_plan_tx_internal,
         delete_folder_tx_internal, delete_note_tx_internal, delete_notebook_tx_internal,
         delete_review_plan_tx_internal, duplicate_note_above_tx_internal, ensure_app_meta_table,
-        ensure_note_search_ready_internal, ensure_note_search_table, ensure_recovery_notebook,
-        ensure_notebook_tree_constraints_tx_internal, ensure_review_feature_ready_internal,
-        extract_indexable_plain_text, extract_managed_resource_path_from_text,
-        extract_note_image_resource_paths, extract_tag_name, fetch_folder_trash_state,
-        fetch_note_trash_state, get_note_review_schedule_tx_internal,
-        get_review_schedule_dirty_note_ids, list_trash_roots_tx_internal,
-        move_folder_to_notebook_top_tx_internal, move_folder_to_trash_tx_internal,
-        move_note_to_trash_tx_internal, move_note_tx_internal, normalize_managed_resource_path,
-        normalize_tag_color, restore_trashed_item_tx_internal,
-        rebuild_note_search_index_internal, rename_review_plan_tx_internal,
-        reorder_folders_tx_internal, reorder_notebooks_tx_internal,
-        save_note_content_with_tags_tx_internal, save_note_review_schedule_tx_internal,
-        set_note_review_schedule_dirty_tx_internal, set_review_task_completed_tx_internal,
-        today_local_date_key, update_notebook_cover_image_tx_internal,
-        update_review_schedule_dirty_note_id, ManagedResourceCleanupResult,
-        ManagedResourceTrashSource, NoteTagOccurrenceInput, TrashEntityType,
-        APP_META_KEY_REVIEW_FEATURE_REBUILD_V1_DONE, APP_META_KEY_REVIEW_SCHEDULE_DIRTY_NOTE_IDS,
-        DEFAULT_REVIEW_PLAN_NAME, DEFAULT_TAG_COLOR,
+        ensure_note_search_ready_internal, ensure_note_search_table,
+        ensure_notebook_tree_constraints_tx_internal, ensure_recovery_notebook,
+        ensure_review_feature_ready_internal, extract_indexable_plain_text,
+        extract_managed_resource_path_from_text, extract_note_image_resource_paths,
+        extract_tag_name, fetch_folder_trash_state, fetch_note_trash_state,
+        get_note_review_schedule_tx_internal, get_review_schedule_dirty_note_ids,
+        list_trash_roots_tx_internal, move_folder_to_notebook_top_tx_internal,
+        move_folder_to_trash_tx_internal, move_note_to_trash_tx_internal, move_note_tx_internal,
+        normalize_managed_resource_path, normalize_tag_color, rebuild_note_search_index_internal,
+        rename_review_plan_tx_internal, reorder_folders_tx_internal, reorder_notebooks_tx_internal,
+        restore_trashed_item_tx_internal, save_note_content_with_tags_tx_internal,
+        save_note_review_schedule_tx_internal, set_note_review_schedule_dirty_tx_internal,
+        set_review_task_completed_tx_internal, today_local_date_key,
+        update_notebook_cover_image_tx_internal, update_review_schedule_dirty_note_id,
+        ManagedResourceCleanupResult, ManagedResourceTrashSource, NoteTagOccurrenceInput,
+        TrashEntityType, APP_META_KEY_REVIEW_FEATURE_REBUILD_V1_DONE,
+        APP_META_KEY_REVIEW_SCHEDULE_DIRTY_NOTE_IDS, DEFAULT_REVIEW_PLAN_NAME, DEFAULT_TAG_COLOR,
     };
     use chrono::Local;
     use rusqlite::{params, Connection};
@@ -10043,9 +10087,8 @@ mod tests {
 
         move_note_to_trash_tx_internal(&mut connection, 2).expect("trash note root");
         move_folder_to_trash_tx_internal(&mut connection, 1).expect("trash folder root");
-        let restore =
-            restore_trashed_item_tx_internal(&mut connection, TrashEntityType::Folder, 1)
-                .expect("restore folder root");
+        let restore = restore_trashed_item_tx_internal(&mut connection, TrashEntityType::Folder, 1)
+            .expect("restore folder root");
 
         assert_eq!(restore.restored_entity_type, "folder");
         assert!(restore.restored_to_original_location);
@@ -10084,7 +10127,8 @@ mod tests {
             .expect("insert note");
 
         move_note_to_trash_tx_internal(&mut connection, 1).expect("trash note");
-        let recovery_notebook_id = ensure_recovery_notebook(&connection).expect("ensure recovery notebook");
+        let recovery_notebook_id =
+            ensure_recovery_notebook(&connection).expect("ensure recovery notebook");
         connection
             .execute(
                 "
@@ -10097,9 +10141,8 @@ mod tests {
             .expect("detach note to recovery notebook");
         delete_notebook_tx_internal(&mut connection, 1).expect("delete original notebook");
 
-        let restore =
-            restore_trashed_item_tx_internal(&mut connection, TrashEntityType::Note, 1)
-                .expect("restore note");
+        let restore = restore_trashed_item_tx_internal(&mut connection, TrashEntityType::Note, 1)
+            .expect("restore note");
 
         assert!(!restore.restored_to_original_location);
         assert_eq!(restore.target_notebook_id, recovery_notebook_id);

@@ -5,15 +5,16 @@ mod settings_backup;
 use database_ops::{
     activate_note_review_schedule_tx, add_tag_to_note_by_name_tx,
     cleanup_expired_review_schedules_tx, cleanup_expired_trash_tx,
-    cleanup_unreferenced_managed_resources,
-    clear_note_review_schedule_tx, clear_notebook_cover_image_tx, create_folder_tx, create_note_tx,
-    create_notebook_tx, delete_folder_tx, delete_note_tx, delete_notebook_tx, duplicate_note_above_tx,
+    cleanup_unreferenced_managed_resources, clear_note_review_schedule_tx,
+    clear_notebook_cover_image_tx, create_folder_tx, create_note_tx, create_notebook_tx,
+    delete_folder_tx, delete_note_tx, delete_notebook_tx, duplicate_note_above_tx,
     ensure_note_search_ready, ensure_notebook_tree_constraints_tx, ensure_review_feature_ready_tx,
-    get_note_review_schedule_tx, list_trash_roots_tx, move_folder_to_notebook_top_tx, move_folder_to_trash_tx,
-    move_note_to_trash_tx, move_note_tx, move_notebook_to_trash_tx, purge_trashed_item_tx,
-    remove_tag_from_note_tx, rename_note_tx, reorder_folders_tx, reorder_notebooks_tx,
-    restore_trashed_item_tx, save_note_content_with_tags_tx, save_note_review_schedule_tx,
-    set_note_review_schedule_dirty_tx, update_note_content_tx, update_notebook_cover_image_tx,
+    get_note_review_schedule_tx, list_trash_roots_tx, move_folder_to_notebook_top_tx,
+    move_folder_to_trash_tx, move_note_to_trash_tx, move_note_tx, move_notebook_to_trash_tx,
+    purge_trashed_item_tx, remove_tag_from_note_tx, rename_note_tx, reorder_folders_tx,
+    reorder_notebooks_tx, restore_trashed_item_tx, save_note_content_with_tags_tx,
+    save_note_review_schedule_tx, set_note_review_schedule_dirty_tx, update_note_content_tx,
+    update_notebook_cover_image_tx,
 };
 use resource_ops::{
     clear_managed_resource_session_leases, delete_managed_resource, ensure_resource_directories,
@@ -27,7 +28,107 @@ use settings_backup::{
     recover_incomplete_restore_if_needed, restore_backup, save_app_settings,
     select_restore_backup_file, BackupOperationLock,
 };
+use tauri::{AppHandle, Manager, PhysicalSize, RunEvent, WebviewWindow, WindowEvent};
 use tauri_plugin_sql::{Migration, MigrationKind};
+
+const MAIN_WINDOW_LABEL: &str = "main";
+const WINDOW_MARGIN_PX: u32 = 96;
+const MIN_WINDOW_WIDTH: u32 = 1320;
+const MIN_WINDOW_HEIGHT: u32 = 820;
+
+fn resize_and_center_main_window(window: &WebviewWindow) {
+    println!("[window] setup: found main window");
+
+    let monitor = match window.current_monitor() {
+        Ok(Some(monitor)) => {
+            println!("[window] setup: using current monitor");
+            Some(monitor)
+        }
+        Ok(None) => {
+            println!("[window] setup: current monitor unavailable, trying primary monitor");
+            match window.primary_monitor() {
+                Ok(primary_monitor) => primary_monitor,
+                Err(error) => {
+                    eprintln!("[window] setup: failed to query primary monitor: {error}");
+                    None
+                }
+            }
+        }
+        Err(error) => {
+            eprintln!("[window] setup: failed to query current monitor: {error}");
+            match window.primary_monitor() {
+                Ok(primary_monitor) => primary_monitor,
+                Err(primary_error) => {
+                    eprintln!(
+                        "[window] setup: failed to query primary monitor after current monitor error: {primary_error}"
+                    );
+                    None
+                }
+            }
+        }
+    };
+
+    let Some(monitor) = monitor else {
+        eprintln!("[window] setup: no monitor available, skip dynamic sizing");
+        return;
+    };
+
+    let work_area = monitor.work_area();
+    println!(
+        "[window] setup: monitor={:?} scale_factor={} work_area=({}, {}) {}x{}",
+        monitor.name(),
+        monitor.scale_factor(),
+        work_area.position.x,
+        work_area.position.y,
+        work_area.size.width,
+        work_area.size.height
+    );
+
+    let target_width = work_area
+        .size
+        .width
+        .saturating_sub(WINDOW_MARGIN_PX)
+        .clamp(MIN_WINDOW_WIDTH, work_area.size.width);
+    let target_height = work_area
+        .size
+        .height
+        .saturating_sub(WINDOW_MARGIN_PX)
+        .clamp(MIN_WINDOW_HEIGHT, work_area.size.height);
+
+    println!(
+        "[window] setup: computed target size={}x{}",
+        target_width, target_height
+    );
+
+    match window.set_size(PhysicalSize::new(target_width, target_height)) {
+        Ok(_) => println!("[window] setup: set_size success"),
+        Err(error) => eprintln!("[window] setup: set_size failed: {error}"),
+    }
+
+    match window.center() {
+        Ok(_) => println!("[window] setup: center success"),
+        Err(error) => eprintln!("[window] setup: center failed: {error}"),
+    }
+}
+
+fn show_and_focus_main_window<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str) {
+    println!("[window] {reason}: attempting to show + focus main window");
+
+    let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
+        eprintln!("[window] {reason}: main window not found");
+        return;
+    };
+
+    match window.show() {
+        Ok(_) => println!("[window] {reason}: show success"),
+        Err(error) => eprintln!("[window] {reason}: show failed: {error}"),
+    }
+
+    match window.set_focus() {
+        Ok(_) => println!("[window] {reason}: set_focus success"),
+        Err(error) => eprintln!("[window] {reason}: set_focus failed: {error}"),
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -88,13 +189,39 @@ pub fn run() {
         },
     ];
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .manage(BackupOperationLock::default())
         .manage(ManagedResourceLeaseState::default())
         .setup(|app| {
+            println!("[window] setup: begin");
             recover_incomplete_restore_if_needed(app.handle())
                 .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+
+            if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+                resize_and_center_main_window(&window);
+            } else {
+                eprintln!("[window] setup: main window not found");
+            }
+
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if window.label() != MAIN_WINDOW_LABEL {
+                return;
+            }
+
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                println!("[window] event: received CloseRequested for main window");
+                println!("[window] event: calling prevent_close");
+                api.prevent_close();
+                println!("[window] event: prevent_close invoked");
+
+                println!("[window] event: calling hide");
+                match window.hide() {
+                    Ok(_) => println!("[window] event: hide success"),
+                    Err(error) => eprintln!("[window] event: hide failed: {error}"),
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             load_app_settings,
@@ -159,6 +286,18 @@ pub fn run() {
                 .add_migrations("sqlite:fight-notes.db", migrations)
                 .build(),
         )
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|app_handle, event| {
+        #[cfg(target_os = "macos")]
+        if let RunEvent::Reopen {
+            has_visible_windows,
+            ..
+        } = event
+        {
+            println!("[window] macos reopen: has_visible_windows={has_visible_windows}");
+            show_and_focus_main_window(app_handle, "macos reopen");
+        }
+    });
 }

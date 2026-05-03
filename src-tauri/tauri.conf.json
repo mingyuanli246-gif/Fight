@@ -16,6 +16,8 @@
         "title": "本地笔记",
         "width": 1440,
         "height": 900,
+        "fullscreen": false,
+        "maximized": false,
         "minWidth": 1320,
         "minHeight": 820
       }
