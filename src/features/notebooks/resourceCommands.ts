@@ -44,6 +44,39 @@ export interface ManagedResourceCleanupResult {
   failed: ManagedResourceCleanupFailure[];
 }
 
+export type OrphanResourceKind = "image" | "cover";
+
+export interface OrphanResourceItem {
+  resourcePath: string;
+  absolutePath?: string | null;
+  kind: OrphanResourceKind;
+  sizeBytes: number;
+  extension?: string | null;
+  source?: string | null;
+}
+
+export interface OrphanResourceSkippedFile {
+  path: string;
+  reason: string;
+}
+
+export interface OrphanResourceScanResult {
+  items: OrphanResourceItem[];
+  totalCount: number;
+  totalBytes: number;
+  skippedFiles: OrphanResourceSkippedFile[];
+  warnings: string[];
+}
+
+export interface OrphanResourceCleanupResult {
+  dryRun: boolean;
+  items: OrphanResourceItem[];
+  totalCount: number;
+  totalBytes: number;
+  movedToTrashCount: number;
+  failed: OrphanResourceSkippedFile[];
+}
+
 export type ResourceTrashKind = "image" | "cover";
 
 export interface ResourceTrashListItem {
@@ -124,12 +157,37 @@ export async function deleteManagedResource(resourcePath: string) {
 
 export async function cleanupUnreferencedManagedResources() {
   try {
+    // Legacy compatibility wrapper. New callers should use the explicit
+    // scanOrphanResources / cleanupOrphanResources command chain.
     return await invoke<ManagedResourceCleanupResult>(
       "cleanup_unreferenced_managed_resources",
     );
   } catch (error) {
     throw new Error(
       getCommandErrorMessage(error, "孤儿图片资源清理失败，请稍后重试。"),
+    );
+  }
+}
+
+export async function scanOrphanResources() {
+  try {
+    return await invoke<OrphanResourceScanResult>("scan_orphan_image_resources");
+  } catch (error) {
+    throw new Error(
+      getCommandErrorMessage(error, "扫描孤儿图片资源失败，请稍后重试。"),
+    );
+  }
+}
+
+export async function cleanupOrphanResources(dryRun: boolean) {
+  try {
+    return await invoke<OrphanResourceCleanupResult>(
+      "cleanup_orphan_image_resources",
+      { dryRun },
+    );
+  } catch (error) {
+    throw new Error(
+      getCommandErrorMessage(error, "清理孤儿图片资源失败，请稍后重试。"),
     );
   }
 }

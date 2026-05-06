@@ -47,7 +47,6 @@ import type { NoteEditorPaneRef } from "./NoteEditorPane";
 import { NotebookDetailWorkspace } from "./NotebookDetailWorkspace";
 import { NotebookHomeWorkspace } from "./NotebookHomeWorkspace";
 import {
-  cleanupUnreferencedManagedResources,
   deleteManagedResource,
   ensureResourceDirectories,
   selectAndImportImage,
@@ -669,9 +668,10 @@ export const NotebookWorkspace = forwardRef<
       await initializeNotebookDatabase();
       await ensureReviewFeatureReady();
       await syncWorkspace();
-      void cleanupUnreferencedManagedResources().catch((error) => {
-        console.warn("[notebooks.resources] 保守清理孤儿图片失败", error);
-      });
+      // Do not automatically clean managed image resources during app startup.
+      // Formal resources may belong to restorable trash notes or unsaved editor
+      // sessions. Orphan cleanup will be handled by an explicit
+      // scan/dry-run/cleanup flow.
       setShellMode("home");
     } catch (error) {
       setInitializationError(getErrorMessage(error));

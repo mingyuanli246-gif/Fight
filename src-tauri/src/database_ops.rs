@@ -7,7 +7,8 @@ use chrono::{Duration as ChronoDuration, Local, NaiveDate, SecondsFormat, Utc};
 use percent_encoding::percent_decode_str;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
+use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 use tauri::{AppHandle, Manager, Runtime};
@@ -172,10 +173,21 @@ pub struct ManagedResourceCleanupResult {
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum OrphanResourceKind {
+    Image,
+    Cover,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct OrphanImageFileRecord {
     pub resource_path: String,
+    pub absolute_path: Option<String>,
+    pub kind: OrphanResourceKind,
     pub size_bytes: u64,
+    pub extension: Option<String>,
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq, Eq)]
@@ -188,10 +200,9 @@ pub struct OrphanImageSkippedFile {
 #[derive(Debug, Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct OrphanImageScanResult {
-    pub total_image_files: usize,
-    pub referenced_image_files: usize,
-    pub orphan_image_files: Vec<OrphanImageFileRecord>,
-    pub orphan_total_bytes: u64,
+    pub items: Vec<OrphanImageFileRecord>,
+    pub total_count: usize,
+    pub total_bytes: u64,
     pub skipped_files: Vec<OrphanImageSkippedFile>,
     pub warnings: Vec<String>,
 }
@@ -200,10 +211,11 @@ pub struct OrphanImageScanResult {
 #[serde(rename_all = "camelCase")]
 pub struct OrphanImageCleanupResult {
     pub dry_run: bool,
-    pub scan: OrphanImageScanResult,
-    pub deleted_files: Vec<String>,
-    pub deleted_total_bytes: u64,
-    pub failed_files: Vec<OrphanImageSkippedFile>,
+    pub items: Vec<OrphanImageFileRecord>,
+    pub total_count: usize,
+    pub total_bytes: u64,
+    pub moved_to_trash_count: usize,
+    pub failed: Vec<OrphanImageSkippedFile>,
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq, Eq)]
@@ -4980,6 +4992,207 @@ fn collect_managed_resource_file_candidates(
     }
 }
 
+fn orphan_resource_kind_for_path(resource_path: &str) -> Result<OrphanResourceKind, String> {
+    if resource_path.starts_with("resources/images/") {
+        return Ok(OrphanResourceKind::Image);
+    }
+
+    if resource_path.starts_with("resources/covers/") {
+        return Ok(OrphanResourceKind::Cover);
+    }
+
+    Err("资源路径无效。".to_string())
+}
+
+fn orphan_resource_extension_for_path(resource_path: &str) -> Option<String> {
+    Path::new(resource_path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+}
+
+fn should_skip_orphan_scan_file(entry_path: &Path) -> Option<&'static str> {
+    let file_name = entry_path.file_name()?.to_str()?;
+
+    if file_name.ends_with(".creating") {
+        return Some("临时创建文件不参与正式资源治理。");
+    }
+
+    None
+}
+
+fn scan_orphan_directory(
+    root: &Path,
+    directory_name: &str,
+    live_resource_paths: &BTreeSet<String>,
+    leased_resource_paths: &BTreeSet<String>,
+    items: &mut Vec<OrphanImageFileRecord>,
+    skipped_files: &mut Vec<OrphanImageSkippedFile>,
+) -> Result<(), String> {
+    let directory_path = root.join(directory_name);
+
+    if !directory_path.exists() {
+        return Ok(());
+    }
+
+    for entry in WalkDir::new(&directory_path).min_depth(1) {
+        let entry = entry.map_err(|error| format!("遍历资源目录失败：{error}"))?;
+
+        if entry.file_type().is_symlink() {
+            skipped_files.push(OrphanImageSkippedFile {
+                path: entry.path().to_string_lossy().to_string(),
+                reason: "符号链接不参与正式资源治理。".to_string(),
+            });
+            continue;
+        }
+
+        if !entry.file_type().is_file() {
+            skipped_files.push(OrphanImageSkippedFile {
+                path: entry.path().to_string_lossy().to_string(),
+                reason: "仅扫描正式资源文件。".to_string(),
+            });
+            continue;
+        }
+
+        if let Some(reason) = should_skip_orphan_scan_file(entry.path()) {
+            skipped_files.push(OrphanImageSkippedFile {
+                path: entry.path().to_string_lossy().to_string(),
+                reason: reason.to_string(),
+            });
+            continue;
+        }
+
+        let resource_path = match managed_resource_path_from_absolute_path(root, entry.path()) {
+            Ok(resource_path) => resource_path,
+            Err(error) => {
+                skipped_files.push(OrphanImageSkippedFile {
+                    path: entry.path().to_string_lossy().to_string(),
+                    reason: error,
+                });
+                continue;
+            }
+        };
+
+        if !is_app_managed_image_resource_path(&resource_path) {
+            skipped_files.push(OrphanImageSkippedFile {
+                path: entry.path().to_string_lossy().to_string(),
+                reason: "仅扫描应用托管的正式图片资源。".to_string(),
+            });
+            continue;
+        }
+
+        if leased_resource_paths.contains(&resource_path) || live_resource_paths.contains(&resource_path)
+        {
+            continue;
+        }
+
+        let metadata = fs::metadata(entry.path())
+            .map_err(|error| format!("读取资源文件信息失败：{error}"))?;
+        let kind = orphan_resource_kind_for_path(&resource_path)?;
+        items.push(OrphanImageFileRecord {
+            resource_path,
+            absolute_path: Some(entry.path().to_string_lossy().to_string()),
+            kind,
+            size_bytes: metadata.len(),
+            extension: orphan_resource_extension_for_path(
+                &entry.path().to_string_lossy(),
+            ),
+            source: None,
+        });
+    }
+
+    Ok(())
+}
+
+fn scan_orphan_image_resources_internal(
+    root: &Path,
+    connection: &Connection,
+    leased_resource_paths: &BTreeSet<String>,
+) -> Result<OrphanImageScanResult, String> {
+    let live_resource_paths = list_live_managed_resource_paths(connection)?;
+    let mut items = Vec::new();
+    let mut skipped_files = Vec::new();
+
+    scan_orphan_directory(
+        root,
+        "resources/images",
+        &live_resource_paths,
+        leased_resource_paths,
+        &mut items,
+        &mut skipped_files,
+    )?;
+    scan_orphan_directory(
+        root,
+        "resources/covers",
+        &live_resource_paths,
+        leased_resource_paths,
+        &mut items,
+        &mut skipped_files,
+    )?;
+
+    let total_bytes = items.iter().map(|item| item.size_bytes).sum();
+    let total_count = items.len();
+
+    Ok(OrphanImageScanResult {
+        items,
+        total_count,
+        total_bytes,
+        skipped_files,
+        warnings: Vec::new(),
+    })
+}
+
+fn cleanup_orphan_image_resources_internal(
+    root: &Path,
+    connection: &Connection,
+    leased_resource_paths: &BTreeSet<String>,
+    dry_run: bool,
+) -> Result<OrphanImageCleanupResult, String> {
+    let scan = scan_orphan_image_resources_internal(root, connection, leased_resource_paths)?;
+
+    if dry_run {
+        return Ok(OrphanImageCleanupResult {
+            dry_run: true,
+            items: scan.items,
+            total_count: scan.total_count,
+            total_bytes: scan.total_bytes,
+            moved_to_trash_count: 0,
+            failed: Vec::new(),
+        });
+    }
+
+    let mut moved_to_trash_count = 0;
+    let mut failed = Vec::new();
+
+    for item in &scan.items {
+        match move_managed_resource_to_trash(
+            root,
+            &item.resource_path,
+            ManagedResourceTrashSource::OrphanCleanup,
+            None,
+        ) {
+            Ok(()) => {
+                moved_to_trash_count += 1;
+            }
+            Err(error) => {
+                failed.push(OrphanImageSkippedFile {
+                    path: item.resource_path.clone(),
+                    reason: error,
+                });
+            }
+        }
+    }
+
+    Ok(OrphanImageCleanupResult {
+        dry_run: false,
+        items: scan.items,
+        total_count: scan.total_count,
+        total_bytes: scan.total_bytes,
+        moved_to_trash_count,
+        failed,
+    })
+}
+
 fn cleanup_unreferenced_managed_resources_internal(
     root: &Path,
     connection: &Connection,
@@ -5809,15 +6022,13 @@ fn restore_trashed_item_tx_internal(
 }
 
 fn purge_trashed_item_tx_internal<R: Runtime>(
-    app: &AppHandle<R>,
+    _app: &AppHandle<R>,
     connection: &mut Connection,
     item_type: TrashEntityType,
     item_id: i64,
 ) -> Result<(), String> {
     ensure_note_search_ready_internal(connection)?;
     ensure_trashed_root_state(connection, item_type, item_id)?;
-    let candidate_paths =
-        collect_managed_resource_paths_for_trash_root(connection, item_type, item_id)?;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| to_command_error("开启永久删除回收站项目事务", error))?;
@@ -5844,14 +6055,6 @@ fn purge_trashed_item_tx_internal<R: Runtime>(
     transaction
         .commit()
         .map_err(|error| to_command_error("提交永久删除回收站项目事务", error))?;
-
-    cleanup_unreferenced_managed_resources_best_effort(
-        app,
-        connection,
-        &candidate_paths,
-        ManagedResourceTrashSource::OrphanCleanup,
-        None,
-    );
     Ok(())
 }
 
@@ -6132,36 +6335,14 @@ pub fn cleanup_expired_trash_tx(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub fn delete_notebook_tx(app: AppHandle, notebook_id: i64) -> Result<(), String> {
     let mut connection = open_database_connection(&app)?;
-    let candidate_paths = collect_managed_resource_paths_for_notebook(&connection, notebook_id)?;
     delete_notebook_tx_internal(&mut connection, notebook_id)?;
-    // This path is for permanent deletion only. If the product later gains notebook trash / soft
-    // delete semantics, that flow must keep the notebook rows and skip this orphan cleanup so note
-    // bodies and their resources remain restorable together.
-    cleanup_unreferenced_managed_resources_best_effort(
-        &app,
-        &connection,
-        &candidate_paths,
-        ManagedResourceTrashSource::OrphanCleanup,
-        None,
-    );
     Ok(())
 }
 
 #[tauri::command]
 pub fn delete_folder_tx(app: AppHandle, folder_id: i64) -> Result<(), String> {
     let mut connection = open_database_connection(&app)?;
-    let candidate_paths =
-        collect_managed_resource_paths_for_folder_subtree(&connection, folder_id)?;
     delete_folder_tx_internal(&mut connection, folder_id)?;
-    // This path is for permanent deletion only. A future folder trash / soft delete flow must not
-    // reuse it, otherwise note-body resources could be cleaned up before the folder is restored.
-    cleanup_unreferenced_managed_resources_best_effort(
-        &app,
-        &connection,
-        &candidate_paths,
-        ManagedResourceTrashSource::OrphanCleanup,
-        None,
-    );
     Ok(())
 }
 
@@ -6172,22 +6353,8 @@ pub fn update_notebook_cover_image_tx(
     cover_image_path: String,
 ) -> Result<NotebookRecord, String> {
     let mut connection = open_database_connection(&app)?;
-    let previous_cover_path = fetch_notebook_cover_image_path(&connection, notebook_id)?;
     let notebook =
         update_notebook_cover_image_tx_internal(&mut connection, notebook_id, &cover_image_path)?;
-
-    if let Some(previous_cover_path) = previous_cover_path {
-        if notebook.cover_image_path.as_deref() != Some(previous_cover_path.as_str()) {
-            cleanup_unreferenced_managed_resources_best_effort(
-                &app,
-                &connection,
-                &[previous_cover_path],
-                ManagedResourceTrashSource::Cover,
-                None,
-            );
-        }
-    }
-
     Ok(notebook)
 }
 
@@ -6197,19 +6364,7 @@ pub fn clear_notebook_cover_image_tx(
     notebook_id: i64,
 ) -> Result<NotebookRecord, String> {
     let mut connection = open_database_connection(&app)?;
-    let previous_cover_path = fetch_notebook_cover_image_path(&connection, notebook_id)?;
     let notebook = clear_notebook_cover_image_tx_internal(&mut connection, notebook_id)?;
-
-    if let Some(previous_cover_path) = previous_cover_path {
-        cleanup_unreferenced_managed_resources_best_effort(
-            &app,
-            &connection,
-            &[previous_cover_path],
-            ManagedResourceTrashSource::Cover,
-            None,
-        );
-    }
-
     Ok(notebook)
 }
 
@@ -6237,36 +6392,15 @@ pub fn save_note_content_with_tags_tx(
     occurrences: Vec<NoteTagOccurrenceInput>,
 ) -> Result<NoteRecord, String> {
     let mut connection = open_database_connection(&app)?;
-    let previous_resource_paths = collect_managed_resource_paths_for_note(&connection, note_id)?;
     let saved_note =
         save_note_content_with_tags_tx_internal(&mut connection, note_id, &content, &occurrences)?;
-
-    // Keep cleanup inline. Callers should not observe a successful save before the post-commit
-    // orphan check for removed note-body images finishes.
-    cleanup_removed_note_resources_after_save_best_effort(
-        &app,
-        &connection,
-        previous_resource_paths,
-        note_id,
-    );
-
     Ok(saved_note)
 }
 
 #[tauri::command]
 pub fn delete_note_tx(app: AppHandle, note_id: i64) -> Result<(), String> {
     let mut connection = open_database_connection(&app)?;
-    let candidate_paths = collect_managed_resource_paths_for_note(&connection, note_id)?;
     delete_note_tx_internal(&mut connection, note_id)?;
-    // This path is for permanent deletion only. A future note trash / soft delete flow must not
-    // call this orphan cleanup until the note is truly purged from storage.
-    cleanup_unreferenced_managed_resources_best_effort(
-        &app,
-        &connection,
-        &candidate_paths,
-        ManagedResourceTrashSource::OrphanCleanup,
-        None,
-    );
     Ok(())
 }
 
@@ -6274,16 +6408,38 @@ pub fn delete_note_tx(app: AppHandle, note_id: i64) -> Result<(), String> {
 pub fn cleanup_unreferenced_managed_resources(
     app: AppHandle,
 ) -> Result<ManagedResourceCleanupResult, String> {
+    let result = cleanup_orphan_image_resources(app, false)?;
+    Ok(ManagedResourceCleanupResult {
+        deleted_count: 0,
+        moved_to_trash_count: result.moved_to_trash_count,
+        failed: result
+            .failed
+            .into_iter()
+            .map(|failure| ManagedResourceCleanupFailure {
+                resource_path: failure.path,
+                message: failure.reason,
+            })
+            .collect(),
+    })
+}
+
+#[tauri::command]
+pub fn scan_orphan_image_resources(app: AppHandle) -> Result<OrphanImageScanResult, String> {
     let connection = open_database_connection(&app)?;
     let root = resolve_app_root(&app)?;
     let leased_resource_paths = snapshot_managed_resource_session_leases(&app);
-    cleanup_unreferenced_managed_resources_internal_with_leases(
-        &root,
-        &connection,
-        &leased_resource_paths,
-        ManagedResourceTrashSource::OrphanCleanup,
-        None,
-    )
+    scan_orphan_image_resources_internal(&root, &connection, &leased_resource_paths)
+}
+
+#[tauri::command]
+pub fn cleanup_orphan_image_resources(
+    app: AppHandle,
+    dry_run: bool,
+) -> Result<OrphanImageCleanupResult, String> {
+    let connection = open_database_connection(&app)?;
+    let root = resolve_app_root(&app)?;
+    let leased_resource_paths = snapshot_managed_resource_session_leases(&app);
+    cleanup_orphan_image_resources_internal(&root, &connection, &leased_resource_paths, dry_run)
 }
 
 #[tauri::command]
@@ -6340,7 +6496,6 @@ mod tests {
         bind_review_plan_to_note_tx_internal,
         cleanup_candidate_unreferenced_managed_resources_with_leases,
         cleanup_expired_review_schedules, cleanup_removed_note_resources_after_save,
-        cleanup_removed_note_resources_after_save_with_leases,
         cleanup_unreferenced_managed_resources_internal,
         cleanup_unreferenced_managed_resources_internal_with_leases,
         clear_note_review_schedule_tx_internal, clear_notebook_cover_image_tx_internal,
@@ -6360,11 +6515,14 @@ mod tests {
         normalize_managed_resource_path, normalize_tag_color, rebuild_note_search_index_internal,
         rename_review_plan_tx_internal, reorder_folders_tx_internal, reorder_notebooks_tx_internal,
         restore_trashed_item_tx_internal, save_note_content_with_tags_tx_internal,
+        scan_orphan_image_resources_internal,
         save_note_review_schedule_tx_internal, set_note_review_schedule_dirty_tx_internal,
         set_review_task_completed_tx_internal, today_local_date_key,
         update_notebook_cover_image_tx_internal, update_review_schedule_dirty_note_id,
-        ManagedResourceCleanupResult, ManagedResourceTrashSource, NoteTagOccurrenceInput,
-        TrashEntityType, APP_META_KEY_REVIEW_FEATURE_REBUILD_V1_DONE,
+        cleanup_orphan_image_resources_internal, ManagedResourceCleanupResult,
+        ManagedResourceTrashSource, NoteTagOccurrenceInput, OrphanImageCleanupResult,
+        OrphanImageFileRecord, OrphanImageScanResult, OrphanResourceKind, TrashEntityType,
+        APP_META_KEY_REVIEW_FEATURE_REBUILD_V1_DONE,
         APP_META_KEY_REVIEW_SCHEDULE_DIRTY_NOTE_IDS, DEFAULT_REVIEW_PLAN_NAME, DEFAULT_TAG_COLOR,
     };
     use chrono::Local;
@@ -6641,6 +6799,24 @@ mod tests {
         );
     }
 
+    fn orphan_record(
+        root: &Path,
+        resource_path: &str,
+        kind: OrphanResourceKind,
+    ) -> OrphanImageFileRecord {
+        OrphanImageFileRecord {
+            resource_path: resource_path.to_string(),
+            absolute_path: Some(root.join(resource_path).to_string_lossy().to_string()),
+            kind,
+            size_bytes: 8,
+            extension: Path::new(resource_path)
+                .extension()
+                .and_then(|value| value.to_str())
+                .map(|value| value.to_ascii_lowercase()),
+            source: None,
+        }
+    }
+
     fn cleanup_candidates_after_resource_grace(
         root: &Path,
         connection: &Connection,
@@ -6686,7 +6862,8 @@ mod tests {
     }
 
     fn scan_orphan_images(root: &Path, connection: &Connection) -> OrphanImageScanResult {
-        scan_orphan_image_resources_internal(root, connection, &BTreeSet::new()).result
+        scan_orphan_image_resources_internal(root, connection, &BTreeSet::new())
+            .expect("scan orphan image resources")
     }
 
     fn scan_orphan_images_with_leases(
@@ -6694,7 +6871,8 @@ mod tests {
         connection: &Connection,
         leased_resource_paths: &BTreeSet<String>,
     ) -> OrphanImageScanResult {
-        scan_orphan_image_resources_internal(root, connection, leased_resource_paths).result
+        scan_orphan_image_resources_internal(root, connection, leased_resource_paths)
+            .expect("scan orphan image resources with leases")
     }
 
     fn cleanup_orphan_images(
@@ -6703,6 +6881,7 @@ mod tests {
         dry_run: bool,
     ) -> OrphanImageCleanupResult {
         cleanup_orphan_image_resources_internal(root, connection, &BTreeSet::new(), dry_run)
+            .expect("cleanup orphan image resources")
     }
 
     fn extract_tag_attribute_legacy(tag: &str, name: &str) -> Option<String> {
@@ -9265,13 +9444,14 @@ mod tests {
         let released_scan = scan_orphan_images(temp_dir.path(), &connection);
 
         assert_eq!(previous_paths, vec![image_path.to_string()]);
-        assert!(leased_scan.orphan_image_files.is_empty());
+        assert!(leased_scan.items.is_empty());
         assert_eq!(
-            released_scan.orphan_image_files,
-            vec![OrphanImageFileRecord {
-                resource_path: image_path.to_string(),
-                size_bytes: 8,
-            }],
+            released_scan.items,
+            vec![orphan_record(
+                temp_dir.path(),
+                image_path,
+                OrphanResourceKind::Image,
+            )],
         );
         assert!(temp_dir.path().join(image_path).is_file());
     }
@@ -9355,8 +9535,8 @@ mod tests {
         let scan = scan_orphan_images(temp_dir.path(), &connection);
 
         assert!(scan.warnings.is_empty());
-        assert!(scan.orphan_image_files.is_empty());
-        assert_eq!(scan.referenced_image_files, 1);
+        assert!(scan.items.is_empty());
+        assert_eq!(scan.total_count, 0);
         assert!(temp_dir.path().join(image_path).is_file());
     }
 
@@ -9394,8 +9574,8 @@ mod tests {
         let scan = scan_orphan_images(temp_dir.path(), &connection);
 
         assert!(scan.warnings.is_empty());
-        assert!(scan.orphan_image_files.is_empty());
-        assert_eq!(scan.referenced_image_files, 1);
+        assert!(scan.items.is_empty());
+        assert_eq!(scan.total_count, 0);
     }
 
     #[test]
@@ -9427,13 +9607,14 @@ mod tests {
         let scan = scan_orphan_images(temp_dir.path(), &connection);
 
         assert_eq!(
-            scan.orphan_image_files,
-            vec![OrphanImageFileRecord {
-                resource_path: image_path.to_string(),
-                size_bytes: 8,
-            }],
+            scan.items,
+            vec![orphan_record(
+                temp_dir.path(),
+                image_path,
+                OrphanResourceKind::Image,
+            )],
         );
-        assert_eq!(scan.orphan_total_bytes, 8);
+        assert_eq!(scan.total_bytes, 8);
     }
 
     #[test]
@@ -9447,21 +9628,21 @@ mod tests {
         let result = cleanup_orphan_images(temp_dir.path(), &connection, true);
 
         assert!(result.dry_run);
-        assert!(result.deleted_files.is_empty());
-        assert_eq!(result.deleted_total_bytes, 0);
-        assert!(result.failed_files.is_empty());
+        assert_eq!(result.moved_to_trash_count, 0);
+        assert!(result.failed.is_empty());
         assert_eq!(
-            result.scan.orphan_image_files,
-            vec![OrphanImageFileRecord {
-                resource_path: orphan_path.to_string(),
-                size_bytes: 8,
-            }],
+            result.items,
+            vec![orphan_record(
+                temp_dir.path(),
+                orphan_path,
+                OrphanResourceKind::Image,
+            )],
         );
         assert!(temp_dir.path().join(orphan_path).is_file());
     }
 
     #[test]
-    fn cleanup_orphan_image_resources_real_run_deletes_only_current_orphans() {
+    fn cleanup_orphan_image_resources_real_run_moves_only_current_orphans_to_trash() {
         let temp_dir = tempdir().expect("create temp dir");
         ensure_test_resource_dirs(temp_dir.path());
         let orphan_path = "resources/images/d1d1d1d1-d1d1-41d1-81d1-d1d1d1d1d1d1.png";
@@ -9492,11 +9673,42 @@ mod tests {
         let result = cleanup_orphan_images(temp_dir.path(), &connection, false);
 
         assert!(!result.dry_run);
-        assert_eq!(result.deleted_files, vec![orphan_path.to_string()]);
-        assert_eq!(result.deleted_total_bytes, 8);
-        assert!(result.failed_files.is_empty());
-        assert_resource_deleted_from_disk(temp_dir.path(), orphan_path);
+        assert_eq!(result.moved_to_trash_count, 1);
+        assert!(result.failed.is_empty());
+        assert_eq!(
+            result.items,
+            vec![orphan_record(
+                temp_dir.path(),
+                orphan_path,
+                OrphanResourceKind::Image,
+            )],
+        );
+        assert_resource_moved_to_trash(temp_dir.path(), orphan_path);
         assert!(temp_dir.path().join(kept_path).is_file());
+    }
+
+    #[test]
+    fn cleanup_orphan_image_resources_real_run_moves_cover_orphan_to_trash() {
+        let temp_dir = tempdir().expect("create temp dir");
+        ensure_test_resource_dirs(temp_dir.path());
+        let orphan_cover_path = "resources/covers/c2c2c2c2-c2c2-42c2-82c2-c2c2c2c2c2c2.png";
+        write_test_resource(temp_dir.path(), orphan_cover_path);
+        let connection = test_connection();
+
+        let result = cleanup_orphan_images(temp_dir.path(), &connection, false);
+
+        assert!(!result.dry_run);
+        assert_eq!(result.moved_to_trash_count, 1);
+        assert!(result.failed.is_empty());
+        assert_eq!(
+            result.items,
+            vec![orphan_record(
+                temp_dir.path(),
+                orphan_cover_path,
+                OrphanResourceKind::Cover,
+            )],
+        );
+        assert_resource_moved_to_trash(temp_dir.path(), orphan_cover_path);
     }
 
     #[test]
@@ -9534,8 +9746,14 @@ mod tests {
 
         let scan = scan_orphan_images(temp_dir.path(), &connection);
 
-        assert!(scan.orphan_image_files.is_empty());
-        assert_eq!(scan.referenced_image_files, 1);
+        assert_eq!(
+            scan.items,
+            vec![orphan_record(
+                temp_dir.path(),
+                cover_path,
+                OrphanResourceKind::Cover,
+            )],
+        );
         assert!(scan
             .skipped_files
             .iter()
@@ -9550,37 +9768,25 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_orphan_image_resources_skips_delete_when_scan_is_ambiguous() {
+    fn cleanup_orphan_image_resources_returns_error_when_scan_fails() {
         let temp_dir = tempdir().expect("create temp dir");
         ensure_test_resource_dirs(temp_dir.path());
         let image_path = "resources/images/f3f3f3f3-f3f3-43f3-83f3-f3f3f3f3f3f3.png";
         write_test_resource(temp_dir.path(), image_path);
 
-        let mut connection = test_connection();
-        connection
-            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
-            .expect("insert notebook");
-        connection
-            .execute(
-                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
-                [],
-            )
-            .expect("insert folder");
-        connection
-            .execute(
-                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', ?1)",
-                ["<p>损坏正文 resources/images/f3f3f3f3-f3f3-43f3-83f3-f3f3f3f3f3f3.png"],
-            )
-            .expect("insert malformed note");
+        let connection = Connection::open_in_memory().expect("open empty sqlite");
+        let error = cleanup_orphan_image_resources_internal(
+            temp_dir.path(),
+            &connection,
+            &BTreeSet::new(),
+            false,
+        )
+        .expect_err("scan failure should abort cleanup");
 
-        let result = cleanup_orphan_images(temp_dir.path(), &connection, false);
-
-        assert!(result.deleted_files.is_empty());
-        assert!(result
-            .scan
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("无法安全确认")));
+        assert!(
+            error.contains("notebooks") || error.contains("读取存活封面引用"),
+            "unexpected cleanup error: {error}"
+        );
         assert!(temp_dir.path().join(image_path).is_file());
     }
 
