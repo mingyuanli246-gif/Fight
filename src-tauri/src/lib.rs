@@ -1,6 +1,7 @@
 mod database_ops;
 mod resource_ops;
 mod settings_backup;
+mod window_state;
 
 use database_ops::{
     activate_note_review_schedule_tx, add_tag_to_note_by_name_tx,
@@ -28,107 +29,14 @@ use settings_backup::{
     recover_incomplete_restore_if_needed, restore_backup, save_app_settings,
     select_restore_backup_file, BackupOperationLock,
 };
-use tauri::{AppHandle, Manager, PhysicalSize, RunEvent, WebviewWindow, WindowEvent};
+use tauri::{Manager, RunEvent, WindowEvent};
 use tauri_plugin_sql::{Migration, MigrationKind};
+use window_state::{
+    apply_saved_or_default_window_state, save_main_window_state, show_and_focus_main_window,
+    WindowLifecycleState,
+};
 
 const MAIN_WINDOW_LABEL: &str = "main";
-const WINDOW_MARGIN_PX: u32 = 96;
-const MIN_WINDOW_WIDTH: u32 = 1320;
-const MIN_WINDOW_HEIGHT: u32 = 820;
-
-fn resize_and_center_main_window(window: &WebviewWindow) {
-    println!("[window] setup: found main window");
-
-    let monitor = match window.current_monitor() {
-        Ok(Some(monitor)) => {
-            println!("[window] setup: using current monitor");
-            Some(monitor)
-        }
-        Ok(None) => {
-            println!("[window] setup: current monitor unavailable, trying primary monitor");
-            match window.primary_monitor() {
-                Ok(primary_monitor) => primary_monitor,
-                Err(error) => {
-                    eprintln!("[window] setup: failed to query primary monitor: {error}");
-                    None
-                }
-            }
-        }
-        Err(error) => {
-            eprintln!("[window] setup: failed to query current monitor: {error}");
-            match window.primary_monitor() {
-                Ok(primary_monitor) => primary_monitor,
-                Err(primary_error) => {
-                    eprintln!(
-                        "[window] setup: failed to query primary monitor after current monitor error: {primary_error}"
-                    );
-                    None
-                }
-            }
-        }
-    };
-
-    let Some(monitor) = monitor else {
-        eprintln!("[window] setup: no monitor available, skip dynamic sizing");
-        return;
-    };
-
-    let work_area = monitor.work_area();
-    println!(
-        "[window] setup: monitor={:?} scale_factor={} work_area=({}, {}) {}x{}",
-        monitor.name(),
-        monitor.scale_factor(),
-        work_area.position.x,
-        work_area.position.y,
-        work_area.size.width,
-        work_area.size.height
-    );
-
-    let target_width = work_area
-        .size
-        .width
-        .saturating_sub(WINDOW_MARGIN_PX)
-        .clamp(MIN_WINDOW_WIDTH, work_area.size.width);
-    let target_height = work_area
-        .size
-        .height
-        .saturating_sub(WINDOW_MARGIN_PX)
-        .clamp(MIN_WINDOW_HEIGHT, work_area.size.height);
-
-    println!(
-        "[window] setup: computed target size={}x{}",
-        target_width, target_height
-    );
-
-    match window.set_size(PhysicalSize::new(target_width, target_height)) {
-        Ok(_) => println!("[window] setup: set_size success"),
-        Err(error) => eprintln!("[window] setup: set_size failed: {error}"),
-    }
-
-    match window.center() {
-        Ok(_) => println!("[window] setup: center success"),
-        Err(error) => eprintln!("[window] setup: center failed: {error}"),
-    }
-}
-
-fn show_and_focus_main_window<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str) {
-    println!("[window] {reason}: attempting to show + focus main window");
-
-    let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
-        eprintln!("[window] {reason}: main window not found");
-        return;
-    };
-
-    match window.show() {
-        Ok(_) => println!("[window] {reason}: show success"),
-        Err(error) => eprintln!("[window] {reason}: show failed: {error}"),
-    }
-
-    match window.set_focus() {
-        Ok(_) => println!("[window] {reason}: set_focus success"),
-        Err(error) => eprintln!("[window] {reason}: set_focus failed: {error}"),
-    }
-}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -192,13 +100,24 @@ pub fn run() {
     let app = tauri::Builder::default()
         .manage(BackupOperationLock::default())
         .manage(ManagedResourceLeaseState::default())
+        .manage(WindowLifecycleState::default())
         .setup(|app| {
             println!("[window] setup: begin");
             recover_incomplete_restore_if_needed(app.handle())
                 .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
 
             if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
-                resize_and_center_main_window(&window);
+                println!("[window] setup: found main window");
+                #[cfg(target_os = "macos")]
+                {
+                    if let Err(error) = apply_saved_or_default_window_state(app.handle(), &window) {
+                        eprintln!("[window] setup: failed to apply window state: {error}");
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let _ = window.set_size(PhysicalSize::new(1440, 900));
+                }
             } else {
                 eprintln!("[window] setup: main window not found");
             }
@@ -212,6 +131,25 @@ pub fn run() {
 
             if let WindowEvent::CloseRequested { api, .. } = event {
                 println!("[window] event: received CloseRequested for main window");
+                let lifecycle_state = window.state::<WindowLifecycleState>();
+                if lifecycle_state.is_quitting() {
+                    println!(
+                        "[window] event: app is quitting, allow close request to continue without hide"
+                    );
+                    return;
+                }
+
+                if let Some(main_window) = window.app_handle().get_webview_window(MAIN_WINDOW_LABEL)
+                {
+                    if let Err(error) = save_main_window_state(window.app_handle(), &main_window) {
+                        eprintln!("[window] event: save before hide failed: {error}");
+                    } else {
+                        println!("[window] event: save before hide success");
+                    }
+                } else {
+                    eprintln!("[window] event: main webview window not found, skip save before hide");
+                }
+
                 println!("[window] event: calling prevent_close");
                 api.prevent_close();
                 println!("[window] event: prevent_close invoked");
@@ -221,6 +159,13 @@ pub fn run() {
                     Ok(_) => println!("[window] event: hide success"),
                     Err(error) => eprintln!("[window] event: hide failed: {error}"),
                 }
+            }
+        })
+        .on_menu_event(|app_handle, event| {
+            #[cfg(target_os = "macos")]
+            if event.id() == "quit" {
+                println!("[window] menu: quit requested, mark app as quitting");
+                app_handle.state::<WindowLifecycleState>().mark_quitting();
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -289,15 +234,32 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
-    app.run(|app_handle, event| {
+    app.run(|app_handle, event| match event {
+        RunEvent::ExitRequested { code, .. } => {
+            #[cfg(target_os = "macos")]
+            {
+                println!("[window] quit: ExitRequested code={code:?}");
+                app_handle.state::<WindowLifecycleState>().mark_quitting();
+                if let Some(window) = app_handle.get_webview_window(MAIN_WINDOW_LABEL) {
+                    if let Err(error) = save_main_window_state(app_handle, &window) {
+                        eprintln!("[window] quit: save before quit failed: {error}");
+                    } else {
+                        println!("[window] quit: save before quit success");
+                    }
+                } else {
+                    eprintln!("[window] quit: main window not found, skip save");
+                }
+                println!("[window] quit: allowing normal app exit");
+            }
+        }
         #[cfg(target_os = "macos")]
-        if let RunEvent::Reopen {
+        RunEvent::Reopen {
             has_visible_windows,
             ..
-        } = event
-        {
+        } => {
             println!("[window] macos reopen: has_visible_windows={has_visible_windows}");
             show_and_focus_main_window(app_handle, "macos reopen");
         }
+        _ => {}
     });
 }

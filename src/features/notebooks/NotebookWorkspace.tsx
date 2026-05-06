@@ -35,6 +35,11 @@ import {
   updateNotebookCoverImage,
 } from "./repository";
 import {
+  hasNotebookUnsavedChanges,
+  shouldPromptReviewScheduleSave,
+  type NotebookLeaveReason,
+} from "./leaveProtection";
+import {
   clearManagedResourceResolution,
   primeManagedResourceResolution,
 } from "./editorResources";
@@ -396,20 +401,11 @@ interface NotebookWorkspaceProps {
 }
 
 export type NotebookChromeMode = NotebookShellMode;
-
-export type NotebookLeaveReason =
-  | "section-change"
-  | "window-close"
-  | "before-unload"
-  | "restore-backup";
+export type { NotebookLeaveReason } from "./leaveProtection";
 
 export interface NotebookWorkspaceRef {
   hasUnsavedChanges: (reason?: NotebookLeaveReason) => boolean;
   flushBeforeLeave: (reason?: NotebookLeaveReason) => Promise<boolean>;
-}
-
-function shouldPromptReviewScheduleSave(reason: NotebookLeaveReason) {
-  return reason === "section-change" || reason === "restore-backup";
 }
 
 export const NotebookWorkspace = forwardRef<
@@ -534,11 +530,11 @@ export const NotebookWorkspace = forwardRef<
   }
 
   function hasUnsavedChanges(reason: NotebookLeaveReason = "section-change") {
-    if (hasNoteContentUnsavedChanges()) {
-      return true;
-    }
-
-    return shouldPromptReviewScheduleSave(reason) && hasReviewScheduleUnsavedChanges();
+    return hasNotebookUnsavedChanges({
+      hasNoteContentUnsavedChanges: hasNoteContentUnsavedChanges(),
+      hasReviewScheduleUnsavedChanges: hasReviewScheduleUnsavedChanges(),
+      reason,
+    });
   }
 
   function getLeaveBlockedMessage(reason: NotebookLeaveReason) {
@@ -1084,6 +1080,16 @@ export const NotebookWorkspace = forwardRef<
     closeLeavePrompt(saved);
   }
 
+  async function handleConfirmLeavePromptDiscard() {
+    if (isLeavePromptSaving) {
+      return;
+    }
+
+    setIsLeavePromptSaving(true);
+    const discarded = (await reviewManagerRef.current?.discardPendingChanges()) ?? true;
+    closeLeavePrompt(discarded);
+  }
+
   async function handleCreateNotebook(name: string) {
     if (!(await prepareLeave("section-change"))) {
       return;
@@ -1598,7 +1604,7 @@ export const NotebookWorkspace = forwardRef<
           <div className={styles.deleteDialog}>
             <h3 className={styles.dialogTitle}>复习计划尚未保存</h3>
             <p className={styles.dialogText}>
-              当前文件的复习日期还有未保存修改。你可以继续留在这里编辑，或者先保存后再离开。
+              当前文件的复习日期还有未保存修改。你可以继续留在这里编辑，也可以保存后离开，或放弃这次未保存修改并恢复到上一次已保存状态。
             </p>
             <div className={styles.dialogActions}>
               <button
@@ -1608,6 +1614,16 @@ export const NotebookWorkspace = forwardRef<
                 disabled={isLeavePromptSaving}
               >
                 取消
+              </button>
+              <button
+                type="button"
+                className={styles.secondaryButton}
+                onClick={() => {
+                  void handleConfirmLeavePromptDiscard();
+                }}
+                disabled={isLeavePromptSaving}
+              >
+                放弃修改
               </button>
               <button
                 type="button"

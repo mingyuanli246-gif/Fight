@@ -16,6 +16,7 @@ import {
   setNoteReviewScheduleDirty,
 } from "./repository";
 import type { NoteReviewSchedule } from "./types";
+import { buildDiscardedReviewScheduleState } from "./reviewScheduleDraftState";
 import styles from "./NoteReviewPlanManager.module.css";
 
 interface NoteReviewPlanManagerProps {
@@ -42,6 +43,7 @@ export interface NoteReviewPlanManagerRef {
   hasUnsavedChanges: () => boolean;
   resolveTransientInteraction: () => void;
   savePendingChanges: () => Promise<boolean>;
+  discardPendingChanges: () => Promise<boolean>;
 }
 
 const EMPTY_REVIEW_DATES: string[] = [];
@@ -580,14 +582,70 @@ export const NoteReviewPlanManager = forwardRef<
     setErrorMessage(null);
   }
 
-  function handleCancelPendingChanges() {
-    setDraftDates(savedDates);
-    setSelectedIndex(null);
-    setEditSession(null);
-    setEditDraft(null);
+  const discardPendingChanges = useCallback(async () => {
+    if (!hasPendingChanges && editSession === null) {
+      flushPendingMidnightRefresh();
+      return true;
+    }
+
+    const nextState = buildDiscardedReviewScheduleState(savedDates, draftDates);
+
+    if (!nextState.shouldClearPersistedDirty) {
+      flushSync(() => {
+        setDraftDates(nextState.draftDates);
+        setSelectedIndex(nextState.selectedIndex);
+        setEditSession(nextState.editSession);
+        setEditDraft(nextState.editDraft);
+        setErrorMessage(nextState.errorMessage);
+      });
+      lastDirtyRef.current = false;
+      flushPendingMidnightRefresh();
+      return true;
+    }
+
+    const expectedNoteId = noteId;
+    setIsBusy(true);
     setErrorMessage(null);
-    flushPendingMidnightRefresh();
-  }
+
+    try {
+      await setNoteReviewScheduleDirty(expectedNoteId, false);
+
+      if (activeNoteIdRef.current !== expectedNoteId) {
+        return false;
+      }
+
+      flushSync(() => {
+        setDraftDates(nextState.draftDates);
+        setSelectedIndex(nextState.selectedIndex);
+        setEditSession(nextState.editSession);
+        setEditDraft(nextState.editDraft);
+        setErrorMessage(nextState.errorMessage);
+      });
+      lastDirtyRef.current = false;
+      flushPendingMidnightRefresh();
+      return true;
+    } catch (error) {
+      if (activeNoteIdRef.current === expectedNoteId) {
+        const message = getErrorMessage(error);
+        setErrorMessage(message);
+        onError(message);
+      }
+
+      return false;
+    } finally {
+      if (activeNoteIdRef.current === expectedNoteId) {
+        setIsBusy(false);
+      }
+    }
+  }, [
+    draftDates,
+    editSession,
+    flushPendingMidnightRefresh,
+    hasPendingChanges,
+    noteId,
+    onError,
+    savedDates,
+  ]);
 
   const savePendingChanges = useCallback(async () => {
     if (!isScheduleActive) {
@@ -691,8 +749,9 @@ export const NoteReviewPlanManager = forwardRef<
       hasUnsavedChanges: () => hasPendingChanges,
       resolveTransientInteraction,
       savePendingChanges,
+      discardPendingChanges,
     }),
-    [hasPendingChanges, resolveTransientInteraction, savePendingChanges],
+    [discardPendingChanges, hasPendingChanges, resolveTransientInteraction, savePendingChanges],
   );
 
   return (
@@ -855,7 +914,9 @@ export const NoteReviewPlanManager = forwardRef<
                   type="button"
                   className={styles.cancelButton}
                   data-review-selection-preserve="true"
-                  onClick={handleCancelPendingChanges}
+                  onClick={() => {
+                    void discardPendingChanges();
+                  }}
                   disabled={disabled || isBusy}
                 >
                   取消

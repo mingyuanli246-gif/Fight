@@ -2815,21 +2815,19 @@ fn ensure_review_feature_ready_internal(connection: &mut Connection) -> Result<(
 
     let transaction = connection
         .transaction()
-        .map_err(|error| to_command_error("开启恢复默认复习计划事务", error))?;
+        .map_err(|error| to_command_error("开启清理复习计划脏状态事务", error))?;
     if fetch_default_review_plan(&transaction)?.is_none() {
         clear_all_review_tables(&transaction)?;
         create_default_review_plan(&transaction)?;
     }
 
-    for note_id in dirty_note_ids {
-        reset_note_review_schedule_to_default(&transaction, note_id, &today)?;
-    }
-
+    // Dirty markers come from in-memory editing state. App startup must never overwrite the
+    // last saved custom schedule just because an unsaved draft existed before close/crash.
     cleanup_expired_review_schedules(&transaction, None, &today)?;
     set_review_schedule_dirty_note_ids(&transaction, &BTreeSet::new())?;
     transaction
         .commit()
-        .map_err(|error| to_command_error("提交恢复默认复习计划事务", error))
+        .map_err(|error| to_command_error("提交清理复习计划脏状态事务", error))
 }
 
 fn get_note_review_schedule_tx_internal(
@@ -8659,7 +8657,7 @@ mod tests {
     }
 
     #[test]
-    fn ensure_review_feature_ready_resets_dirty_notes_to_default_schedule() {
+    fn ensure_review_feature_ready_keeps_saved_schedule_for_dirty_notes() {
         let mut connection = test_connection();
         connection
             .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
@@ -8686,7 +8684,6 @@ mod tests {
         set_note_review_schedule_dirty_tx_internal(&mut connection, 1, true)
             .expect("mark dirty schedule");
 
-        let today = today_local_date_key();
         ensure_review_feature_ready_internal(&mut connection).expect("ensure review feature ready");
 
         let due_dates: Vec<String> = connection
@@ -8708,12 +8705,7 @@ mod tests {
 
         assert_eq!(
             due_dates,
-            vec![
-                add_days(&today, 2).expect("day 2"),
-                add_days(&today, 5).expect("day 5"),
-                add_days(&today, 10).expect("day 10"),
-                add_days(&today, 18).expect("day 18"),
-            ]
+            vec!["2099-08-01".to_string(), "2099-08-09".to_string()]
         );
         assert_eq!(dirty_marker, "[]");
     }

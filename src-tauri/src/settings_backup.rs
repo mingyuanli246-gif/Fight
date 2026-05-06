@@ -1261,6 +1261,16 @@ fn resolve_backup_file_path(paths: &AppPaths, file_name: &str) -> Result<PathBuf
     Ok(backup_path)
 }
 
+fn resolve_manageable_backup_file_path(paths: &AppPaths, file_name: &str) -> Result<PathBuf, String> {
+    let backup_path = resolve_backup_file_path(paths, file_name)?;
+
+    if !is_manageable_app_backup_file(&backup_path) {
+        return Err("只能管理应用创建的有效备份文件。".to_string());
+    }
+
+    Ok(backup_path)
+}
+
 fn resolve_restore_backup_path(backup_path: &str) -> Result<PathBuf, String> {
     let path = PathBuf::from(backup_path.trim());
 
@@ -1767,12 +1777,17 @@ fn sort_backup_paths_newest_first(paths: &mut [PathBuf]) {
 }
 
 fn list_backup_items(paths: &AppPaths) -> Result<Vec<BackupListItem>, String> {
-    let backup_files = collect_backup_file_paths(&paths.backups)?;
+    let backup_files = collect_manageable_backup_file_paths(&paths.backups)?;
 
     Ok(backup_files
         .iter()
         .map(|path| build_light_backup_list_item(path))
         .collect())
+}
+
+fn delete_backup_file(paths: &AppPaths, file_name: &str) -> Result<(), String> {
+    let backup_path = resolve_manageable_backup_file_path(paths, file_name)?;
+    fs::remove_file(&backup_path).map_err(|error| format!("删除备份文件失败：{error}"))
 }
 
 fn validate_backup_file(paths: &AppPaths, file_name: &str) -> Result<BackupListItem, String> {
@@ -1792,7 +1807,7 @@ fn is_app_generated_backup_file(path: &Path) -> bool {
     file_name.starts_with(&format!("{BACKUP_FILE_PREFIX}-")) && file_name.ends_with(".zip")
 }
 
-fn is_prunable_app_backup_file(path: &Path) -> bool {
+fn is_manageable_app_backup_file(path: &Path) -> bool {
     if !is_app_generated_backup_file(path) {
         return false;
     }
@@ -1819,13 +1834,17 @@ fn is_prunable_app_backup_file(path: &Path) -> bool {
     ) && ensure_archive_has_resources(&mut archive, &manifest.resource_directory).is_ok()
 }
 
-fn collect_prunable_backup_file_paths(backups_dir: &Path) -> Result<Vec<PathBuf>, String> {
+fn collect_manageable_backup_file_paths(backups_dir: &Path) -> Result<Vec<PathBuf>, String> {
     let mut backup_files = collect_backup_file_paths(backups_dir)?
         .into_iter()
-        .filter(|path| is_prunable_app_backup_file(path))
+        .filter(|path| is_manageable_app_backup_file(path))
         .collect::<Vec<_>>();
     sort_backup_paths_newest_first(&mut backup_files);
     Ok(backup_files)
+}
+
+fn collect_prunable_backup_file_paths(backups_dir: &Path) -> Result<Vec<PathBuf>, String> {
+    collect_manageable_backup_file_paths(backups_dir)
 }
 
 fn prune_old_backups(backups_dir: &Path, retention_count: usize) -> Result<(), String> {
@@ -3333,9 +3352,7 @@ pub fn delete_backup(
 ) -> Result<(), String> {
     let _guard = try_acquire_operation(&operation_lock, BackupOperation::Delete)?;
     let (paths, _) = ensure_app_environment(&app)?;
-    let backup_path = resolve_backup_file_path(&paths, &file_name)?;
-
-    fs::remove_file(&backup_path).map_err(|error| format!("删除备份文件失败：{error}"))
+    delete_backup_file(&paths, &file_name)
 }
 
 #[tauri::command]
@@ -3561,10 +3578,10 @@ mod tests {
         add_resources_to_zip, build_created_backup_list_item, cache_size_bytes,
         cleanup_legacy_backups_once, cleanup_stale_backup_temp_files_with_options,
         create_backup_temp_file, create_restore_rollback_paths, directory_size_bytes,
-        extract_backup_archive, is_legacy_backups_cleanup_target, legacy_cleanup_marker_path,
-        list_backup_items, move_path_for_restore, new_restore_journal, persist_backup_temp_file,
-        prepare_restore_rollback, prune_old_backups, record_installed_item,
-        recover_incomplete_restore_for_paths, resolve_backup_file_path,
+        delete_backup_file, extract_backup_archive, is_legacy_backups_cleanup_target,
+        legacy_cleanup_marker_path, list_backup_items, move_path_for_restore, new_restore_journal,
+        persist_backup_temp_file, prepare_restore_rollback, prune_old_backups,
+        record_installed_item, recover_incomplete_restore_for_paths, resolve_backup_file_path,
         resolve_document_backups_dir, resolve_restore_backup_path,
         resource_file_compression_method, restore_journal_path,
         restore_moved_items_after_prepare_failure, rollback_restored_data, validate_backup_archive,
@@ -4200,16 +4217,40 @@ mod tests {
     }
 
     #[test]
-    fn list_backup_items_keeps_broken_zip_as_unknown() {
+    fn list_backup_items_only_returns_recognized_app_backups() {
         let temp_dir = tempdir().expect("create temp dir");
         let paths = create_test_paths(temp_dir.path());
-        fs::write(paths.backups.join("broken.zip"), b"not-a-zip").expect("write broken zip");
+        let database_path = create_v7_database();
+        let settings_bytes =
+            serde_json::to_vec(&AppSettings::default()).expect("serialize settings");
+        let manifest = create_valid_manifest(Some(CURRENT_SCHEMA_VERSION));
+        let valid_backup = paths
+            .backups
+            .join("fight-notes-backup-2026-04-08_12-34-56.zip");
+
+        write_backup_archive(
+            &valid_backup,
+            Some(&manifest),
+            Some(&database_path),
+            Some(&settings_bytes),
+            true,
+        );
+        fs::write(paths.backups.join("random.zip"), b"manual").expect("write random zip");
+        fs::write(
+            paths.backups.join("fight-notes-backup-broken.zip"),
+            b"not-a-zip",
+        )
+        .expect("write broken app zip");
+        fs::write(
+            paths.backups.join(".fight-notes-backup-temp.zip.creating"),
+            b"temporary",
+        )
+        .expect("write temporary backup");
 
         let items = list_backup_items(&paths).expect("list backup items");
 
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].file_name, "broken.zip");
-        assert_eq!(items[0].validation_status, BackupValidationStatus::Unknown);
+        assert_eq!(items[0].file_name, "fight-notes-backup-2026-04-08_12-34-56.zip");
         assert_eq!(items[0].invalid_reason, None);
     }
 
@@ -4217,8 +4258,25 @@ mod tests {
     fn list_backup_items_sorts_by_created_at_then_file_name_desc() {
         let temp_dir = tempdir().expect("create temp dir");
         let paths = create_test_paths(temp_dir.path());
-        fs::write(paths.backups.join("alpha.zip"), b"a").expect("write alpha");
-        fs::write(paths.backups.join("beta.zip"), b"b").expect("write beta");
+        let database_path = create_v7_database();
+        let settings_bytes =
+            serde_json::to_vec(&AppSettings::default()).expect("serialize settings");
+        let manifest = create_valid_manifest(Some(CURRENT_SCHEMA_VERSION));
+
+        write_backup_archive(
+            &paths.backups.join("fight-notes-backup-2026-04-08_00-00-00.zip"),
+            Some(&manifest),
+            Some(&database_path),
+            Some(&settings_bytes),
+            true,
+        );
+        write_backup_archive(
+            &paths.backups.join("fight-notes-backup-2026-04-09_00-00-00.zip"),
+            Some(&manifest),
+            Some(&database_path),
+            Some(&settings_bytes),
+            true,
+        );
 
         let items = list_backup_items(&paths).expect("list backup items");
 
@@ -4233,11 +4291,17 @@ mod tests {
     fn list_backup_items_does_not_prune_files() {
         let temp_dir = tempdir().expect("create temp dir");
         let paths = create_test_paths(temp_dir.path());
-        fs::write(
-            paths.backups.join("fight-notes-backup-old.zip"),
-            b"not-a-zip",
-        )
-        .expect("write app zip");
+        let database_path = create_v7_database();
+        let settings_bytes =
+            serde_json::to_vec(&AppSettings::default()).expect("serialize settings");
+        let manifest = create_valid_manifest(Some(CURRENT_SCHEMA_VERSION));
+        write_backup_archive(
+            &paths.backups.join("fight-notes-backup-old.zip"),
+            Some(&manifest),
+            Some(&database_path),
+            Some(&settings_bytes),
+            true,
+        );
         fs::write(paths.backups.join("random.zip"), b"manual").expect("write random zip");
         fs::write(
             paths.backups.join(".fight-notes-backup-temp.zip.creating"),
@@ -4250,9 +4314,12 @@ mod tests {
         let after = fs::read_dir(&paths.backups).expect("read backups").count();
 
         assert_eq!(before, after);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].file_name, "fight-notes-backup-old.zip");
         assert!(!items
             .iter()
             .any(|item| item.file_name.ends_with(".zip.creating")));
+        assert!(!items.iter().any(|item| item.file_name == "random.zip"));
         assert!(paths.backups.join("fight-notes-backup-old.zip").exists());
         assert!(paths.backups.join("random.zip").exists());
         assert!(paths
@@ -4454,6 +4521,52 @@ mod tests {
         assert!(random_zip.exists());
         assert!(other_zip.exists());
         assert!(broken_app_zip.exists());
+    }
+
+    #[test]
+    fn delete_backup_file_rejects_unrecognized_zip_and_keeps_file() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let paths = create_test_paths(temp_dir.path());
+        let random_zip = paths.backups.join("random.zip");
+        let temp_creating = paths.backups.join(".fight-notes-backup-temp.zip.creating");
+
+        fs::write(&random_zip, b"manual").expect("write random zip");
+        fs::write(&temp_creating, b"temporary").expect("write creating");
+
+        let error = delete_backup_file(&paths, "random.zip").expect_err("reject random zip");
+        assert!(error.contains("应用创建"));
+        assert!(random_zip.exists());
+
+        let creating_error = delete_backup_file(&paths, ".fight-notes-backup-temp.zip.creating")
+            .expect_err("reject creating file");
+        assert!(creating_error.contains("无效") || creating_error.contains("应用创建"));
+        assert!(temp_creating.exists());
+    }
+
+    #[test]
+    fn delete_backup_file_removes_recognized_app_backup() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let paths = create_test_paths(temp_dir.path());
+        let database_path = create_v7_database();
+        let settings_bytes =
+            serde_json::to_vec(&AppSettings::default()).expect("serialize settings");
+        let manifest = create_valid_manifest(Some(CURRENT_SCHEMA_VERSION));
+        let backup_path = paths
+            .backups
+            .join("fight-notes-backup-2026-04-08_12-34-56.zip");
+
+        write_backup_archive(
+            &backup_path,
+            Some(&manifest),
+            Some(&database_path),
+            Some(&settings_bytes),
+            true,
+        );
+
+        delete_backup_file(&paths, "fight-notes-backup-2026-04-08_12-34-56.zip")
+            .expect("delete recognized backup");
+
+        assert!(!backup_path.exists());
     }
 
     #[test]
