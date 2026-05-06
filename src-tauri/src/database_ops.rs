@@ -4795,270 +4795,6 @@ fn list_live_managed_resource_paths(connection: &Connection) -> Result<BTreeSet<
     Ok(resource_paths)
 }
 
-struct OrphanImageScanOutcome {
-    result: OrphanImageScanResult,
-    is_complete: bool,
-    orphan_candidates: Vec<OrphanImageFileRecord>,
-}
-
-fn to_orphan_image_skipped_file(
-    path: impl Into<String>,
-    reason: impl Into<String>,
-) -> OrphanImageSkippedFile {
-    OrphanImageSkippedFile {
-        path: path.into(),
-        reason: reason.into(),
-    }
-}
-
-fn is_managed_note_image_resource_path(resource_path: &str) -> bool {
-    resource_path.starts_with("resources/images/")
-        && is_app_managed_image_resource_path(resource_path)
-}
-
-fn collect_live_note_image_resource_paths_with_diagnostics(
-    connection: &Connection,
-) -> (BTreeSet<String>, Vec<String>, bool) {
-    let mut resource_paths = BTreeSet::new();
-    let mut warnings = Vec::new();
-    let mut is_complete = true;
-
-    let mut statement = match connection.prepare(
-        "
-          SELECT id, COALESCE(content_plaintext, '')
-          FROM notes
-          WHERE content_plaintext IS NOT NULL
-        ",
-    ) {
-        Ok(statement) => statement,
-        Err(error) => {
-            warnings.push(format!("读取图片引用失败，无法安全确认 orphan：{error}"));
-            return (resource_paths, warnings, false);
-        }
-    };
-
-    let rows = match statement.query_map([], |row| {
-        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-    }) {
-        Ok(rows) => rows,
-        Err(error) => {
-            warnings.push(format!("扫描正文图片引用失败，无法安全确认 orphan：{error}"));
-            return (resource_paths, warnings, false);
-        }
-    };
-
-    for row in rows {
-        let (note_id, content) = match row {
-            Ok(row) => row,
-            Err(error) => {
-                warnings.push(format!("读取正文图片引用失败，无法安全确认 orphan：{error}"));
-                is_complete = false;
-                continue;
-            }
-        };
-
-        let extracted_paths = extract_note_image_resource_paths(&content);
-        if content.contains("resources/images/") && extracted_paths.is_empty() {
-            warnings.push(format!(
-                "笔记 {note_id} 的正文图片引用无法安全确认，已跳过真实清理。"
-            ));
-            is_complete = false;
-            continue;
-        }
-
-        for resource_path in extracted_paths {
-            if is_managed_note_image_resource_path(&resource_path) {
-                resource_paths.insert(resource_path);
-            }
-        }
-    }
-
-    (resource_paths, warnings, is_complete)
-}
-
-fn scan_orphan_image_resources_internal(
-    root: &Path,
-    connection: &Connection,
-    leased_resource_paths: &BTreeSet<String>,
-) -> OrphanImageScanOutcome {
-    let mut candidate_files = BTreeMap::new();
-    let mut skipped_files = Vec::new();
-    let mut warnings = Vec::new();
-    let mut is_complete = true;
-    let mut total_image_files = 0_usize;
-    let image_root = root.join("resources/images");
-
-    if image_root.exists() {
-        for entry in WalkDir::new(&image_root).min_depth(1) {
-            match entry {
-                Ok(entry) => {
-                    let file_type = entry.file_type();
-
-                    if file_type.is_dir() {
-                        continue;
-                    }
-
-                    if file_type.is_symlink() {
-                        total_image_files += 1;
-                        skipped_files.push(to_orphan_image_skipped_file(
-                            entry.path().to_string_lossy().to_string(),
-                            "符号链接不会参与图片清理。".to_string(),
-                        ));
-                        continue;
-                    }
-
-                    if !file_type.is_file() {
-                        continue;
-                    }
-
-                    total_image_files += 1;
-                    let resource_path =
-                        match managed_resource_path_from_absolute_path(root, entry.path()) {
-                            Ok(resource_path) => resource_path,
-                            Err(error) => {
-                                skipped_files.push(to_orphan_image_skipped_file(
-                                    entry.path().to_string_lossy().to_string(),
-                                    error,
-                                ));
-                                continue;
-                            }
-                        };
-
-                    if !resource_path.starts_with("resources/images/") {
-                        skipped_files.push(to_orphan_image_skipped_file(
-                            resource_path,
-                            "图片清理只扫描 resources/images。".to_string(),
-                        ));
-                        continue;
-                    }
-
-                    if !is_app_managed_image_resource_path(&resource_path) {
-                        skipped_files.push(to_orphan_image_skipped_file(
-                            resource_path,
-                            "不是 App 托管的正文图片文件，已保守跳过。".to_string(),
-                        ));
-                        continue;
-                    }
-
-                    let size_bytes = match entry.metadata() {
-                        Ok(metadata) => metadata.len(),
-                        Err(error) => {
-                            skipped_files.push(to_orphan_image_skipped_file(
-                                resource_path,
-                                format!("读取文件元数据失败：{error}"),
-                            ));
-                            continue;
-                        }
-                    };
-
-                    candidate_files.insert(resource_path, size_bytes);
-                }
-                Err(error) => {
-                    warnings.push(format!("扫描图片目录失败，无法安全确认 orphan：{error}"));
-                    is_complete = false;
-                }
-            }
-        }
-    }
-
-    let (mut live_resource_paths, live_warnings, live_complete) =
-        collect_live_note_image_resource_paths_with_diagnostics(connection);
-    warnings.extend(live_warnings);
-    is_complete &= live_complete;
-
-    for leased_resource_path in leased_resource_paths {
-        if is_managed_note_image_resource_path(leased_resource_path) {
-            live_resource_paths.insert(leased_resource_path.clone());
-        }
-    }
-
-    let referenced_image_files = candidate_files
-        .keys()
-        .filter(|resource_path| live_resource_paths.contains(*resource_path))
-        .count();
-
-    let orphan_candidates = if is_complete {
-        candidate_files
-            .iter()
-            .filter_map(|(resource_path, size_bytes)| {
-                (!live_resource_paths.contains(resource_path)).then(|| OrphanImageFileRecord {
-                    resource_path: resource_path.clone(),
-                    size_bytes: *size_bytes,
-                })
-            })
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-
-    let orphan_total_bytes = orphan_candidates
-        .iter()
-        .map(|record| record.size_bytes)
-        .sum();
-
-    OrphanImageScanOutcome {
-        result: OrphanImageScanResult {
-            total_image_files,
-            referenced_image_files,
-            orphan_image_files: orphan_candidates.clone(),
-            orphan_total_bytes,
-            skipped_files,
-            warnings,
-        },
-        is_complete,
-        orphan_candidates,
-    }
-}
-
-fn cleanup_orphan_image_resources_internal(
-    root: &Path,
-    connection: &Connection,
-    leased_resource_paths: &BTreeSet<String>,
-    dry_run: bool,
-) -> OrphanImageCleanupResult {
-    let initial_scan = scan_orphan_image_resources_internal(root, connection, leased_resource_paths);
-    let mut result = OrphanImageCleanupResult {
-        dry_run,
-        scan: initial_scan.result,
-        deleted_files: Vec::new(),
-        deleted_total_bytes: 0,
-        failed_files: Vec::new(),
-    };
-
-    if dry_run {
-        return result;
-    }
-
-    let confirmed_scan = scan_orphan_image_resources_internal(root, connection, leased_resource_paths);
-    result.scan = confirmed_scan.result.clone();
-
-    if !confirmed_scan.is_complete {
-        result
-            .scan
-            .warnings
-            .push("扫描结果不完整，无法安全确认引用集合，已跳过真实清理。".to_string());
-        return result;
-    }
-
-    for orphan in confirmed_scan.orphan_candidates {
-        match delete_managed_resource_file_if_exists(root, &orphan.resource_path) {
-            Ok(true) => {
-                result.deleted_total_bytes += orphan.size_bytes;
-                result.deleted_files.push(orphan.resource_path);
-            }
-            Ok(false) => {}
-            Err(error) => {
-                result.failed_files.push(to_orphan_image_skipped_file(
-                    orphan.resource_path,
-                    error,
-                ));
-            }
-        }
-    }
-
-    result
-}
-
 fn is_auto_cleanup_candidate_resource_path(resource_path: &str) -> bool {
     is_app_managed_image_resource_path(resource_path)
 }
@@ -6080,6 +5816,8 @@ fn purge_trashed_item_tx_internal<R: Runtime>(
 ) -> Result<(), String> {
     ensure_note_search_ready_internal(connection)?;
     ensure_trashed_root_state(connection, item_type, item_id)?;
+    let candidate_paths =
+        collect_managed_resource_paths_for_trash_root(connection, item_type, item_id)?;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| to_command_error("开启永久删除回收站项目事务", error))?;
@@ -6106,7 +5844,14 @@ fn purge_trashed_item_tx_internal<R: Runtime>(
     transaction
         .commit()
         .map_err(|error| to_command_error("提交永久删除回收站项目事务", error))?;
-    let _ = app;
+
+    cleanup_unreferenced_managed_resources_best_effort(
+        app,
+        connection,
+        &candidate_paths,
+        ManagedResourceTrashSource::OrphanCleanup,
+        None,
+    );
     Ok(())
 }
 
@@ -6387,16 +6132,36 @@ pub fn cleanup_expired_trash_tx(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub fn delete_notebook_tx(app: AppHandle, notebook_id: i64) -> Result<(), String> {
     let mut connection = open_database_connection(&app)?;
+    let candidate_paths = collect_managed_resource_paths_for_notebook(&connection, notebook_id)?;
     delete_notebook_tx_internal(&mut connection, notebook_id)?;
-    let _ = app;
+    // This path is for permanent deletion only. If the product later gains notebook trash / soft
+    // delete semantics, that flow must keep the notebook rows and skip this orphan cleanup so note
+    // bodies and their resources remain restorable together.
+    cleanup_unreferenced_managed_resources_best_effort(
+        &app,
+        &connection,
+        &candidate_paths,
+        ManagedResourceTrashSource::OrphanCleanup,
+        None,
+    );
     Ok(())
 }
 
 #[tauri::command]
 pub fn delete_folder_tx(app: AppHandle, folder_id: i64) -> Result<(), String> {
     let mut connection = open_database_connection(&app)?;
+    let candidate_paths =
+        collect_managed_resource_paths_for_folder_subtree(&connection, folder_id)?;
     delete_folder_tx_internal(&mut connection, folder_id)?;
-    let _ = app;
+    // This path is for permanent deletion only. A future folder trash / soft delete flow must not
+    // reuse it, otherwise note-body resources could be cleaned up before the folder is restored.
+    cleanup_unreferenced_managed_resources_best_effort(
+        &app,
+        &connection,
+        &candidate_paths,
+        ManagedResourceTrashSource::OrphanCleanup,
+        None,
+    );
     Ok(())
 }
 
@@ -6472,17 +6237,36 @@ pub fn save_note_content_with_tags_tx(
     occurrences: Vec<NoteTagOccurrenceInput>,
 ) -> Result<NoteRecord, String> {
     let mut connection = open_database_connection(&app)?;
+    let previous_resource_paths = collect_managed_resource_paths_for_note(&connection, note_id)?;
     let saved_note =
         save_note_content_with_tags_tx_internal(&mut connection, note_id, &content, &occurrences)?;
-    let _ = (app, note_id);
+
+    // Keep cleanup inline. Callers should not observe a successful save before the post-commit
+    // orphan check for removed note-body images finishes.
+    cleanup_removed_note_resources_after_save_best_effort(
+        &app,
+        &connection,
+        previous_resource_paths,
+        note_id,
+    );
+
     Ok(saved_note)
 }
 
 #[tauri::command]
 pub fn delete_note_tx(app: AppHandle, note_id: i64) -> Result<(), String> {
     let mut connection = open_database_connection(&app)?;
+    let candidate_paths = collect_managed_resource_paths_for_note(&connection, note_id)?;
     delete_note_tx_internal(&mut connection, note_id)?;
-    let _ = app;
+    // This path is for permanent deletion only. A future note trash / soft delete flow must not
+    // call this orphan cleanup until the note is truly purged from storage.
+    cleanup_unreferenced_managed_resources_best_effort(
+        &app,
+        &connection,
+        &candidate_paths,
+        ManagedResourceTrashSource::OrphanCleanup,
+        None,
+    );
     Ok(())
 }
 
@@ -6490,55 +6274,16 @@ pub fn delete_note_tx(app: AppHandle, note_id: i64) -> Result<(), String> {
 pub fn cleanup_unreferenced_managed_resources(
     app: AppHandle,
 ) -> Result<ManagedResourceCleanupResult, String> {
-    let dry_run_result = cleanup_orphan_image_resources(app, true)?;
-    let mut failed = dry_run_result
-        .scan
-        .skipped_files
-        .into_iter()
-        .map(|item| to_cleanup_failure(item.path, item.reason))
-        .collect::<Vec<_>>();
-    failed.extend(
-        dry_run_result
-            .scan
-            .warnings
-            .into_iter()
-            .map(|warning| to_cleanup_failure("scan", warning)),
-    );
-
-    Ok(ManagedResourceCleanupResult {
-        deleted_count: 0,
-        moved_to_trash_count: 0,
-        failed,
-    })
-}
-
-#[tauri::command]
-pub fn scan_orphan_image_resources(app: AppHandle) -> Result<OrphanImageScanResult, String> {
     let connection = open_database_connection(&app)?;
     let root = resolve_app_root(&app)?;
     let leased_resource_paths = snapshot_managed_resource_session_leases(&app);
-    Ok(scan_orphan_image_resources_internal(
+    cleanup_unreferenced_managed_resources_internal_with_leases(
         &root,
         &connection,
         &leased_resource_paths,
+        ManagedResourceTrashSource::OrphanCleanup,
+        None,
     )
-    .result)
-}
-
-#[tauri::command]
-pub fn cleanup_orphan_image_resources(
-    app: AppHandle,
-    dry_run: bool,
-) -> Result<OrphanImageCleanupResult, String> {
-    let connection = open_database_connection(&app)?;
-    let root = resolve_app_root(&app)?;
-    let leased_resource_paths = snapshot_managed_resource_session_leases(&app);
-    Ok(cleanup_orphan_image_resources_internal(
-        &root,
-        &connection,
-        &leased_resource_paths,
-        dry_run,
-    ))
 }
 
 #[tauri::command]
@@ -6595,6 +6340,7 @@ mod tests {
         bind_review_plan_to_note_tx_internal,
         cleanup_candidate_unreferenced_managed_resources_with_leases,
         cleanup_expired_review_schedules, cleanup_removed_note_resources_after_save,
+        cleanup_removed_note_resources_after_save_with_leases,
         cleanup_unreferenced_managed_resources_internal,
         cleanup_unreferenced_managed_resources_internal_with_leases,
         clear_note_review_schedule_tx_internal, clear_notebook_cover_image_tx_internal,
@@ -6614,13 +6360,11 @@ mod tests {
         normalize_managed_resource_path, normalize_tag_color, rebuild_note_search_index_internal,
         rename_review_plan_tx_internal, reorder_folders_tx_internal, reorder_notebooks_tx_internal,
         restore_trashed_item_tx_internal, save_note_content_with_tags_tx_internal,
-        scan_orphan_image_resources_internal, cleanup_orphan_image_resources_internal,
         save_note_review_schedule_tx_internal, set_note_review_schedule_dirty_tx_internal,
         set_review_task_completed_tx_internal, today_local_date_key,
         update_notebook_cover_image_tx_internal, update_review_schedule_dirty_note_id,
         ManagedResourceCleanupResult, ManagedResourceTrashSource, NoteTagOccurrenceInput,
-        OrphanImageCleanupResult, OrphanImageFileRecord, OrphanImageScanResult, TrashEntityType,
-        APP_META_KEY_REVIEW_FEATURE_REBUILD_V1_DONE,
+        TrashEntityType, APP_META_KEY_REVIEW_FEATURE_REBUILD_V1_DONE,
         APP_META_KEY_REVIEW_SCHEDULE_DIRTY_NOTE_IDS, DEFAULT_REVIEW_PLAN_NAME, DEFAULT_TAG_COLOR,
     };
     use chrono::Local;
@@ -7249,7 +6993,7 @@ mod tests {
 
     #[test]
     fn collect_managed_resource_paths_for_notebook_includes_cover_and_note_images() {
-        let mut connection = test_connection();
+        let connection = test_connection();
         connection
             .execute(
                 "INSERT INTO notebooks (name, cover_image_path) VALUES ('测试本', 'resources/covers/99999999-9999-4999-8999-999999999999.png')",
@@ -7300,7 +7044,7 @@ mod tests {
             write_test_resource(temp_dir.path(), resource_path);
         }
 
-        let mut connection = test_connection();
+        let connection = test_connection();
         connection
             .execute(
                 "INSERT INTO notebooks (name, cover_image_path) VALUES ('测试本', 'resources/covers/44444444-4444-4444-8444-444444444444.png')",
