@@ -18,6 +18,10 @@ import { SettingsPage } from "../../pages/SettingsPage";
 import { TagPlazaPage } from "../../pages/TagPlazaPage";
 import { TrashPage } from "../../pages/TrashPage";
 import type { AppSection } from "../sections";
+import {
+  flushAllPendingChangesBeforeClose,
+  shouldWarnBeforeUnload,
+} from "./closeProtection";
 import styles from "./AppShell.module.css";
 
 interface AppShellProps {
@@ -102,32 +106,27 @@ export default function AppShell({
   async function guardNotebookBeforeDangerousLeave(
     reason: NotebookLeaveReason,
   ) {
-    if (currentSectionRef.current !== "notebooks") {
-      return true;
-    }
-
-    const notebookWorkspace = notebookWorkspaceRef.current;
-
-    if (!notebookWorkspace?.hasUnsavedChanges(reason)) {
-      return true;
-    }
-
-    return notebookWorkspace.flushBeforeLeave(reason);
+    const result = await flushAllPendingChangesBeforeClose({
+      currentSection: currentSectionRef.current,
+      notebookWorkspace: notebookWorkspaceRef.current,
+      reason,
+    });
+    return result === "success";
   }
 
   useEffect(() => {
     function handleBeforeUnload(event: BeforeUnloadEvent) {
-      if (currentSectionRef.current !== "notebooks") {
-        return;
-      }
-
-      if (!notebookWorkspaceRef.current?.hasUnsavedChanges("before-unload")) {
+      if (
+        !shouldWarnBeforeUnload({
+          currentSection: currentSectionRef.current,
+          notebookWorkspace: notebookWorkspaceRef.current,
+        })
+      ) {
         return;
       }
 
       event.preventDefault();
       event.returnValue = "";
-      void guardNotebookBeforeDangerousLeave("before-unload");
     }
 
     window.addEventListener("beforeunload", handleBeforeUnload);
