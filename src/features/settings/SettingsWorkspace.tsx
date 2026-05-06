@@ -11,6 +11,16 @@ import { closeNotebookDatabase } from "../notebooks/db";
 import { ThemeContext } from "../theme/ThemeProvider";
 import { themeOptions } from "../theme/themeOptions";
 import {
+  cleanupOrphanResources,
+  listResourceTrashItems,
+  permanentlyDeleteResourceTrashItem,
+  restoreResourceTrashItem,
+  scanOrphanResources,
+  type OrphanResourceScanResult,
+  type ResourceTrashListItem,
+  type ResourceTrashKind,
+} from "../notebooks/resourceCommands";
+import {
   DEFAULT_EDITOR_FONT_FAMILY,
   EDITOR_FONT_FAMILY_OPTIONS,
   NOTE_EDITOR_PREVIEW_HTML,
@@ -42,6 +52,11 @@ import type {
   RestoreProgressStage,
   SettingsNotice,
 } from "./types";
+import {
+  buildCleanupConfirmationMessage,
+  canRunResourceCleanup,
+  getResourceTrashDeleteLabel,
+} from "./resourceManagementState";
 import styles from "./SettingsWorkspace.module.css";
 
 const RETENTION_OPTIONS = [1, 3, 5] as const;
@@ -49,6 +64,13 @@ const BACKUP_FREQUENCY_OPTIONS = [1, 3, 5, 7] as const;
 const RESTORE_BLOCKED_MESSAGE =
   "恢复备份前保存失败，已阻止恢复操作。请先等待保存完成，或复制内容后再操作。";
 type BackupRefreshReason = "initial-load" | "post-create";
+type ResourceOperationState =
+  | "idle"
+  | "scanning"
+  | "dry-running"
+  | "cleaning"
+  | "restoring-trash"
+  | "deleting-trash";
 
 type RestoreDialogState =
   | {
@@ -63,6 +85,17 @@ type RestoreDialogState =
       status: "error";
       message: string;
     };
+
+interface ResourceCleanupDialogState {
+  totalCount: number;
+  totalBytes: number;
+}
+
+interface ResourceTrashDeleteDialogState {
+  trashId: string;
+  resourceKind: ResourceTrashKind;
+  label: string;
+}
 
 interface SettingsWorkspaceProps {
   startupNotice: SettingsNotice | null;
@@ -162,6 +195,23 @@ function getRestoreCreatedAt(preview: RestoreBackupPreview) {
   return preview.createdAt.trim() || "未知时间";
 }
 
+function getResourceKindLabel(kind: ResourceTrashKind | "image" | "cover") {
+  return kind === "cover" ? "封面" : "图片";
+}
+
+function getResourceTrashStatusLabel(status: string) {
+  switch (status) {
+    case "ok":
+      return "可恢复";
+    case "broken":
+      return "已损坏";
+    case "invalid":
+      return "无效";
+    default:
+      return status;
+  }
+}
+
 export function SettingsWorkspace({
   startupNotice,
   beforeRestoreBackup,
@@ -189,11 +239,28 @@ export function SettingsWorkspace({
   const [deleteDialogFileName, setDeleteDialogFileName] = useState<string | null>(
     null,
   );
+  const [resourceOperationState, setResourceOperationState] =
+    useState<ResourceOperationState>("idle");
+  const [resourceScanResult, setResourceScanResult] =
+    useState<OrphanResourceScanResult | null>(null);
+  const [resourceTrashItems, setResourceTrashItems] = useState<
+    ResourceTrashListItem[]
+  >([]);
+  const [isLoadingResourceTrash, setIsLoadingResourceTrash] = useState(true);
+  const [resourceCleanupDialog, setResourceCleanupDialog] =
+    useState<ResourceCleanupDialogState | null>(null);
+  const [resourceTrashDeleteDialog, setResourceTrashDeleteDialog] =
+    useState<ResourceTrashDeleteDialogState | null>(null);
   const backupsRef = useRef<BackupListItem[]>([]);
   const latestBackupRefreshRequestRef = useRef(0);
   const isMountedRef = useRef(true);
 
   const isBusy = operationState !== "idle";
+  const isBackupBusy = operationState !== "idle";
+  const isResourceBusy = resourceOperationState !== "idle";
+  const isAnyStorageOperationBusy = isBackupBusy || isResourceBusy;
+  const canCleanupResources =
+    !isAnyStorageOperationBusy && canRunResourceCleanup(resourceScanResult);
 
   const selectedEditorFontFamily =
     settings?.editorFontFamily ?? DEFAULT_EDITOR_FONT_FAMILY;
@@ -289,6 +356,18 @@ export function SettingsWorkspace({
             ),
           );
         });
+        void refreshResourceTrashItems().catch((error) => {
+          if (cancelled) {
+            return;
+          }
+
+          setNotice(
+            buildNotice(
+              "error",
+              getErrorMessage(error, "读取图片资源回收站失败，请稍后重试。"),
+            ),
+          );
+        });
       } catch (error) {
         if (cancelled) {
           return;
@@ -380,6 +459,26 @@ export function SettingsWorkspace({
         ),
       );
       return null;
+    }
+  }
+
+  async function refreshResourceTrashItems() {
+    setIsLoadingResourceTrash(true);
+
+    try {
+      const nextItems = await listResourceTrashItems();
+      if (!isMountedRef.current) {
+        return nextItems;
+      }
+
+      setResourceTrashItems(nextItems);
+      setIsLoadingResourceTrash(false);
+      return nextItems;
+    } catch (error) {
+      if (isMountedRef.current) {
+        setIsLoadingResourceTrash(false);
+      }
+      throw error;
     }
   }
 
@@ -576,7 +675,7 @@ export function SettingsWorkspace({
   }
 
   async function handleSelectRestoreBackup() {
-    if (isBusy) {
+    if (isAnyStorageOperationBusy) {
       return;
     }
 
@@ -610,7 +709,7 @@ export function SettingsWorkspace({
   }
 
   function handleRequestDeleteBackup(fileName: string) {
-    if (isBusy) {
+    if (isAnyStorageOperationBusy) {
       return;
     }
 
@@ -624,7 +723,7 @@ export function SettingsWorkspace({
   }
 
   async function handleConfirmDeleteBackup() {
-    if (!deleteDialogFileName || isBusy) {
+    if (!deleteDialogFileName || isAnyStorageOperationBusy) {
       return;
     }
 
@@ -651,7 +750,7 @@ export function SettingsWorkspace({
   }
 
   async function handleRestoreBackup() {
-    if (restoreDialog?.status !== "confirm") {
+    if (restoreDialog?.status !== "confirm" || isResourceBusy) {
       return;
     }
 
@@ -705,6 +804,212 @@ export function SettingsWorkspace({
     setRestoreDialog((currentDialog) =>
       currentDialog?.status === "progress" ? currentDialog : null,
     );
+  }
+
+  async function handleScanOrphanResources() {
+    if (isAnyStorageOperationBusy) {
+      return;
+    }
+
+    setResourceOperationState("scanning");
+    setNotice(buildNotice("info", "正在扫描无引用图片资源…"));
+
+    try {
+      const result = await scanOrphanResources();
+      setResourceScanResult(result);
+      setNotice(
+        buildNotice(
+          result.warnings.length > 0 ? "warning" : "info",
+          result.warnings.length > 0
+            ? `扫描完成，发现 ${result.totalCount} 个候选项，并有 ${result.warnings.length} 条提示。`
+            : `扫描完成，发现 ${result.totalCount} 个候选项。`,
+        ),
+      );
+    } catch (error) {
+      setNotice(
+        buildNotice(
+          "error",
+          getErrorMessage(error, "扫描无引用图片资源失败，请稍后重试。"),
+        ),
+      );
+    } finally {
+      setResourceOperationState("idle");
+    }
+  }
+
+  async function handleDryRunCleanupResources() {
+    if (isAnyStorageOperationBusy) {
+      return;
+    }
+
+    setResourceOperationState("dry-running");
+    setNotice(buildNotice("info", "正在预演清理无引用图片资源…"));
+
+    try {
+      const result = await cleanupOrphanResources(true);
+      setResourceScanResult({
+        items: result.items,
+        totalCount: result.totalCount,
+        totalBytes: result.totalBytes,
+        skippedFiles: [],
+        warnings: [],
+      });
+      setNotice(
+        buildNotice("info", `预演完成，当前候选项 ${result.totalCount} 个。`),
+      );
+    } catch (error) {
+      setNotice(
+        buildNotice(
+          "error",
+          getErrorMessage(error, "预演清理失败，请稍后重试。"),
+        ),
+      );
+    } finally {
+      setResourceOperationState("idle");
+    }
+  }
+
+  function handleRequestCleanupResources() {
+    if (!canCleanupResources || !resourceScanResult) {
+      return;
+    }
+
+    setResourceCleanupDialog({
+      totalCount: resourceScanResult.totalCount,
+      totalBytes: resourceScanResult.totalBytes,
+    });
+  }
+
+  function handleCloseResourceCleanupDialog() {
+    if (resourceOperationState !== "cleaning") {
+      setResourceCleanupDialog(null);
+    }
+  }
+
+  async function handleConfirmCleanupResources() {
+    if (!resourceCleanupDialog || !canRunResourceCleanup(resourceScanResult)) {
+      return;
+    }
+
+    setResourceOperationState("cleaning");
+    setNotice(buildNotice("info", "正在将无引用图片移入图片资源回收站…"));
+
+    let cleanupResult:
+      | Awaited<ReturnType<typeof cleanupOrphanResources>>
+      | null = null;
+
+    try {
+      cleanupResult = await cleanupOrphanResources(false);
+      setResourceCleanupDialog(null);
+      setNotice(
+        buildNotice(
+          cleanupResult.failed.length > 0 ? "warning" : "info",
+          cleanupResult.failed.length > 0
+            ? `清理完成，已移入 ${cleanupResult.movedToTrashCount} 个资源，另有 ${cleanupResult.failed.length} 项失败。`
+            : `清理完成，已移入 ${cleanupResult.movedToTrashCount} 个资源到图片资源回收站。`,
+        ),
+      );
+    } catch (error) {
+      setNotice(
+        buildNotice(
+          "error",
+          getErrorMessage(error, "清理无引用图片资源失败，请稍后重试。"),
+        ),
+      );
+      setResourceOperationState("idle");
+      return;
+    }
+
+    try {
+      const nextScan = await scanOrphanResources();
+      setResourceScanResult(nextScan);
+      await refreshResourceTrashItems();
+      await refreshStorageInfo();
+    } catch (error) {
+      setNotice(
+        buildNotice(
+          "warning",
+          getErrorMessage(
+            error,
+            "清理已完成，但刷新图片资源治理结果失败，请稍后手动重新扫描。",
+          ),
+        ),
+      );
+    } finally {
+      setResourceOperationState("idle");
+    }
+  }
+
+  async function handleRestoreResourceTrashItem(item: ResourceTrashListItem) {
+    if (isAnyStorageOperationBusy || !item.canRestore) {
+      return;
+    }
+
+    setResourceOperationState("restoring-trash");
+    setNotice(buildNotice("info", "正在恢复图片资源回收站项目…"));
+
+    try {
+      await restoreResourceTrashItem(item.resourceKind, item.trashId);
+      await refreshResourceTrashItems();
+      await refreshStorageInfo();
+      setNotice(buildNotice("info", "图片资源已恢复。"));
+    } catch (error) {
+      setNotice(
+        buildNotice(
+          "error",
+          getErrorMessage(error, "恢复图片资源失败，请稍后重试。"),
+        ),
+      );
+    } finally {
+      setResourceOperationState("idle");
+    }
+  }
+
+  function handleRequestDeleteResourceTrashItem(item: ResourceTrashListItem) {
+    if (isAnyStorageOperationBusy) {
+      return;
+    }
+
+    setResourceTrashDeleteDialog({
+      trashId: item.trashId,
+      resourceKind: item.resourceKind,
+      label: getResourceTrashDeleteLabel(item),
+    });
+  }
+
+  function handleCloseResourceTrashDeleteDialog() {
+    if (resourceOperationState !== "deleting-trash") {
+      setResourceTrashDeleteDialog(null);
+    }
+  }
+
+  async function handleConfirmDeleteResourceTrashItem() {
+    if (!resourceTrashDeleteDialog || isAnyStorageOperationBusy) {
+      return;
+    }
+
+    setResourceOperationState("deleting-trash");
+    setNotice(null);
+
+    try {
+      await permanentlyDeleteResourceTrashItem(
+        resourceTrashDeleteDialog.resourceKind,
+        resourceTrashDeleteDialog.trashId,
+      );
+      setResourceTrashDeleteDialog(null);
+      await refreshResourceTrashItems();
+      setNotice(buildNotice("info", "图片资源回收站项目已永久删除。"));
+    } catch (error) {
+      setResourceTrashDeleteDialog(null);
+      setNotice(
+        buildNotice(
+          "error",
+          getErrorMessage(error, "永久删除图片资源失败，请稍后重试。"),
+        ),
+      );
+    } finally {
+      setResourceOperationState("idle");
+    }
   }
 
   if (isInitializing && !settings && !environmentInfo) {
@@ -929,7 +1234,7 @@ export function SettingsWorkspace({
             <button
               type="button"
               className={styles.secondaryButton}
-              disabled={isBusy || !environmentInfo}
+              disabled={isAnyStorageOperationBusy || !environmentInfo}
               onClick={() => void handleOpenDataDirectory()}
             >
               打开数据目录
@@ -937,12 +1242,231 @@ export function SettingsWorkspace({
             <button
               type="button"
               className={styles.secondaryButton}
-              disabled={isBusy || !environmentInfo}
+              disabled={isAnyStorageOperationBusy || !environmentInfo}
               onClick={() => void handleOpenBackupsDirectory()}
             >
               打开备份目录
             </button>
           </div>
+
+          <section className={styles.resourceCard}>
+            <div className={styles.resourceSection}>
+              <div className={styles.resourceSectionHeader}>
+                <div>
+                  <h4 className={styles.typographyTitle}>图片资源管理</h4>
+                  <p className={styles.typographyDescription}>
+                    正式图片资源不会自动清理。请先手动扫描无引用图片，再决定是否移入图片资源回收站。
+                  </p>
+                </div>
+              </div>
+
+              <div className={styles.resourceActionRow}>
+                <button
+                  type="button"
+                  className={styles.secondaryButton}
+                  disabled={isAnyStorageOperationBusy}
+                  onClick={() => void handleScanOrphanResources()}
+                >
+                  {resourceOperationState === "scanning"
+                    ? "扫描中…"
+                    : "扫描无引用图片"}
+                </button>
+                <button
+                  type="button"
+                  className={styles.secondaryButton}
+                  disabled={isAnyStorageOperationBusy}
+                  onClick={() => void handleDryRunCleanupResources()}
+                >
+                  {resourceOperationState === "dry-running"
+                    ? "预演中…"
+                    : "预演清理"}
+                </button>
+                <button
+                  type="button"
+                  className={styles.primaryButton}
+                  disabled={!canCleanupResources}
+                  onClick={handleRequestCleanupResources}
+                >
+                  {resourceOperationState === "cleaning"
+                    ? "清理中…"
+                    : "清理到图片回收站"}
+                </button>
+              </div>
+
+              {resourceScanResult ? (
+                <>
+                  <div className={styles.resourceSummaryGrid}>
+                    <div className={styles.storageStat}>
+                      <span>候选数量</span>
+                      <strong>{resourceScanResult.totalCount}</strong>
+                    </div>
+                    <div className={styles.storageStat}>
+                      <span>总大小</span>
+                      <strong>{formatBytes(resourceScanResult.totalBytes)}</strong>
+                    </div>
+                    <div className={styles.storageStat}>
+                      <span>跳过项</span>
+                      <strong>{resourceScanResult.skippedFiles.length}</strong>
+                    </div>
+                    <div className={styles.storageStat}>
+                      <span>提示</span>
+                      <strong>{resourceScanResult.warnings.length}</strong>
+                    </div>
+                  </div>
+
+                  {resourceScanResult.warnings.length > 0 ? (
+                    <div className={styles.resourceWarningBlock}>
+                      {resourceScanResult.warnings.map((warning) => (
+                        <p key={warning} className={styles.resourceWarningText}>
+                          {warning}
+                        </p>
+                      ))}
+                    </div>
+                  ) : null}
+
+                  {resourceScanResult.items.length > 0 ? (
+                    <div className={styles.resourceList}>
+                      {resourceScanResult.items.map((item) => (
+                        <article
+                          key={`${item.kind}:${item.resourcePath}`}
+                          className={styles.resourceListItem}
+                        >
+                          <div className={styles.resourceListHeader}>
+                            <span className={styles.resourceKindBadge}>
+                              {getResourceKindLabel(item.kind)}
+                            </span>
+                            <span className={styles.metaText}>
+                              {formatBytes(item.sizeBytes)}
+                            </span>
+                          </div>
+                          <strong className={styles.resourcePathText}>
+                            {item.resourcePath}
+                          </strong>
+                          <div className={styles.resourceMetaRow}>
+                            {item.extension ? (
+                              <span>扩展名：{item.extension}</span>
+                            ) : null}
+                            {item.source ? <span>来源：{item.source}</span> : null}
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className={styles.emptyState}>
+                      <strong>最近一次扫描没有发现无引用图片</strong>
+                      <span>
+                        只有明确无人引用的正文图片或封面图片才会出现在这里。
+                      </span>
+                    </div>
+                  )}
+
+                  {resourceScanResult.skippedFiles.length > 0 ? (
+                    <details className={styles.resourceSkippedDetails}>
+                      <summary>查看跳过项</summary>
+                      <div className={styles.resourceSkippedList}>
+                        {resourceScanResult.skippedFiles.map((item) => (
+                          <div
+                            key={`${item.path}:${item.reason}`}
+                            className={styles.resourceSkippedItem}
+                          >
+                            <strong className={styles.resourcePathText}>
+                              {item.path}
+                            </strong>
+                            <span>{item.reason}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </details>
+                  ) : null}
+                </>
+              ) : (
+                <div className={styles.emptyState}>
+                  <strong>还没有扫描结果</strong>
+                  <span>
+                    点击“扫描无引用图片”或“预演清理”后，这里会显示候选资源、跳过项和提示信息。
+                  </span>
+                </div>
+              )}
+            </div>
+
+            <div className={styles.resourceSection}>
+              <div className={styles.resourceSectionHeader}>
+                <div>
+                  <h4 className={styles.typographyTitle}>图片资源回收站</h4>
+                  <p className={styles.typographyDescription}>
+                    这里展示已经移入回收站的图片和封面资源。恢复后不会自动重新扫描无引用图片。
+                  </p>
+                </div>
+                <span className={styles.metaText}>共 {resourceTrashItems.length} 项</span>
+              </div>
+
+              {isLoadingResourceTrash && resourceTrashItems.length === 0 ? (
+                <p className={styles.loadingText}>正在读取图片资源回收站…</p>
+              ) : resourceTrashItems.length === 0 ? (
+                <div className={styles.emptyState}>
+                  <strong>图片资源回收站为空</strong>
+                  <span>执行显式清理后，移入回收站的图片资源会显示在这里。</span>
+                </div>
+              ) : (
+                <div className={styles.resourceTrashList}>
+                  {resourceTrashItems.map((item) => (
+                    <article
+                      key={`${item.resourceKind}:${item.trashId}`}
+                      className={styles.resourceListItem}
+                    >
+                      <div className={styles.resourceListHeader}>
+                        <span className={styles.resourceKindBadge}>
+                          {getResourceKindLabel(item.resourceKind)}
+                        </span>
+                        <span
+                          className={`${styles.resourceStatusBadge} ${
+                            item.canRestore
+                              ? styles.resourceStatusBadgeOk
+                              : styles.resourceStatusBadgeWarning
+                          }`}
+                        >
+                          {getResourceTrashStatusLabel(item.status)}
+                        </span>
+                      </div>
+                      <strong className={styles.resourcePathText}>
+                        {item.originalPath ?? item.trashId}
+                      </strong>
+                      <div className={styles.resourceMetaStack}>
+                        <span>删除时间：{item.deletedAt ?? "未知"}</span>
+                        <span>来源：{item.source ?? "未知"}</span>
+                        {!item.originalPath ? <span>回收站 ID：{item.trashId}</span> : null}
+                        {item.message ? (
+                          <span className={styles.resourceDangerText}>
+                            {item.message}
+                          </span>
+                        ) : null}
+                      </div>
+                      <div className={styles.actionRow}>
+                        <button
+                          type="button"
+                          className={styles.secondaryButton}
+                          disabled={isAnyStorageOperationBusy || !item.canRestore}
+                          onClick={() => void handleRestoreResourceTrashItem(item)}
+                        >
+                          {resourceOperationState === "restoring-trash"
+                            ? "恢复中…"
+                            : "恢复"}
+                        </button>
+                        <button
+                          type="button"
+                          className={styles.dangerButton}
+                          disabled={isAnyStorageOperationBusy}
+                          onClick={() => handleRequestDeleteResourceTrashItem(item)}
+                        >
+                          永久删除
+                        </button>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </div>
+          </section>
         </section>
 
         <div className={styles.backupColumn}>
@@ -970,7 +1494,7 @@ export function SettingsWorkspace({
                 <input
                   type="checkbox"
                   checked={settings?.autoBackupEnabled ?? false}
-                  disabled={isBusy || !settings}
+                  disabled={isAnyStorageOperationBusy || !settings}
                   onChange={(event) =>
                     void handleAutoBackupToggle(event.currentTarget.checked)
                   }
@@ -986,7 +1510,7 @@ export function SettingsWorkspace({
                 </div>
                 <select
                   value={settings?.backupFrequencyDays ?? 1}
-                  disabled={isBusy || !settings}
+                  disabled={isAnyStorageOperationBusy || !settings}
                   onChange={(event) =>
                     void handleBackupFrequencyChange(
                       Number(
@@ -1012,7 +1536,7 @@ export function SettingsWorkspace({
                 </div>
                 <select
                   value={settings?.backupRetentionCount ?? 5}
-                  disabled={isBusy || !settings}
+                  disabled={isAnyStorageOperationBusy || !settings}
                   onChange={(event) =>
                     void handleRetentionChange(
                       Number(
@@ -1032,7 +1556,7 @@ export function SettingsWorkspace({
               <button
                 type="button"
                 className={styles.primaryButton}
-                disabled={isBusy || !settings}
+                disabled={isAnyStorageOperationBusy || !settings}
                 onClick={() => void handleCreateBackup()}
               >
                 {operationState === "creating" ? "备份中…" : "立即创建备份"}
@@ -1061,7 +1585,7 @@ export function SettingsWorkspace({
                   <button
                     type="button"
                     className={styles.secondaryButton}
-                    disabled={isBusy || !settings}
+                    disabled={isAnyStorageOperationBusy || !settings}
                     onClick={() => void handleSelectRestoreBackup()}
                   >
                     选择外部备份文件恢复
@@ -1085,7 +1609,7 @@ export function SettingsWorkspace({
                           <button
                             type="button"
                             className={styles.secondaryButton}
-                            disabled={isBusy}
+                            disabled={isAnyStorageOperationBusy}
                             onClick={() => void handlePrepareRestore(backup)}
                           >
                             恢复备份
@@ -1093,7 +1617,7 @@ export function SettingsWorkspace({
                           <button
                             type="button"
                             className={styles.secondaryButton}
-                            disabled={isBusy}
+                            disabled={isAnyStorageOperationBusy}
                             onClick={() => handleRequestDeleteBackup(backup.fileName)}
                           >
                             删除
@@ -1163,7 +1687,7 @@ export function SettingsWorkspace({
                 <button
                   type="button"
                   className={`${styles.dangerButton} ${styles.restoreDialogButton}`}
-                  disabled={isBusy}
+                  disabled={isAnyStorageOperationBusy}
                   onClick={() => void handleRestoreBackup()}
                 >
                   确认
@@ -1171,7 +1695,7 @@ export function SettingsWorkspace({
                 <button
                   type="button"
                   className={`${styles.secondaryButton} ${styles.restoreDialogButton}`}
-                  disabled={isBusy}
+                  disabled={isAnyStorageOperationBusy}
                   onClick={handleCloseRestoreDialog}
                 >
                   取消
@@ -1211,19 +1735,112 @@ export function SettingsWorkspace({
             </div>
 
             <div className={styles.restoreDialogActions}>
+                <button
+                  type="button"
+                  className={`${styles.dangerButton} ${styles.restoreDialogButton}`}
+                  disabled={isAnyStorageOperationBusy}
+                  onClick={() => void handleConfirmDeleteBackup()}
+                >
+                  {operationState === "deleting" ? "删除中…" : "确认删除"}
+              </button>
+                <button
+                  type="button"
+                  className={`${styles.secondaryButton} ${styles.restoreDialogButton}`}
+                  disabled={isAnyStorageOperationBusy}
+                  onClick={handleCloseDeleteDialog}
+                >
+                  取消
+                </button>
+              </div>
+          </section>
+        </div>
+      ) : null}
+
+      {resourceCleanupDialog ? (
+        <div className={styles.modalBackdrop} role="presentation">
+          <section
+            className={styles.restoreDialog}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="resource-cleanup-dialog-title"
+          >
+            <div className={styles.restoreDialogHeader}>
+              <h3
+                id="resource-cleanup-dialog-title"
+                className={styles.restoreDialogTitle}
+              >
+                清理到图片回收站
+              </h3>
+              <p className={styles.restoreDialogDescription}>
+                {buildCleanupConfirmationMessage()}
+              </p>
+              <p className={styles.deleteBackupFileName}>
+                当前界面候选：{resourceCleanupDialog.totalCount} 项，约{" "}
+                {formatBytes(resourceCleanupDialog.totalBytes)}
+              </p>
+            </div>
+
+            <div className={styles.restoreDialogActions}>
               <button
                 type="button"
                 className={`${styles.dangerButton} ${styles.restoreDialogButton}`}
-                disabled={operationState === "deleting"}
-                onClick={() => void handleConfirmDeleteBackup()}
+                disabled={isAnyStorageOperationBusy}
+                onClick={() => void handleConfirmCleanupResources()}
               >
-                {operationState === "deleting" ? "删除中…" : "确认删除"}
+                {resourceOperationState === "cleaning" ? "清理中…" : "确认清理"}
               </button>
               <button
                 type="button"
                 className={`${styles.secondaryButton} ${styles.restoreDialogButton}`}
-                disabled={operationState === "deleting"}
-                onClick={handleCloseDeleteDialog}
+                disabled={isAnyStorageOperationBusy}
+                onClick={handleCloseResourceCleanupDialog}
+              >
+                取消
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {resourceTrashDeleteDialog ? (
+        <div className={styles.modalBackdrop} role="presentation">
+          <section
+            className={styles.restoreDialog}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="resource-trash-delete-dialog-title"
+          >
+            <div className={styles.restoreDialogHeader}>
+              <h3
+                id="resource-trash-delete-dialog-title"
+                className={styles.restoreDialogTitle}
+              >
+                永久删除资源
+              </h3>
+              <p className={styles.restoreDialogDescription}>
+                此操作不可恢复。
+              </p>
+              <p className={styles.deleteBackupFileName}>
+                {resourceTrashDeleteDialog.label}
+              </p>
+            </div>
+
+            <div className={styles.restoreDialogActions}>
+              <button
+                type="button"
+                className={`${styles.dangerButton} ${styles.restoreDialogButton}`}
+                disabled={isAnyStorageOperationBusy}
+                onClick={() => void handleConfirmDeleteResourceTrashItem()}
+              >
+                {resourceOperationState === "deleting-trash"
+                  ? "删除中…"
+                  : "确认删除"}
+              </button>
+              <button
+                type="button"
+                className={`${styles.secondaryButton} ${styles.restoreDialogButton}`}
+                disabled={isAnyStorageOperationBusy}
+                onClick={handleCloseResourceTrashDeleteDialog}
               >
                 取消
               </button>

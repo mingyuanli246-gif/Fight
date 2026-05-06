@@ -375,6 +375,173 @@
   gap: 10px;
 }
 
+.resourceCard {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px;
+  background: rgba(255, 255, 255, 0.66);
+  border: 1px solid var(--color-border-soft);
+  border-radius: 18px;
+}
+
+.resourceSection {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.resourceSectionHeader {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.resourceActionRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.resourceSummaryGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.resourceWarningBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(245, 158, 11, 0.22);
+  background: rgba(254, 243, 199, 0.45);
+}
+
+.resourceWarningText {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #92400e;
+}
+
+.resourceDangerText {
+  color: #b91c1c;
+  font-weight: 700;
+}
+
+.resourceList,
+.resourceTrashList {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.resourceListItem {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid var(--color-border-soft);
+  border-radius: 16px;
+}
+
+.resourceListHeader {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.resourceKindBadge,
+.resourceStatusBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.resourceKindBadge {
+  color: #1d4ed8;
+  background: rgba(219, 234, 254, 0.88);
+}
+
+.resourceStatusBadge {
+  color: var(--color-text-primary);
+  background: rgba(226, 232, 240, 0.8);
+}
+
+.resourceStatusBadgeOk {
+  color: #166534;
+  background: rgba(220, 252, 231, 0.86);
+}
+
+.resourceStatusBadgeWarning {
+  color: #9a3412;
+  background: rgba(255, 237, 213, 0.88);
+}
+
+.resourcePathText {
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--color-text-primary);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.resourceMetaRow,
+.resourceMetaStack {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+}
+
+.resourceMetaStack {
+  flex-direction: column;
+  gap: 6px;
+}
+
+.resourceSkippedDetails {
+  padding: 14px 16px;
+  background: rgba(248, 250, 252, 0.82);
+  border: 1px dashed var(--color-border-soft);
+  border-radius: 16px;
+}
+
+.resourceSkippedDetails summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.resourceSkippedList {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.resourceSkippedItem {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+}
+
 .controlGroup {
   display: flex;
   flex-direction: column;
