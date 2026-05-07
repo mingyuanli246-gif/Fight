@@ -1571,6 +1571,9 @@ export function SettingsWorkspace({
                 <p className={styles.sectionDescription}>
                   选择已有备份恢复，或在没有本地备份时选择外部备份文件恢复。
                 </p>
+                <p className={styles.sectionDescription}>
+                  备份只包含当前正式使用中的笔记、设置和资源文件；图片资源回收站属于本机临时容灾区，不会随备份迁移或恢复。
+                </p>
               </div>
               <span className={styles.metaText}>共 {backups.length} 份</span>
             </div>
