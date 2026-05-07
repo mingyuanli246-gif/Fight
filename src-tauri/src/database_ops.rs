@@ -3431,6 +3431,7 @@ fn duplicate_note_above_tx_internal(
         &duplicate_title,
         &stored_content,
     )?;
+    sync_note_resource_links_tx(&transaction, duplicate_note_id, &stored_content)?;
 
     transaction
         .commit()
@@ -3779,6 +3780,8 @@ fn update_notebook_cover_image_tx_internal(
         return Err("目标笔记本不存在。".to_string());
     }
 
+    sync_notebook_cover_resource_link_tx(&transaction, notebook_id, Some(&normalized_path))?;
+
     transaction
         .commit()
         .map_err(|error| to_command_error("提交保存笔记本封面事务", error))?;
@@ -3808,6 +3811,8 @@ fn clear_notebook_cover_image_tx_internal(
     if updated == 0 {
         return Err("目标笔记本不存在。".to_string());
     }
+
+    sync_notebook_cover_resource_link_tx(&transaction, notebook_id, None)?;
 
     transaction
         .commit()
@@ -3879,6 +3884,7 @@ fn update_note_content_tx_internal(
 
     let (title, content_plaintext) = fetch_note_index_payload(&transaction, note_id)?;
     upsert_note_search_entry(&transaction, note_id, &title, &content_plaintext)?;
+    sync_note_resource_links_tx(&transaction, note_id, content)?;
     transaction
         .commit()
         .map_err(|error| to_command_error("提交保存正文事务", error))?;
@@ -3982,6 +3988,7 @@ fn save_note_content_with_tags_tx_internal(
 
     let (title, content_plaintext) = fetch_note_index_payload(&transaction, note_id)?;
     upsert_note_search_entry(&transaction, note_id, &title, &content_plaintext)?;
+    sync_note_resource_links_tx(&transaction, note_id, content)?;
     transaction
         .commit()
         .map_err(|error| to_command_error("提交保存正文事务", error))?;
@@ -4892,6 +4899,185 @@ fn insert_resource_link_index_row(
     Ok(())
 }
 
+fn list_resource_link_paths_for_owner(
+    connection: &Connection,
+    owner_type: &str,
+    owner_id: i64,
+) -> Result<BTreeSet<String>, String> {
+    let mut statement = connection
+        .prepare(
+            "
+              SELECT resource_path
+              FROM resource_links
+              WHERE owner_type = ?1 AND owner_id = ?2
+            ",
+        )
+        .map_err(|error| to_command_error("读取资源引用索引", error))?;
+    let rows = statement
+        .query_map(params![owner_type, owner_id], |row| row.get::<_, String>(0))
+        .map_err(|error| to_command_error("读取资源引用索引", error))?;
+
+    let mut resource_paths = BTreeSet::new();
+    for row in rows {
+        resource_paths.insert(row.map_err(|error| to_command_error("读取资源引用索引", error))?);
+    }
+
+    Ok(resource_paths)
+}
+
+fn insert_resource_link_tx(
+    connection: &Connection,
+    owner_type: &str,
+    owner_id: i64,
+    resource_path: &str,
+) -> Result<bool, String> {
+    let inserted = connection
+        .execute(
+            "
+              INSERT OR IGNORE INTO resource_links (
+                owner_type,
+                owner_id,
+                resource_path
+              )
+              VALUES (?1, ?2, ?3)
+            ",
+            params![owner_type, owner_id, resource_path],
+        )
+        .map_err(|error| to_command_error("写入资源引用索引", error))?;
+    Ok(inserted > 0)
+}
+
+fn delete_resource_link_tx(
+    connection: &Connection,
+    owner_type: &str,
+    owner_id: i64,
+    resource_path: &str,
+) -> Result<bool, String> {
+    let deleted = connection
+        .execute(
+            "
+              DELETE FROM resource_links
+              WHERE owner_type = ?1 AND owner_id = ?2 AND resource_path = ?3
+            ",
+            params![owner_type, owner_id, resource_path],
+        )
+        .map_err(|error| to_command_error("删除资源引用索引", error))?;
+    Ok(deleted > 0)
+}
+
+fn increment_resource_ref_tx(connection: &Connection, resource_path: &str) -> Result<(), String> {
+    let updated = connection
+        .execute(
+            "
+              UPDATE managed_resources
+              SET
+                ref_count = ref_count + 1,
+                pending_delete_at = NULL,
+                deleted_at = NULL,
+                last_cleanup_error = NULL
+              WHERE resource_path = ?1
+            ",
+            [resource_path],
+        )
+        .map_err(|error| to_command_error("增加资源引用计数", error))?;
+
+    if updated == 0 {
+        return Err("目标资源不存在。".to_string());
+    }
+
+    Ok(())
+}
+
+fn decrement_resource_ref_tx(connection: &Connection, resource_path: &str) -> Result<(), String> {
+    let updated = connection
+        .execute(
+            "
+              UPDATE managed_resources
+              SET
+                ref_count = CASE WHEN ref_count > 0 THEN ref_count - 1 ELSE 0 END,
+                pending_delete_at = CASE
+                  WHEN ref_count <= 1 THEN COALESCE(pending_delete_at, CURRENT_TIMESTAMP)
+                  ELSE pending_delete_at
+                END
+              WHERE resource_path = ?1
+            ",
+            [resource_path],
+        )
+        .map_err(|error| to_command_error("减少资源引用计数", error))?;
+
+    if updated == 0 {
+        return Err("目标资源不存在。".to_string());
+    }
+
+    Ok(())
+}
+
+fn sync_resource_links_tx(
+    connection: &Connection,
+    owner_type: &str,
+    owner_id: i64,
+    resource_kind: &str,
+    next_paths: BTreeSet<String>,
+) -> Result<(), String> {
+    let current_paths = list_resource_link_paths_for_owner(connection, owner_type, owner_id)?;
+
+    for resource_path in current_paths.difference(&next_paths) {
+        if delete_resource_link_tx(connection, owner_type, owner_id, resource_path)? {
+            decrement_resource_ref_tx(connection, resource_path)?;
+        }
+    }
+
+    for resource_path in next_paths.difference(&current_paths) {
+        insert_managed_resource_index_row(connection, resource_path, resource_kind)?;
+        if insert_resource_link_tx(connection, owner_type, owner_id, resource_path)? {
+            increment_resource_ref_tx(connection, resource_path)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn sync_note_resource_links_tx(
+    connection: &Connection,
+    note_id: i64,
+    content: &str,
+) -> Result<(), String> {
+    let next_paths = extract_note_image_resource_paths_from_html(content)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    sync_resource_links_tx(
+        connection,
+        RESOURCE_LINK_OWNER_TYPE_NOTE,
+        note_id,
+        MANAGED_RESOURCE_KIND_NOTE_IMAGE,
+        next_paths,
+    )
+}
+
+fn sync_notebook_cover_resource_link_tx(
+    connection: &Connection,
+    notebook_id: i64,
+    next_cover_path: Option<&str>,
+) -> Result<(), String> {
+    let mut next_paths = BTreeSet::new();
+
+    if let Some(resource_path) = next_cover_path
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(normalize_notebook_cover_resource_path_for_index)
+    {
+        next_paths.insert(resource_path);
+    }
+
+    sync_resource_links_tx(
+        connection,
+        RESOURCE_LINK_OWNER_TYPE_NOTEBOOK_COVER,
+        notebook_id,
+        MANAGED_RESOURCE_KIND_NOTEBOOK_COVER,
+        next_paths,
+    )
+}
+
 fn rebuild_managed_resource_index_tx_internal(connection: &Connection) -> Result<(), String> {
     connection
         .execute("DELETE FROM resource_links", [])
@@ -4910,7 +5096,9 @@ fn rebuild_managed_resource_index_tx_internal(connection: &Connection) -> Result
             )
             .map_err(|error| to_command_error("读取正文图片引用", error))?;
         let rows = note_statement
-            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
             .map_err(|error| to_command_error("读取正文图片引用", error))?;
 
         rows.map(|row| row.map_err(|error| to_command_error("读取正文图片引用", error)))
@@ -4943,7 +5131,9 @@ fn rebuild_managed_resource_index_tx_internal(connection: &Connection) -> Result
             )
             .map_err(|error| to_command_error("读取封面图片引用", error))?;
         let rows = notebook_statement
-            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)))
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?))
+            })
             .map_err(|error| to_command_error("读取封面图片引用", error))?;
 
         rows.map(|row| row.map_err(|error| to_command_error("读取封面图片引用", error)))
@@ -5104,22 +5294,21 @@ fn scan_orphan_directory(
             continue;
         }
 
-        if leased_resource_paths.contains(&resource_path) || live_resource_paths.contains(&resource_path)
+        if leased_resource_paths.contains(&resource_path)
+            || live_resource_paths.contains(&resource_path)
         {
             continue;
         }
 
-        let metadata = fs::metadata(entry.path())
-            .map_err(|error| format!("读取资源文件信息失败：{error}"))?;
+        let metadata =
+            fs::metadata(entry.path()).map_err(|error| format!("读取资源文件信息失败：{error}"))?;
         let kind = orphan_resource_kind_for_path(&resource_path)?;
         items.push(OrphanImageFileRecord {
             resource_path,
             absolute_path: Some(entry.path().to_string_lossy().to_string()),
             kind,
             size_bytes: metadata.len(),
-            extension: orphan_resource_extension_for_path(
-                &entry.path().to_string_lossy(),
-            ),
+            extension: orphan_resource_extension_for_path(&entry.path().to_string_lossy()),
             source: None,
         });
     }
@@ -6340,38 +6529,37 @@ pub fn set_review_task_completed_tx(
 mod tests {
     use super::{
         activate_note_review_schedule_tx_internal, add_days, add_tag_to_note_by_name_tx_internal,
-        bind_review_plan_to_note_tx_internal,
-        cleanup_expired_review_schedules,
-        clear_note_review_schedule_tx_internal, clear_notebook_cover_image_tx_internal,
-        collect_managed_resource_paths_for_note, collect_managed_resource_paths_for_notebook,
-        create_folder_tx_internal,
+        bind_review_plan_to_note_tx_internal, cleanup_expired_review_schedules,
+        cleanup_orphan_image_resources_internal, clear_note_review_schedule_tx_internal,
+        clear_notebook_cover_image_tx_internal, collect_managed_resource_paths_for_note,
+        collect_managed_resource_paths_for_notebook, create_folder_tx_internal,
         create_note_tx_internal, create_notebook_tx_internal, create_review_plan_tx_internal,
         delete_folder_tx_internal, delete_note_tx_internal, delete_notebook_tx_internal,
         delete_review_plan_tx_internal, duplicate_note_above_tx_internal, ensure_app_meta_table,
         ensure_note_search_ready_internal, ensure_note_search_table,
         ensure_notebook_tree_constraints_tx_internal, ensure_recovery_notebook,
         ensure_review_feature_ready_internal, extract_indexable_plain_text,
-        extract_note_image_resource_paths_from_html,
         extract_managed_resource_path_from_text, extract_note_image_resource_paths,
-        extract_tag_name, fetch_folder_trash_state, fetch_note_trash_state,
-        get_note_review_schedule_tx_internal, get_review_schedule_dirty_note_ids,
-        list_trash_roots_tx_internal, move_folder_to_notebook_top_tx_internal,
-        move_folder_to_trash_tx_internal, move_note_to_trash_tx_internal, move_note_tx_internal,
-        normalize_managed_resource_path, normalize_tag_color,
-        rebuild_managed_resource_index_tx_internal, rebuild_note_search_index_internal,
-        rename_review_plan_tx_internal, reorder_folders_tx_internal, reorder_notebooks_tx_internal,
+        extract_note_image_resource_paths_from_html, extract_tag_name, fetch_folder_trash_state,
+        fetch_note_trash_state, get_note_review_schedule_tx_internal,
+        get_review_schedule_dirty_note_ids, list_trash_roots_tx_internal,
+        move_folder_to_notebook_top_tx_internal, move_folder_to_trash_tx_internal,
+        move_note_to_trash_tx_internal, move_note_tx_internal, normalize_managed_resource_path,
+        normalize_tag_color, rebuild_managed_resource_index_tx_internal,
+        rebuild_note_search_index_internal, rename_review_plan_tx_internal,
+        reorder_folders_tx_internal, reorder_notebooks_tx_internal,
         restore_trashed_item_tx_internal, save_note_content_with_tags_tx_internal,
-        scan_orphan_image_resources_internal,
-        save_note_review_schedule_tx_internal, set_note_review_schedule_dirty_tx_internal,
-        set_review_task_completed_tx_internal, today_local_date_key,
-        update_notebook_cover_image_tx_internal, update_review_schedule_dirty_note_id,
-        cleanup_orphan_image_resources_internal, NoteTagOccurrenceInput, OrphanImageCleanupResult,
+        save_note_review_schedule_tx_internal, scan_orphan_image_resources_internal,
+        set_note_review_schedule_dirty_tx_internal, set_review_task_completed_tx_internal,
+        sync_note_resource_links_tx, sync_notebook_cover_resource_link_tx, today_local_date_key,
+        update_note_content_tx_internal, update_notebook_cover_image_tx_internal,
+        update_review_schedule_dirty_note_id, NoteTagOccurrenceInput, OrphanImageCleanupResult,
         OrphanImageFileRecord, OrphanImageScanResult, OrphanResourceKind, TrashEntityType,
-        APP_META_KEY_REVIEW_FEATURE_REBUILD_V1_DONE,
-        APP_META_KEY_REVIEW_SCHEDULE_DIRTY_NOTE_IDS, DEFAULT_REVIEW_PLAN_NAME, DEFAULT_TAG_COLOR,
+        APP_META_KEY_REVIEW_FEATURE_REBUILD_V1_DONE, APP_META_KEY_REVIEW_SCHEDULE_DIRTY_NOTE_IDS,
+        DEFAULT_REVIEW_PLAN_NAME, DEFAULT_TAG_COLOR,
     };
     use chrono::Local;
-    use rusqlite::{params, Connection};
+    use rusqlite::{params, Connection, OptionalExtension};
     use std::collections::BTreeSet;
     use std::fs;
     use std::path::Path;
@@ -6653,6 +6841,55 @@ mod tests {
         }
 
         assert_eq!(matches, 1, "expected one trash item for {resource_path}");
+    }
+
+    fn managed_resource_row(
+        connection: &Connection,
+        resource_path: &str,
+    ) -> Option<(String, i64, Option<String>, Option<String>, Option<String>)> {
+        connection
+            .query_row(
+                "
+                  SELECT resource_kind, ref_count, pending_delete_at, deleted_at, last_cleanup_error
+                  FROM managed_resources
+                  WHERE resource_path = ?1
+                ",
+                [resource_path],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .expect("read managed resource row")
+    }
+
+    fn owner_resource_links(
+        connection: &Connection,
+        owner_type: &str,
+        owner_id: i64,
+    ) -> Vec<String> {
+        let mut statement = connection
+            .prepare(
+                "
+                  SELECT resource_path
+                  FROM resource_links
+                  WHERE owner_type = ?1 AND owner_id = ?2
+                  ORDER BY resource_path ASC
+                ",
+            )
+            .expect("prepare owner resource links");
+
+        statement
+            .query_map(params![owner_type, owner_id], |row| row.get::<_, String>(0))
+            .expect("query owner resource links")
+            .map(|row| row.expect("map owner resource link"))
+            .collect()
     }
 
     fn orphan_record(
@@ -7037,7 +7274,8 @@ mod tests {
             )
             .expect("insert stale link");
 
-        rebuild_managed_resource_index_tx_internal(&connection).expect("rebuild managed resource index");
+        rebuild_managed_resource_index_tx_internal(&connection)
+            .expect("rebuild managed resource index");
 
         let links: Vec<(String, i64, String)> = {
             let mut statement = connection
@@ -7391,7 +7629,6 @@ mod tests {
         assert_eq!(folder_count, 0);
     }
 
-
     #[test]
     fn delete_folder_path_reports_missing_folder() {
         let mut connection = test_connection();
@@ -7401,7 +7638,6 @@ mod tests {
 
         assert_eq!(error, "目标文件夹不存在。");
     }
-
 
     #[test]
     fn create_folder_path_can_commit_three_times_with_stable_sort_order() {
@@ -7805,6 +8041,8 @@ mod tests {
                 [],
             )
             .expect("insert review task");
+        sync_note_resource_links_tx(&connection, 2, rich_content)
+            .expect("seed original note resource links");
 
         let duplicate =
             duplicate_note_above_tx_internal(&mut connection, 2).expect("duplicate note");
@@ -7880,6 +8118,18 @@ mod tests {
         assert_eq!(copied_occurrences, 0);
         assert_eq!(copied_review_bindings, 0);
         assert_eq!(copied_review_tasks, 0);
+        assert_eq!(
+            owner_resource_links(&connection, "note", 2),
+            vec!["resources/images/demo.png".to_string()]
+        );
+        assert_eq!(
+            owner_resource_links(&connection, "note", duplicate.id),
+            vec!["resources/images/demo.png".to_string()]
+        );
+        assert_eq!(
+            managed_resource_row(&connection, "resources/images/demo.png"),
+            Some(("note_image".to_string(), 2, None, None, None))
+        );
     }
 
     #[test]
@@ -8782,7 +9032,10 @@ mod tests {
         let saved_note = save_note_content_with_tags_tx_internal(
             &mut connection,
             1,
-            "<p data-block-id=\"blk_new_a\"><span data-note-tag=\"true\" data-note-tag-id=\"1\" data-note-tag-color=\"#FF3B30\" data-note-tag-remark=\"第一条批注\">重点</span>文本</p>",
+            concat!(
+                "<p data-block-id=\"blk_new_a\"><span data-note-tag=\"true\" data-note-tag-id=\"1\" data-note-tag-color=\"#FF3B30\" data-note-tag-remark=\"第一条批注\">重点</span>文本</p>",
+                "<img data-note-image=\"true\" data-resource-path=\"resources/images/from-tags-save.png\" alt=\"配图\" />"
+            ),
             &[
                 NoteTagOccurrenceInput {
                     tag_id: 1,
@@ -8837,12 +9090,194 @@ mod tests {
             )
             .expect("read note_search");
 
-        assert_eq!(saved_note.content_plaintext.as_deref(), Some("<p data-block-id=\"blk_new_a\"><span data-note-tag=\"true\" data-note-tag-id=\"1\" data-note-tag-color=\"#FF3B30\" data-note-tag-remark=\"第一条批注\">重点</span>文本</p>"));
+        assert_eq!(saved_note.content_plaintext.as_deref(), Some(concat!(
+            "<p data-block-id=\"blk_new_a\"><span data-note-tag=\"true\" data-note-tag-id=\"1\" data-note-tag-color=\"#FF3B30\" data-note-tag-remark=\"第一条批注\">重点</span>文本</p>",
+            "<img data-note-image=\"true\" data-resource-path=\"resources/images/from-tags-save.png\" alt=\"配图\" />"
+        )));
         assert_eq!(occurrence_count, 2);
         assert_eq!(note_tag_count, 2);
         assert_eq!(stored_first_remark.as_deref(), Some("第一条批注"));
         assert_eq!(stored_title_body.0, "文件一");
         assert!(stored_title_body.1.contains("重点文本"));
+        assert_eq!(
+            owner_resource_links(&connection, "note", 1),
+            vec!["resources/images/from-tags-save.png".to_string()]
+        );
+        assert_eq!(
+            managed_resource_row(&connection, "resources/images/from-tags-save.png"),
+            Some(("note_image".to_string(), 1, None, None, None))
+        );
+    }
+
+    #[test]
+    fn update_note_content_path_syncs_managed_resource_links() {
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, '文件一', '<p>初始正文</p>')",
+                [],
+            )
+            .expect("insert note");
+
+        update_note_content_tx_internal(
+            &mut connection,
+            1,
+            concat!(
+                "<img data-note-image=\"true\" data-resource-path=\"resources/images/demo-a.png\" />",
+                "<img data-note-image=\"true\" data-resource-path=\"resources/images/demo-b.png\" />",
+                "<img data-note-image=\"true\" data-resource-path=\"resources/images/demo-a.png\" />",
+            ),
+        )
+        .expect("save note with images");
+
+        assert_eq!(
+            owner_resource_links(&connection, "note", 1),
+            vec![
+                "resources/images/demo-a.png".to_string(),
+                "resources/images/demo-b.png".to_string(),
+            ]
+        );
+        assert_eq!(
+            managed_resource_row(&connection, "resources/images/demo-a.png"),
+            Some(("note_image".to_string(), 1, None, None, None))
+        );
+        assert_eq!(
+            managed_resource_row(&connection, "resources/images/demo-b.png"),
+            Some(("note_image".to_string(), 1, None, None, None))
+        );
+
+        update_note_content_tx_internal(
+            &mut connection,
+            1,
+            "<img data-note-image=\"true\" data-resource-path=\"resources/images/demo-a.png\" />",
+        )
+        .expect("remove image b");
+
+        let removed_row = managed_resource_row(&connection, "resources/images/demo-b.png")
+            .expect("removed resource row should remain");
+        assert_eq!(removed_row.0, "note_image");
+        assert_eq!(removed_row.1, 0);
+        assert!(removed_row.2.is_some());
+
+        connection
+            .execute(
+                "
+                  UPDATE managed_resources
+                  SET deleted_at = '2026-01-01T00:00:00Z', last_cleanup_error = 'stale'
+                  WHERE resource_path = 'resources/images/demo-b.png'
+                ",
+                [],
+            )
+            .expect("mark stale cleanup metadata");
+
+        update_note_content_tx_internal(
+            &mut connection,
+            1,
+            concat!(
+                "<img data-note-image=\"true\" data-resource-path=\"resources/images/demo-a.png\" />",
+                "<img data-note-image=\"true\" data-resource-path=\"resources/images/demo-b.png\" />",
+            ),
+        )
+        .expect("re-add image b");
+
+        assert_eq!(
+            managed_resource_row(&connection, "resources/images/demo-b.png"),
+            Some(("note_image".to_string(), 1, None, None, None))
+        );
+    }
+
+    #[test]
+    fn sync_note_resource_links_tx_tracks_added_removed_and_readded_paths() {
+        let connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (id, notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, 1, '文件一', '<p>初始正文</p>')",
+                [],
+            )
+            .expect("insert note");
+
+        sync_note_resource_links_tx(
+            &connection,
+            1,
+            concat!(
+                "<img data-note-image=\"true\" data-resource-path=\"resources/images/demo-a.png\" />",
+                "<img data-note-image=\"true\" data-resource-path=\"resources/images/demo-b.png\" />",
+                "<img data-note-image=\"true\" data-resource-path=\"resources/images/demo-a.png\" />",
+            ),
+        )
+        .expect("sync note resources");
+
+        assert_eq!(
+            owner_resource_links(&connection, "note", 1),
+            vec![
+                "resources/images/demo-a.png".to_string(),
+                "resources/images/demo-b.png".to_string(),
+            ]
+        );
+        assert_eq!(
+            managed_resource_row(&connection, "resources/images/demo-a.png"),
+            Some(("note_image".to_string(), 1, None, None, None))
+        );
+        assert_eq!(
+            managed_resource_row(&connection, "resources/images/demo-b.png"),
+            Some(("note_image".to_string(), 1, None, None, None))
+        );
+
+        sync_note_resource_links_tx(
+            &connection,
+            1,
+            "<img data-note-image=\"true\" data-resource-path=\"resources/images/demo-a.png\" />",
+        )
+        .expect("remove image b");
+
+        let removed_row = managed_resource_row(&connection, "resources/images/demo-b.png")
+            .expect("removed resource row should remain");
+        assert_eq!(removed_row.1, 0);
+        assert!(removed_row.2.is_some());
+
+        connection
+            .execute(
+                "
+                  UPDATE managed_resources
+                  SET deleted_at = '2026-01-01T00:00:00Z', last_cleanup_error = 'stale'
+                  WHERE resource_path = 'resources/images/demo-b.png'
+                ",
+                [],
+            )
+            .expect("mark stale cleanup metadata");
+
+        sync_note_resource_links_tx(
+            &connection,
+            1,
+            concat!(
+                "<img data-note-image=\"true\" data-resource-path=\"resources/images/demo-a.png\" />",
+                "<img data-note-image=\"true\" data-resource-path=\"resources/images/demo-b.png\" />",
+            ),
+        )
+        .expect("re-add image b");
+
+        assert_eq!(
+            managed_resource_row(&connection, "resources/images/demo-b.png"),
+            Some(("note_image".to_string(), 1, None, None, None))
+        );
     }
 
     #[test]
@@ -9585,6 +10020,17 @@ mod tests {
             stored_cover_path.as_deref(),
             Some("resources/covers/99999999-9999-4999-8999-999999999999.png")
         );
+        assert_eq!(
+            owner_resource_links(&connection, "notebook_cover", 1),
+            vec!["resources/covers/99999999-9999-4999-8999-999999999999.png".to_string()]
+        );
+        assert_eq!(
+            managed_resource_row(
+                &connection,
+                "resources/covers/99999999-9999-4999-8999-999999999999.png"
+            ),
+            Some(("notebook_cover".to_string(), 1, None, None, None))
+        );
     }
 
     #[test]
@@ -9637,6 +10083,24 @@ mod tests {
                 [],
             )
             .expect("insert notebook with cover");
+        connection
+            .execute(
+                "
+                  INSERT INTO managed_resources (resource_path, resource_kind, size_bytes, ref_count)
+                  VALUES ('resources/covers/99999999-9999-4999-8999-999999999999.png', 'notebook_cover', 0, 1)
+                ",
+                [],
+            )
+            .expect("insert managed cover row");
+        connection
+            .execute(
+                "
+                  INSERT INTO resource_links (owner_type, owner_id, resource_path)
+                  VALUES ('notebook_cover', 1, 'resources/covers/99999999-9999-4999-8999-999999999999.png')
+                ",
+                [],
+            )
+            .expect("insert cover resource link");
 
         let notebook =
             clear_notebook_cover_image_tx_internal(&mut connection, 1).expect("clear cover");
@@ -9652,6 +10116,55 @@ mod tests {
         assert_eq!(notebook.id, 1);
         assert_eq!(notebook.cover_image_path, None);
         assert_eq!(stored_cover_path, None);
+        assert!(owner_resource_links(&connection, "notebook_cover", 1).is_empty());
+        let cleared_row = managed_resource_row(
+            &connection,
+            "resources/covers/99999999-9999-4999-8999-999999999999.png",
+        )
+        .expect("managed cover row should remain");
+        assert_eq!(cleared_row.0, "notebook_cover");
+        assert_eq!(cleared_row.1, 0);
+        assert!(cleared_row.2.is_some());
+    }
+
+    #[test]
+    fn sync_notebook_cover_resource_link_tx_tracks_set_replace_and_clear() {
+        let connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (id, name) VALUES (1, '测试本')", [])
+            .expect("insert notebook");
+
+        sync_notebook_cover_resource_link_tx(&connection, 1, Some("resources/covers/cover-a.png"))
+            .expect("set cover a");
+
+        assert_eq!(
+            owner_resource_links(&connection, "notebook_cover", 1),
+            vec!["resources/covers/cover-a.png".to_string()]
+        );
+        assert_eq!(
+            managed_resource_row(&connection, "resources/covers/cover-a.png"),
+            Some(("notebook_cover".to_string(), 1, None, None, None))
+        );
+
+        sync_notebook_cover_resource_link_tx(&connection, 1, Some("resources/covers/cover-b.png"))
+            .expect("replace cover");
+
+        let old_cover_row = managed_resource_row(&connection, "resources/covers/cover-a.png")
+            .expect("old cover row should remain");
+        assert_eq!(old_cover_row.1, 0);
+        assert!(old_cover_row.2.is_some());
+        assert_eq!(
+            managed_resource_row(&connection, "resources/covers/cover-b.png"),
+            Some(("notebook_cover".to_string(), 1, None, None, None))
+        );
+
+        sync_notebook_cover_resource_link_tx(&connection, 1, None).expect("clear cover");
+
+        assert!(owner_resource_links(&connection, "notebook_cover", 1).is_empty());
+        let cleared_cover_row = managed_resource_row(&connection, "resources/covers/cover-b.png")
+            .expect("cleared cover row should remain");
+        assert_eq!(cleared_cover_row.1, 0);
+        assert!(cleared_cover_row.2.is_some());
     }
 
     #[test]
@@ -9849,5 +10362,4 @@ mod tests {
         assert_eq!(note.notebook_id, recovery_notebook_id);
         assert_eq!(note.original_notebook_id, None);
     }
-
 }

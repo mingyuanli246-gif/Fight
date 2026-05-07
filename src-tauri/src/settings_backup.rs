@@ -1261,7 +1261,10 @@ fn resolve_backup_file_path(paths: &AppPaths, file_name: &str) -> Result<PathBuf
     Ok(backup_path)
 }
 
-fn resolve_manageable_backup_file_path(paths: &AppPaths, file_name: &str) -> Result<PathBuf, String> {
+fn resolve_manageable_backup_file_path(
+    paths: &AppPaths,
+    file_name: &str,
+) -> Result<PathBuf, String> {
     let backup_path = resolve_backup_file_path(paths, file_name)?;
 
     if !is_manageable_app_backup_file(&backup_path) {
@@ -3577,8 +3580,8 @@ mod tests {
     use super::{
         add_resources_to_zip, build_created_backup_list_item, cache_size_bytes,
         cleanup_legacy_backups_once, cleanup_stale_backup_temp_files_with_options,
-        create_backup_temp_file, create_restore_rollback_paths, directory_size_bytes,
-        delete_backup_file, extract_backup_archive, is_legacy_backups_cleanup_target,
+        create_backup_temp_file, create_restore_rollback_paths, delete_backup_file,
+        directory_size_bytes, extract_backup_archive, is_legacy_backups_cleanup_target,
         legacy_cleanup_marker_path, list_backup_items, move_path_for_restore, new_restore_journal,
         persist_backup_temp_file, prepare_restore_rollback, prune_old_backups,
         record_installed_item, recover_incomplete_restore_for_paths, resolve_backup_file_path,
@@ -4250,7 +4253,10 @@ mod tests {
         let items = list_backup_items(&paths).expect("list backup items");
 
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].file_name, "fight-notes-backup-2026-04-08_12-34-56.zip");
+        assert_eq!(
+            items[0].file_name,
+            "fight-notes-backup-2026-04-08_12-34-56.zip"
+        );
         assert_eq!(items[0].invalid_reason, None);
     }
 
@@ -4264,14 +4270,18 @@ mod tests {
         let manifest = create_valid_manifest(Some(CURRENT_SCHEMA_VERSION));
 
         write_backup_archive(
-            &paths.backups.join("fight-notes-backup-2026-04-08_00-00-00.zip"),
+            &paths
+                .backups
+                .join("fight-notes-backup-2026-04-08_00-00-00.zip"),
             Some(&manifest),
             Some(&database_path),
             Some(&settings_bytes),
             true,
         );
         write_backup_archive(
-            &paths.backups.join("fight-notes-backup-2026-04-09_00-00-00.zip"),
+            &paths
+                .backups
+                .join("fight-notes-backup-2026-04-09_00-00-00.zip"),
             Some(&manifest),
             Some(&database_path),
             Some(&settings_bytes),
