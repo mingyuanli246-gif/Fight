@@ -4140,17 +4140,17 @@ mod tests {
     }
 
     #[test]
-    fn add_resources_to_zip_does_not_include_resources_trash_sibling() {
+    fn add_resources_to_zip_does_not_include_unrelated_sibling_directory() {
         let temp_dir = tempdir().expect("create temp dir");
         let backup_path = temp_dir.path().join("resources.zip");
         let resources_dir = temp_dir.path().join("resources");
-        let trash_dir = temp_dir
+        let sibling_dir = temp_dir
             .path()
-            .join("resources_trash/images/11111111-1111-4111-8111-111111111111");
+            .join("resources_sidecar/images/11111111-1111-4111-8111-111111111111");
         fs::create_dir_all(resources_dir.join("images")).expect("create resources images");
-        fs::create_dir_all(&trash_dir).expect("create resources trash");
+        fs::create_dir_all(&sibling_dir).expect("create sidecar directory");
         fs::write(resources_dir.join("images/live.png"), b"live").expect("write live resource");
-        fs::write(trash_dir.join("resource.png"), b"trash").expect("write trash resource");
+        fs::write(sibling_dir.join("resource.png"), b"sidecar").expect("write sidecar resource");
 
         let file = File::create(&backup_path).expect("create archive");
         let mut zip = ZipWriter::new(file);
@@ -4171,7 +4171,7 @@ mod tests {
         }
 
         assert!(names.iter().any(|name| name == "resources/images/live.png"));
-        assert!(!names.iter().any(|name| name.contains("resources_trash")));
+        assert!(!names.iter().any(|name| name.contains("resources_sidecar")));
     }
 
     #[test]

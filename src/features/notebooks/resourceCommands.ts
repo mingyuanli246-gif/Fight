@@ -33,67 +33,6 @@ export type ResolveManagedResourceResult =
   | ResolveManagedResourceResolvedResult
   | ResolveManagedResourceMissingResult;
 
-export interface ManagedResourceCleanupFailure {
-  resourcePath: string;
-  message: string;
-}
-
-export interface ManagedResourceCleanupResult {
-  deletedCount: number;
-  movedToTrashCount: number;
-  failed: ManagedResourceCleanupFailure[];
-}
-
-export type OrphanResourceKind = "image" | "cover";
-
-export interface OrphanResourceItem {
-  resourcePath: string;
-  absolutePath?: string | null;
-  kind: OrphanResourceKind;
-  sizeBytes: number;
-  extension?: string | null;
-  source?: string | null;
-}
-
-export interface OrphanResourceSkippedFile {
-  path: string;
-  reason: string;
-}
-
-export interface OrphanResourceScanResult {
-  items: OrphanResourceItem[];
-  totalCount: number;
-  totalBytes: number;
-  skippedFiles: OrphanResourceSkippedFile[];
-  warnings: string[];
-}
-
-export interface OrphanResourceCleanupResult {
-  dryRun: boolean;
-  items: OrphanResourceItem[];
-  totalCount: number;
-  totalBytes: number;
-  movedToTrashCount: number;
-  failed: OrphanResourceSkippedFile[];
-}
-
-export type ResourceTrashKind = "image" | "cover";
-
-export interface ResourceTrashListItem {
-  trashId: string;
-  resourceKind: ResourceTrashKind;
-  originalPath: string | null;
-  trashPath: string | null;
-  deletedAt: string | null;
-  source: string | null;
-  extension: string | null;
-  fileExists: boolean;
-  manifestValid: boolean;
-  canRestore: boolean;
-  status: string;
-  message: string | null;
-}
-
 function getCommandErrorMessage(error: unknown, fallback: string) {
   if (error instanceof Error && error.message.trim()) {
     return error.message;
@@ -155,43 +94,6 @@ export async function deleteManagedResource(resourcePath: string) {
   }
 }
 
-export async function cleanupUnreferencedManagedResources() {
-  try {
-    // Legacy compatibility wrapper. New callers should use the explicit
-    // scanOrphanResources / cleanupOrphanResources command chain.
-    return await invoke<ManagedResourceCleanupResult>(
-      "cleanup_unreferenced_managed_resources",
-    );
-  } catch (error) {
-    throw new Error(
-      getCommandErrorMessage(error, "孤儿图片资源清理失败，请稍后重试。"),
-    );
-  }
-}
-
-export async function scanOrphanResources() {
-  try {
-    return await invoke<OrphanResourceScanResult>("scan_orphan_image_resources");
-  } catch (error) {
-    throw new Error(
-      getCommandErrorMessage(error, "扫描孤儿图片资源失败，请稍后重试。"),
-    );
-  }
-}
-
-export async function cleanupOrphanResources(dryRun: boolean) {
-  try {
-    return await invoke<OrphanResourceCleanupResult>(
-      "cleanup_orphan_image_resources",
-      { dryRun },
-    );
-  } catch (error) {
-    throw new Error(
-      getCommandErrorMessage(error, "清理孤儿图片资源失败，请稍后重试。"),
-    );
-  }
-}
-
 export async function replaceManagedResourceSessionLeases(
   sessionId: string,
   resourcePaths: string[],
@@ -216,48 +118,6 @@ export async function clearManagedResourceSessionLeases(sessionId: string) {
   } catch (error) {
     throw new Error(
       getCommandErrorMessage(error, "清理图片资源会话失败，请稍后重试。"),
-    );
-  }
-}
-
-export async function listResourceTrashItems() {
-  try {
-    return await invoke<ResourceTrashListItem[]>("list_resource_trash_items");
-  } catch (error) {
-    throw new Error(
-      getCommandErrorMessage(error, "读取图片回收站失败，请稍后重试。"),
-    );
-  }
-}
-
-export async function restoreResourceTrashItem(
-  resourceKind: ResourceTrashKind,
-  trashId: string,
-) {
-  try {
-    return await invoke<string>("restore_resource_trash_item", {
-      resourceKind,
-      trashId,
-    });
-  } catch (error) {
-    throw new Error(
-      getCommandErrorMessage(error, "还原图片资源失败，请稍后重试。"),
-    );
-  }
-}
-
-export async function permanentlyDeleteResourceTrashItem(
-  resourceKind: ResourceTrashKind,
-  trashId: string,
-) {
-  try {
-    await invoke<void>("permanently_delete_resource_trash_item", {
-      resourceKind,
-      trashId,
-    });
-  } catch (error) {
-    throw new Error(
-      getCommandErrorMessage(error, "永久删除图片资源失败，请稍后重试。"),
     );
   }
 }
