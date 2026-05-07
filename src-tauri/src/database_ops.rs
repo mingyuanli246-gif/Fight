@@ -1,7 +1,7 @@
 use crate::resource_ops::{
-    is_app_managed_image_resource_path, move_managed_resource_to_trash,
-    normalize_managed_resource_path, resolve_app_root, snapshot_managed_resource_session_leases,
-    ManagedResourceTrashSource,
+    delete_managed_resource_file_if_exists, is_app_managed_image_resource_path,
+    move_managed_resource_to_trash, normalize_managed_resource_path, resolve_app_root,
+    snapshot_managed_resource_session_leases, ManagedResourceTrashSource,
 };
 use chrono::{Duration as ChronoDuration, Local, NaiveDate, SecondsFormat, Utc};
 use percent_encoding::percent_decode_str;
@@ -1534,6 +1534,65 @@ fn collect_managed_resource_paths_for_trash_root(
             Ok(resource_paths.into_iter().collect())
         }
     }
+}
+
+fn fetch_note_ids_for_folder_subtree_including_trashed(
+    connection: &Connection,
+    folder_id: i64,
+) -> Result<Vec<i64>, String> {
+    let mut statement = connection
+        .prepare(
+            "
+              WITH RECURSIVE folder_tree(id) AS (
+                SELECT id
+                FROM folders
+                WHERE id = ?1
+                UNION ALL
+                SELECT child.id
+                FROM folders AS child
+                INNER JOIN folder_tree ON child.parent_folder_id = folder_tree.id
+              )
+              SELECT id
+              FROM notes
+              WHERE folder_id IN (SELECT id FROM folder_tree)
+            ",
+        )
+        .map_err(|error| to_command_error("读取文件夹删除范围内的文件", error))?;
+    let rows = statement
+        .query_map([folder_id], |row| row.get::<_, i64>(0))
+        .map_err(|error| to_command_error("读取文件夹删除范围内的文件", error))?;
+
+    let mut note_ids = Vec::new();
+    for row in rows {
+        note_ids.push(row.map_err(|error| to_command_error("读取文件夹删除范围内的文件", error))?);
+    }
+
+    Ok(note_ids)
+}
+
+fn fetch_note_ids_for_notebook_including_trashed(
+    connection: &Connection,
+    notebook_id: i64,
+) -> Result<Vec<i64>, String> {
+    let mut statement = connection
+        .prepare(
+            "
+              SELECT id
+              FROM notes
+              WHERE notebook_id = ?1
+            ",
+        )
+        .map_err(|error| to_command_error("读取笔记本删除范围内的文件", error))?;
+    let rows = statement
+        .query_map([notebook_id], |row| row.get::<_, i64>(0))
+        .map_err(|error| to_command_error("读取笔记本删除范围内的文件", error))?;
+
+    let mut note_ids = Vec::new();
+    for row in rows {
+        note_ids.push(row.map_err(|error| to_command_error("读取笔记本删除范围内的文件", error))?);
+    }
+
+    Ok(note_ids)
 }
 
 fn detach_preserved_trash_roots_for_folder_purge(
@@ -3693,6 +3752,9 @@ fn delete_notebook_tx_in_transaction(
     connection: &Connection,
     notebook_id: i64,
 ) -> Result<(), String> {
+    let note_ids = fetch_note_ids_for_notebook_including_trashed(connection, notebook_id)?;
+    release_note_resource_links_tx(connection, &note_ids)?;
+    release_notebook_cover_resource_link_tx(connection, notebook_id)?;
     delete_notebook_search_entries(connection, notebook_id)?;
     let deleted = connection
         .execute("DELETE FROM notebooks WHERE id = ?1", [notebook_id])
@@ -3722,6 +3784,8 @@ fn delete_notebook_tx_internal(
 }
 
 fn delete_folder_tx_in_transaction(connection: &Connection, folder_id: i64) -> Result<(), String> {
+    let note_ids = fetch_note_ids_for_folder_subtree_including_trashed(connection, folder_id)?;
+    release_note_resource_links_tx(connection, &note_ids)?;
     delete_folder_search_entries(connection, folder_id)?;
     delete_notes_by_folder_subtree(connection, folder_id)?;
     let deleted = connection
@@ -3997,6 +4061,7 @@ fn save_note_content_with_tags_tx_internal(
 }
 
 fn delete_note_tx_in_transaction(connection: &Connection, note_id: i64) -> Result<(), String> {
+    release_resource_links_for_owner_tx(connection, RESOURCE_LINK_OWNER_TYPE_NOTE, note_id)?;
     let deleted = connection
         .execute("DELETE FROM notes WHERE id = ?1", [note_id])
         .map_err(|error| to_command_error("删除文件", error))?;
@@ -5078,6 +5143,138 @@ fn sync_notebook_cover_resource_link_tx(
     )
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct ManagedResourceCleanupSummary {
+    deleted_record_count: usize,
+    skipped_leased_count: usize,
+    failed_count: usize,
+}
+
+fn release_resource_links_for_owner_tx(
+    connection: &Connection,
+    owner_type: &str,
+    owner_id: i64,
+) -> Result<(), String> {
+    let resource_paths = list_resource_link_paths_for_owner(connection, owner_type, owner_id)?;
+
+    for resource_path in resource_paths {
+        if delete_resource_link_tx(connection, owner_type, owner_id, &resource_path)? {
+            decrement_resource_ref_tx(connection, &resource_path)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn release_note_resource_links_tx(connection: &Connection, note_ids: &[i64]) -> Result<(), String> {
+    for note_id in note_ids.iter().copied().collect::<BTreeSet<_>>() {
+        release_resource_links_for_owner_tx(connection, RESOURCE_LINK_OWNER_TYPE_NOTE, note_id)?;
+    }
+
+    Ok(())
+}
+
+fn release_notebook_cover_resource_link_tx(
+    connection: &Connection,
+    notebook_id: i64,
+) -> Result<(), String> {
+    release_resource_links_for_owner_tx(
+        connection,
+        RESOURCE_LINK_OWNER_TYPE_NOTEBOOK_COVER,
+        notebook_id,
+    )
+}
+
+fn cleanup_pending_managed_resources_internal(
+    root: &Path,
+    connection: &Connection,
+    leased_resource_paths: &BTreeSet<String>,
+) -> Result<ManagedResourceCleanupSummary, String> {
+    let resource_paths: Vec<String> = {
+        let mut statement = connection
+            .prepare(
+                "
+                  SELECT resource_path
+                  FROM managed_resources
+                  WHERE ref_count = 0
+                    AND pending_delete_at IS NOT NULL
+                    AND deleted_at IS NULL
+                    AND (
+                      resource_path LIKE 'resources/images/%'
+                      OR resource_path LIKE 'resources/covers/%'
+                    )
+                  ORDER BY pending_delete_at ASC, resource_path ASC
+                ",
+            )
+            .map_err(|error| to_command_error("读取待清理图片资源", error))?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| to_command_error("读取待清理图片资源", error))?;
+
+        let mut collected = Vec::new();
+        for row in rows {
+            collected.push(row.map_err(|error| to_command_error("读取待清理图片资源", error))?);
+        }
+        collected
+    };
+
+    let mut summary = ManagedResourceCleanupSummary::default();
+
+    for resource_path in resource_paths {
+        if leased_resource_paths.contains(&resource_path) {
+            summary.skipped_leased_count += 1;
+            continue;
+        }
+
+        match delete_managed_resource_file_if_exists(root, &resource_path) {
+            Ok(_) => {
+                connection
+                    .execute(
+                        "
+                          DELETE FROM managed_resources
+                          WHERE resource_path = ?1
+                            AND ref_count = 0
+                            AND pending_delete_at IS NOT NULL
+                        ",
+                        [resource_path.as_str()],
+                    )
+                    .map_err(|error| to_command_error("清理图片资源索引", error))?;
+                summary.deleted_record_count += 1;
+            }
+            Err(error) => {
+                connection
+                    .execute(
+                        "
+                          UPDATE managed_resources
+                          SET last_cleanup_error = ?2
+                          WHERE resource_path = ?1
+                        ",
+                        params![resource_path, error],
+                    )
+                    .map_err(|db_error| to_command_error("记录图片资源清理失败", db_error))?;
+                summary.failed_count += 1;
+            }
+        }
+    }
+
+    Ok(summary)
+}
+
+fn cleanup_pending_managed_resources<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<ManagedResourceCleanupSummary, String> {
+    let connection = open_database_connection(app)?;
+    let root = resolve_app_root(app)?;
+    let leased_resource_paths = snapshot_managed_resource_session_leases(app);
+    cleanup_pending_managed_resources_internal(&root, &connection, &leased_resource_paths)
+}
+
+fn cleanup_pending_managed_resources_best_effort<R: Runtime>(app: &AppHandle<R>) {
+    if let Err(error) = cleanup_pending_managed_resources(app) {
+        eprintln!("[database_ops] cleanup pending managed resources failed: {error}");
+    }
+}
+
 fn rebuild_managed_resource_index_tx_internal(connection: &Connection) -> Result<(), String> {
     connection
         .execute("DELETE FROM resource_links", [])
@@ -6057,8 +6254,7 @@ fn restore_trashed_item_tx_internal(
     Ok(result)
 }
 
-fn purge_trashed_item_tx_internal<R: Runtime>(
-    _app: &AppHandle<R>,
+fn purge_trashed_item_tx_internal(
     connection: &mut Connection,
     item_type: TrashEntityType,
     item_id: i64,
@@ -6094,10 +6290,7 @@ fn purge_trashed_item_tx_internal<R: Runtime>(
     Ok(())
 }
 
-fn cleanup_expired_trash_tx_internal<R: Runtime>(
-    app: &AppHandle<R>,
-    connection: &mut Connection,
-) -> Result<(), String> {
+fn cleanup_expired_trash_tx_internal(connection: &mut Connection) -> Result<(), String> {
     let cutoff = trash_cutoff_timestamp_text();
     let mut statement = connection
         .prepare(
@@ -6137,7 +6330,7 @@ fn cleanup_expired_trash_tx_internal<R: Runtime>(
     drop(statement);
 
     for (item_type, item_id) in expired_items {
-        purge_trashed_item_tx_internal(app, connection, item_type, item_id)?;
+        purge_trashed_item_tx_internal(connection, item_type, item_id)?;
     }
 
     Ok(())
@@ -6359,19 +6552,24 @@ pub fn purge_trashed_item_tx(
 ) -> Result<(), String> {
     let mut connection = open_database_connection(&app)?;
     let item_type = TrashEntityType::parse(&item_type)?;
-    purge_trashed_item_tx_internal(&app, &mut connection, item_type, item_id)
+    purge_trashed_item_tx_internal(&mut connection, item_type, item_id)?;
+    cleanup_pending_managed_resources_best_effort(&app);
+    Ok(())
 }
 
 #[tauri::command]
 pub fn cleanup_expired_trash_tx(app: AppHandle) -> Result<(), String> {
     let mut connection = open_database_connection(&app)?;
-    cleanup_expired_trash_tx_internal(&app, &mut connection)
+    cleanup_expired_trash_tx_internal(&mut connection)?;
+    cleanup_pending_managed_resources_best_effort(&app);
+    Ok(())
 }
 
 #[tauri::command]
 pub fn delete_notebook_tx(app: AppHandle, notebook_id: i64) -> Result<(), String> {
     let mut connection = open_database_connection(&app)?;
     delete_notebook_tx_internal(&mut connection, notebook_id)?;
+    cleanup_pending_managed_resources_best_effort(&app);
     Ok(())
 }
 
@@ -6379,6 +6577,7 @@ pub fn delete_notebook_tx(app: AppHandle, notebook_id: i64) -> Result<(), String
 pub fn delete_folder_tx(app: AppHandle, folder_id: i64) -> Result<(), String> {
     let mut connection = open_database_connection(&app)?;
     delete_folder_tx_internal(&mut connection, folder_id)?;
+    cleanup_pending_managed_resources_best_effort(&app);
     Ok(())
 }
 
@@ -6437,6 +6636,7 @@ pub fn save_note_content_with_tags_tx(
 pub fn delete_note_tx(app: AppHandle, note_id: i64) -> Result<(), String> {
     let mut connection = open_database_connection(&app)?;
     delete_note_tx_internal(&mut connection, note_id)?;
+    cleanup_pending_managed_resources_best_effort(&app);
     Ok(())
 }
 
@@ -6530,7 +6730,8 @@ mod tests {
     use super::{
         activate_note_review_schedule_tx_internal, add_days, add_tag_to_note_by_name_tx_internal,
         bind_review_plan_to_note_tx_internal, cleanup_expired_review_schedules,
-        cleanup_orphan_image_resources_internal, clear_note_review_schedule_tx_internal,
+        cleanup_expired_trash_tx_internal, cleanup_orphan_image_resources_internal,
+        cleanup_pending_managed_resources_internal, clear_note_review_schedule_tx_internal,
         clear_notebook_cover_image_tx_internal, collect_managed_resource_paths_for_note,
         collect_managed_resource_paths_for_notebook, create_folder_tx_internal,
         create_note_tx_internal, create_notebook_tx_internal, create_review_plan_tx_internal,
@@ -6544,9 +6745,10 @@ mod tests {
         fetch_note_trash_state, get_note_review_schedule_tx_internal,
         get_review_schedule_dirty_note_ids, list_trash_roots_tx_internal,
         move_folder_to_notebook_top_tx_internal, move_folder_to_trash_tx_internal,
-        move_note_to_trash_tx_internal, move_note_tx_internal, normalize_managed_resource_path,
-        normalize_tag_color, rebuild_managed_resource_index_tx_internal,
-        rebuild_note_search_index_internal, rename_review_plan_tx_internal,
+        move_note_to_trash_tx_internal, move_note_tx_internal, move_notebook_to_trash_tx_internal,
+        normalize_managed_resource_path, normalize_tag_color, purge_trashed_item_tx_internal,
+        rebuild_managed_resource_index_tx_internal, rebuild_note_search_index_internal,
+        release_resource_links_for_owner_tx, rename_review_plan_tx_internal,
         reorder_folders_tx_internal, reorder_notebooks_tx_internal,
         restore_trashed_item_tx_internal, save_note_content_with_tags_tx_internal,
         save_note_review_schedule_tx_internal, scan_orphan_image_resources_internal,
@@ -10165,6 +10367,377 @@ mod tests {
             .expect("cleared cover row should remain");
         assert_eq!(cleared_cover_row.1, 0);
         assert!(cleared_cover_row.2.is_some());
+    }
+
+    #[test]
+    fn release_resource_links_for_owner_tx_releases_links_and_stays_idempotent() {
+        let connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (id, notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, 1, '文件一', ''), (2, 1, 1, '文件二', '')",
+                [],
+            )
+            .expect("insert notes");
+
+        sync_note_resource_links_tx(
+            &connection,
+            1,
+            concat!(
+                "<img data-note-image=\"true\" data-resource-path=\"resources/images/release-a.png\" />",
+                "<img data-note-image=\"true\" data-resource-path=\"resources/images/release-b.png\" />",
+            ),
+        )
+        .expect("sync note one");
+        sync_note_resource_links_tx(
+            &connection,
+            2,
+            "<img data-note-image=\"true\" data-resource-path=\"resources/images/release-a.png\" />",
+        )
+        .expect("sync note two");
+
+        release_resource_links_for_owner_tx(&connection, "note", 1).expect("release note one");
+
+        assert!(owner_resource_links(&connection, "note", 1).is_empty());
+        assert_eq!(
+            owner_resource_links(&connection, "note", 2),
+            vec!["resources/images/release-a.png".to_string()]
+        );
+        assert_eq!(
+            managed_resource_row(&connection, "resources/images/release-a.png"),
+            Some(("note_image".to_string(), 1, None, None, None))
+        );
+        let released_row = managed_resource_row(&connection, "resources/images/release-b.png")
+            .expect("released b row should remain pending");
+        assert_eq!(released_row.1, 0);
+        assert!(released_row.2.is_some());
+
+        release_resource_links_for_owner_tx(&connection, "note", 1)
+            .expect("repeat release should stay idempotent");
+        let repeated_row = managed_resource_row(&connection, "resources/images/release-b.png")
+            .expect("released b row should remain pending");
+        assert_eq!(repeated_row.1, 0);
+        assert!(repeated_row.2.is_some());
+    }
+
+    #[test]
+    fn purge_note_releases_resources_and_cleanup_deletes_unreferenced_file() {
+        let temp_dir = tempdir().expect("create temp dir");
+        ensure_test_resource_dirs(temp_dir.path());
+        let image_path = "resources/images/purge-note.png";
+        write_test_resource(temp_dir.path(), image_path);
+
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (id, notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, 1, '文件一', '')",
+                [],
+            )
+            .expect("insert note");
+
+        let html = format!("<img data-note-image=\"true\" data-resource-path=\"{image_path}\" />");
+        sync_note_resource_links_tx(&connection, 1, &html).expect("sync note image");
+
+        move_note_to_trash_tx_internal(&mut connection, 1).expect("move note to trash");
+
+        assert_eq!(
+            managed_resource_row(&connection, image_path),
+            Some(("note_image".to_string(), 1, None, None, None))
+        );
+        assert!(temp_dir.path().join(image_path).is_file());
+
+        purge_trashed_item_tx_internal(&mut connection, TrashEntityType::Note, 1)
+            .expect("purge trashed note");
+
+        assert!(owner_resource_links(&connection, "note", 1).is_empty());
+        let pending_row = managed_resource_row(&connection, image_path)
+            .expect("pending image row should remain before file cleanup");
+        assert_eq!(pending_row.1, 0);
+        assert!(pending_row.2.is_some());
+        assert!(temp_dir.path().join(image_path).is_file());
+
+        cleanup_pending_managed_resources_internal(temp_dir.path(), &connection, &BTreeSet::new())
+            .expect("cleanup pending managed resources");
+
+        assert_eq!(managed_resource_row(&connection, image_path), None);
+        assert!(!temp_dir.path().join(image_path).exists());
+    }
+
+    #[test]
+    fn purge_folder_keeps_independent_trash_root_resources() {
+        let temp_dir = tempdir().expect("create temp dir");
+        ensure_test_resource_dirs(temp_dir.path());
+        let folder_image = "resources/images/folder-owned.png";
+        let preserved_image = "resources/images/folder-preserved.png";
+        write_test_resource(temp_dir.path(), folder_image);
+        write_test_resource(temp_dir.path(), preserved_image);
+
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (id, notebook_id, parent_folder_id, name, sort_order) VALUES (1, 1, NULL, '文件夹A', 0), (2, 1, 1, '子文件夹', 0)",
+                [],
+            )
+            .expect("insert folders");
+        connection
+            .execute(
+                "INSERT INTO notes (id, notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, 1, '文件一', ''), (2, 1, 2, '文件二', '')",
+                [],
+            )
+            .expect("insert notes");
+
+        sync_note_resource_links_tx(
+            &connection,
+            1,
+            &format!("<img data-note-image=\"true\" data-resource-path=\"{folder_image}\" />"),
+        )
+        .expect("sync folder note image");
+        sync_note_resource_links_tx(
+            &connection,
+            2,
+            &format!("<img data-note-image=\"true\" data-resource-path=\"{preserved_image}\" />"),
+        )
+        .expect("sync preserved note image");
+
+        move_note_to_trash_tx_internal(&mut connection, 2).expect("trash independent note root");
+        move_folder_to_trash_tx_internal(&mut connection, 1).expect("trash folder root");
+        purge_trashed_item_tx_internal(&mut connection, TrashEntityType::Folder, 1)
+            .expect("purge folder root");
+
+        let folder_row = managed_resource_row(&connection, folder_image)
+            .expect("folder owned image should become pending");
+        assert_eq!(folder_row.1, 0);
+        assert!(folder_row.2.is_some());
+        assert_eq!(
+            managed_resource_row(&connection, preserved_image),
+            Some(("note_image".to_string(), 1, None, None, None))
+        );
+        assert_eq!(
+            owner_resource_links(&connection, "note", 2),
+            vec![preserved_image.to_string()]
+        );
+
+        cleanup_pending_managed_resources_internal(temp_dir.path(), &connection, &BTreeSet::new())
+            .expect("cleanup pending folder resources");
+
+        assert_eq!(managed_resource_row(&connection, folder_image), None);
+        assert!(!temp_dir.path().join(folder_image).exists());
+        assert!(temp_dir.path().join(preserved_image).is_file());
+    }
+
+    #[test]
+    fn purge_notebook_releases_cover_and_keeps_independent_trash_root_resources() {
+        let temp_dir = tempdir().expect("create temp dir");
+        ensure_test_resource_dirs(temp_dir.path());
+        let cover_path = "resources/covers/notebook-cover.png";
+        let notebook_image = "resources/images/notebook-owned.png";
+        let preserved_image = "resources/images/notebook-preserved.png";
+        write_test_resource(temp_dir.path(), cover_path);
+        write_test_resource(temp_dir.path(), notebook_image);
+        write_test_resource(temp_dir.path(), preserved_image);
+
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (id, name) VALUES (1, '测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (id, notebook_id, name, sort_order) VALUES (1, 1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (id, notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, 1, '文件一', ''), (2, 1, 1, '文件二', '')",
+                [],
+            )
+            .expect("insert notes");
+
+        update_notebook_cover_image_tx_internal(&mut connection, 1, cover_path)
+            .expect("set notebook cover");
+        sync_note_resource_links_tx(
+            &connection,
+            1,
+            &format!("<img data-note-image=\"true\" data-resource-path=\"{notebook_image}\" />"),
+        )
+        .expect("sync notebook-owned image");
+        sync_note_resource_links_tx(
+            &connection,
+            2,
+            &format!("<img data-note-image=\"true\" data-resource-path=\"{preserved_image}\" />"),
+        )
+        .expect("sync preserved image");
+
+        move_note_to_trash_tx_internal(&mut connection, 2).expect("trash independent note root");
+        move_notebook_to_trash_tx_internal(&mut connection, 1).expect("trash notebook root");
+        purge_trashed_item_tx_internal(&mut connection, TrashEntityType::Notebook, 1)
+            .expect("purge notebook root");
+
+        let cover_row =
+            managed_resource_row(&connection, cover_path).expect("cover should become pending");
+        assert_eq!(cover_row.1, 0);
+        assert!(cover_row.2.is_some());
+        let notebook_row = managed_resource_row(&connection, notebook_image)
+            .expect("notebook-owned image should become pending");
+        assert_eq!(notebook_row.1, 0);
+        assert!(notebook_row.2.is_some());
+        assert_eq!(
+            managed_resource_row(&connection, preserved_image),
+            Some(("note_image".to_string(), 1, None, None, None))
+        );
+        assert_eq!(
+            owner_resource_links(&connection, "note", 2),
+            vec![preserved_image.to_string()]
+        );
+
+        cleanup_pending_managed_resources_internal(temp_dir.path(), &connection, &BTreeSet::new())
+            .expect("cleanup pending notebook resources");
+
+        assert_eq!(managed_resource_row(&connection, cover_path), None);
+        assert_eq!(managed_resource_row(&connection, notebook_image), None);
+        assert!(!temp_dir.path().join(cover_path).exists());
+        assert!(!temp_dir.path().join(notebook_image).exists());
+        assert!(temp_dir.path().join(preserved_image).is_file());
+    }
+
+    #[test]
+    fn cleanup_expired_trash_releases_resources_for_expired_roots() {
+        let temp_dir = tempdir().expect("create temp dir");
+        ensure_test_resource_dirs(temp_dir.path());
+        let image_path = "resources/images/expired-note.png";
+        write_test_resource(temp_dir.path(), image_path);
+
+        let mut connection = test_connection();
+        connection
+            .execute("INSERT INTO notebooks (name) VALUES ('测试本')", [])
+            .expect("insert notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (notebook_id, name, sort_order) VALUES (1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (id, notebook_id, folder_id, title, content_plaintext) VALUES (1, 1, 1, '文件一', '')",
+                [],
+            )
+            .expect("insert note");
+
+        sync_note_resource_links_tx(
+            &connection,
+            1,
+            &format!("<img data-note-image=\"true\" data-resource-path=\"{image_path}\" />"),
+        )
+        .expect("sync note image");
+
+        move_note_to_trash_tx_internal(&mut connection, 1).expect("trash note");
+        connection
+            .execute(
+                "UPDATE notes SET deleted_at = '2000-01-01T00:00:00Z' WHERE id = 1",
+                [],
+            )
+            .expect("force note expired");
+
+        cleanup_expired_trash_tx_internal(&mut connection).expect("cleanup expired trash");
+
+        let note_exists: Option<i64> = connection
+            .query_row("SELECT id FROM notes WHERE id = 1", [], |row| row.get(0))
+            .optional()
+            .expect("query note existence");
+        assert_eq!(note_exists, None);
+        let pending_row = managed_resource_row(&connection, image_path)
+            .expect("expired note image should become pending");
+        assert_eq!(pending_row.1, 0);
+        assert!(pending_row.2.is_some());
+
+        cleanup_pending_managed_resources_internal(temp_dir.path(), &connection, &BTreeSet::new())
+            .expect("cleanup expired note image");
+        assert_eq!(managed_resource_row(&connection, image_path), None);
+        assert!(!temp_dir.path().join(image_path).exists());
+    }
+
+    #[test]
+    fn cleanup_pending_managed_resources_internal_respects_pending_and_leases() {
+        let temp_dir = tempdir().expect("create temp dir");
+        ensure_test_resource_dirs(temp_dir.path());
+        let delete_path = "resources/images/delete-me.png";
+        let leased_path = "resources/images/leased.png";
+        let live_path = "resources/images/live.png";
+        let pending_null_path = "resources/images/pending-null.png";
+        let missing_path = "resources/images/missing.png";
+        let failing_path = "resources/images/failing.png";
+        write_test_resource(temp_dir.path(), delete_path);
+        write_test_resource(temp_dir.path(), leased_path);
+        write_test_resource(temp_dir.path(), live_path);
+        write_test_resource(temp_dir.path(), pending_null_path);
+        fs::create_dir_all(temp_dir.path().join(failing_path)).expect("create failing dir");
+
+        let connection = test_connection();
+        connection
+            .execute(
+                "
+                  INSERT INTO managed_resources (resource_path, resource_kind, size_bytes, ref_count, pending_delete_at)
+                  VALUES
+                    (?1, 'note_image', 0, 0, '2026-01-01T00:00:00Z'),
+                    (?2, 'note_image', 0, 0, '2026-01-01T00:00:00Z'),
+                    (?3, 'note_image', 0, 1, '2026-01-01T00:00:00Z'),
+                    (?4, 'note_image', 0, 0, NULL),
+                    (?5, 'note_image', 0, 0, '2026-01-01T00:00:00Z'),
+                    (?6, 'note_image', 0, 0, '2026-01-01T00:00:00Z')
+                ",
+                params![
+                    delete_path,
+                    leased_path,
+                    live_path,
+                    pending_null_path,
+                    missing_path,
+                    failing_path
+                ],
+            )
+            .expect("insert managed resources");
+
+        let leased = BTreeSet::from([leased_path.to_string()]);
+        let summary =
+            cleanup_pending_managed_resources_internal(temp_dir.path(), &connection, &leased)
+                .expect("cleanup pending managed resources");
+
+        assert_eq!(summary.deleted_record_count, 2);
+        assert_eq!(summary.skipped_leased_count, 1);
+        assert_eq!(summary.failed_count, 1);
+        assert_eq!(managed_resource_row(&connection, delete_path), None);
+        assert_eq!(managed_resource_row(&connection, missing_path), None);
+        assert!(managed_resource_row(&connection, leased_path).is_some());
+        assert!(managed_resource_row(&connection, live_path).is_some());
+        assert!(managed_resource_row(&connection, pending_null_path).is_some());
+        let failing_row =
+            managed_resource_row(&connection, failing_path).expect("failing row should remain");
+        assert!(failing_row.4.is_some());
+        assert!(!temp_dir.path().join(delete_path).exists());
+        assert!(temp_dir.path().join(leased_path).is_file());
+        assert!(temp_dir.path().join(live_path).is_file());
+        assert!(temp_dir.path().join(pending_null_path).is_file());
+        assert!(temp_dir.path().join(failing_path).is_dir());
     }
 
     #[test]
