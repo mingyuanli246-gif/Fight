@@ -1013,22 +1013,7 @@ export function NotebookHomeWorkspace({
         </div>
       ) : null}
 
-      {notebooks.length === 0 ? (
-        <section className={styles.homeEmptyState}>
-          <h3 className={styles.homeEmptyTitle}>还没有任何笔记本</h3>
-          <p className={styles.homeEmptyText}>
-            先创建一个笔记本作为入口，之后就可以为它设置封面、建立文件夹，并开始写作。
-          </p>
-          <button
-            type="button"
-            className={styles.primaryButton}
-            onClick={() => setIsCreating(true)}
-            disabled={disabled}
-          >
-            创建第一个笔记本
-          </button>
-        </section>
-      ) : (
+      {notebooks.length > 0 ? (
         <DndContext
           sensors={sensors}
           collisionDetection={collisionDetection}
@@ -1091,7 +1076,7 @@ export function NotebookHomeWorkspace({
             ) : null}
           </DragOverlay>
         </DndContext>
-      )}
+      ) : null}
 
       {contextMenu && contextNotebook ? (
         <div

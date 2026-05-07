@@ -1112,9 +1112,6 @@ fn validate_live_trash_root_notebook(
     if notebook.deleted_at.is_some() {
         return Err("目标笔记本已在回收站。".to_string());
     }
-    if notebook.is_recovery_notebook {
-        return Err("系统恢复笔记本不能移入回收站。".to_string());
-    }
     Ok(notebook)
 }
 
@@ -1281,27 +1278,7 @@ fn build_restore_message(
 }
 
 fn ensure_recovery_notebook(connection: &Connection) -> Result<i64, String> {
-    let mut statement = connection
-        .prepare(
-            "
-              SELECT id
-              FROM notebooks
-              WHERE is_recovery_notebook = 1
-                AND deleted_at IS NULL
-              ORDER BY created_at ASC, id ASC
-            ",
-        )
-        .map_err(|error| to_command_error("读取系统恢复笔记本", error))?;
-    let rows = statement
-        .query_map([], |row| row.get::<_, i64>(0))
-        .map_err(|error| to_command_error("读取系统恢复笔记本", error))?;
-
-    let mut recovery_ids = Vec::new();
-    for row in rows {
-        recovery_ids.push(row.map_err(|error| to_command_error("读取系统恢复笔记本", error))?);
-    }
-
-    if let Some(recovery_id) = recovery_ids.first().copied() {
+    if let Some(recovery_id) = find_live_recovery_notebook_id(connection)? {
         return Ok(recovery_id);
     }
 
@@ -1329,6 +1306,70 @@ fn ensure_recovery_notebook(connection: &Connection) -> Result<i64, String> {
         .map_err(|error| to_command_error("创建系统恢复笔记本", error))?;
 
     Ok(connection.last_insert_rowid())
+}
+
+fn find_live_recovery_notebook_id(connection: &Connection) -> Result<Option<i64>, String> {
+    connection
+        .query_row(
+            "
+              SELECT id
+              FROM notebooks
+              WHERE is_recovery_notebook = 1
+                AND deleted_at IS NULL
+              ORDER BY created_at ASC, id ASC
+              LIMIT 1
+            ",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| to_command_error("读取系统恢复笔记本", error))
+}
+
+fn notebook_purge_has_preserved_trash_roots(
+    connection: &Connection,
+    notebook_id: i64,
+) -> Result<bool, String> {
+    let current_root_type = TrashEntityType::Notebook.as_str();
+    let has_preserved_folders = connection
+        .query_row(
+            "
+              SELECT EXISTS(
+                SELECT 1
+                FROM folders
+                WHERE notebook_id = ?1
+                  AND deleted_at IS NOT NULL
+                  AND NOT (deleted_by_root_type = ?2 AND deleted_by_root_id = ?1)
+              )
+            ",
+            params![notebook_id, current_root_type],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| to_command_error("读取保留的回收站文件夹", error))?
+        != 0;
+
+    if has_preserved_folders {
+        return Ok(true);
+    }
+
+    let has_preserved_notes = connection
+        .query_row(
+            "
+              SELECT EXISTS(
+                SELECT 1
+                FROM notes
+                WHERE notebook_id = ?1
+                  AND deleted_at IS NOT NULL
+                  AND NOT (deleted_by_root_type = ?2 AND deleted_by_root_id = ?1)
+              )
+            ",
+            params![notebook_id, current_root_type],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| to_command_error("读取保留的回收站文件", error))?
+        != 0;
+
+    Ok(has_preserved_notes)
 }
 
 fn fetch_folder_subtree_ids_including_trashed(
@@ -5940,12 +5981,14 @@ fn purge_trashed_item_tx_internal(
             delete_folder_tx_in_transaction(&transaction, item_id)?;
         }
         TrashEntityType::Notebook => {
-            let recovery_notebook_id = ensure_recovery_notebook(&transaction)?;
-            detach_preserved_trash_roots_for_notebook_purge(
-                &transaction,
-                item_id,
-                recovery_notebook_id,
-            )?;
+            if notebook_purge_has_preserved_trash_roots(&transaction, item_id)? {
+                let recovery_notebook_id = ensure_recovery_notebook(&transaction)?;
+                detach_preserved_trash_roots_for_notebook_purge(
+                    &transaction,
+                    item_id,
+                    recovery_notebook_id,
+                )?;
+            }
             delete_notebook_tx_in_transaction(&transaction, item_id)?;
         }
     }
@@ -6370,6 +6413,7 @@ mod tests {
         extract_indexable_plain_text, extract_managed_resource_path_from_text,
         extract_note_image_resource_paths, extract_note_image_resource_paths_from_html,
         extract_tag_name, fetch_folder_trash_state, fetch_note_trash_state,
+        fetch_notebook_trash_state, find_live_recovery_notebook_id,
         get_note_review_schedule_tx_internal, get_review_schedule_dirty_note_ids,
         list_trash_roots_tx_internal, move_folder_to_notebook_top_tx_internal,
         move_folder_to_trash_tx_internal, move_note_to_trash_tx_internal, move_note_tx_internal,
@@ -10130,5 +10174,80 @@ mod tests {
         assert!(note.deleted_at.is_none());
         assert_eq!(note.notebook_id, recovery_notebook_id);
         assert_eq!(note.original_notebook_id, None);
+    }
+
+    #[test]
+    fn recovery_notebook_is_not_recreated_until_restore_needs_fallback() {
+        let mut connection = test_connection();
+        let recovery_notebook_id =
+            ensure_recovery_notebook(&connection).expect("ensure recovery notebook");
+
+        move_notebook_to_trash_tx_internal(&mut connection, recovery_notebook_id)
+            .expect("trash recovery notebook");
+
+        let recovery_notebook =
+            fetch_notebook_trash_state(&connection, recovery_notebook_id).expect("fetch notebook");
+        assert!(recovery_notebook.deleted_at.is_some());
+        assert!(recovery_notebook.is_trash_root);
+        assert!(recovery_notebook.is_recovery_notebook);
+        assert_eq!(
+            find_live_recovery_notebook_id(&connection).expect("find live recovery after trash"),
+            None
+        );
+
+        purge_trashed_item_tx_internal(&mut connection, TrashEntityType::Notebook, recovery_notebook_id)
+            .expect("purge recovery notebook");
+        assert_eq!(
+            find_live_recovery_notebook_id(&connection).expect("find live recovery after purge"),
+            None
+        );
+
+        connection
+            .execute("INSERT INTO notebooks (id, name) VALUES (10, '原笔记本')", [])
+            .expect("insert original notebook");
+        connection
+            .execute("INSERT INTO notebooks (id, name) VALUES (11, '暂存本')", [])
+            .expect("insert staging notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (id, notebook_id, name, sort_order) VALUES (10, 10, '收集箱', 0)",
+                [],
+            )
+            .expect("insert folder");
+        connection
+            .execute(
+                "INSERT INTO notes (id, notebook_id, folder_id, title, content_plaintext) VALUES (10, 10, 10, '文件一', NULL)",
+                [],
+            )
+            .expect("insert note");
+
+        move_note_to_trash_tx_internal(&mut connection, 10).expect("trash note");
+        connection
+            .execute(
+                "
+                  UPDATE notes
+                  SET notebook_id = 11, folder_id = NULL
+                  WHERE id = 10
+                ",
+                [],
+            )
+            .expect("detach trashed note to staging notebook");
+        delete_notebook_tx_internal(&mut connection, 10).expect("delete original notebook");
+
+        let restore = restore_trashed_item_tx_internal(&mut connection, TrashEntityType::Note, 10)
+            .expect("restore note");
+
+        let recreated_recovery_notebook_id =
+            find_live_recovery_notebook_id(&connection).expect("find recreated recovery notebook")
+                .expect("recovery notebook should be recreated on restore fallback");
+        assert_ne!(recreated_recovery_notebook_id, recovery_notebook_id);
+
+        let recreated_notebook = fetch_notebook_trash_state(&connection, recreated_recovery_notebook_id)
+            .expect("fetch recreated notebook");
+        assert_eq!(recreated_notebook.name, "已恢复");
+        assert!(recreated_notebook.deleted_at.is_none());
+        assert!(!recreated_notebook.is_trash_root);
+        assert!(recreated_notebook.is_recovery_notebook);
+        assert_eq!(restore.target_notebook_id, recreated_recovery_notebook_id);
     }
 }
