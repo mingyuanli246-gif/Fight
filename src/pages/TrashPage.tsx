@@ -50,7 +50,13 @@ function buildScopeSummary(item: TrashRootItem) {
     return null;
   }
 
-  return `本次删除包含 ${parts.join("，")}`;
+  return `包含 ${parts.join("，")}`;
+}
+
+function getRestoreLocationLabel(item: TrashRootItem) {
+  return item.canRestoreToOriginalLocation
+    ? "可恢复到原位置"
+    : "原位置不可用时，将自动恢复到安全位置";
 }
 
 function getErrorMessage(error: unknown) {
@@ -117,9 +123,9 @@ export function TrashPage() {
     <section className={pageStyles.page}>
       <header className={pageStyles.header}>
         <p className={pageStyles.eyebrow}>回收站</p>
-        <h2 className={pageStyles.title}>已删除项目</h2>
+        <h2 className={pageStyles.title}>最近删除</h2>
         <p className={pageStyles.description}>
-          这里只显示用户直接删除的顶层对象。进入页面时会清理超过 30 天的过期项目。
+          这里显示你删除的笔记本、文件夹和文件。恢复后，其中的正文图片和封面会一起恢复。永久删除后，相关图片资源会由系统自动处理，不需要手动扫描。
         </p>
       </header>
 
@@ -140,11 +146,16 @@ export function TrashPage() {
       {errorMessage ? <div className={styles.error}>{errorMessage}</div> : null}
 
       <div className={pageStyles.surface}>
-        <h3 className={pageStyles.surfaceTitle}>回收站项目</h3>
+        <h3 className={pageStyles.surfaceTitle}>可恢复项目</h3>
+        <p className={styles.surfaceLead}>
+          这里只显示你直接删除的笔记本、文件夹和文件。超过 30 天的项目会在进入回收站时自动清理。
+        </p>
         {isLoading ? (
-          <p className={pageStyles.surfaceText}>正在读取回收站…</p>
+          <p className={pageStyles.surfaceText}>正在读取最近删除…</p>
         ) : items.length === 0 ? (
-          <p className={pageStyles.surfaceText}>当前没有可恢复的回收站项目。</p>
+          <p className={pageStyles.surfaceText}>
+            最近删除为空。你删除的笔记本、文件夹和文件会显示在这里。
+          </p>
         ) : (
           <ul className={pageStyles.list}>
             {items.map((item) => {
@@ -190,14 +201,14 @@ export function TrashPage() {
                       </button>
                     </div>
                   </div>
-                  <span>删除时间：{formatDeletedAt(item.deletedAt)}</span>
-                  {item.trashOriginPath ? <span>原位置：{item.trashOriginPath}</span> : null}
-                  {scopeSummary ? <span>{scopeSummary}</span> : null}
-                  <span>
-                    {item.canRestoreToOriginalLocation
-                      ? "可恢复到原位置"
-                      : "原位置可能不可用，恢复时会自动兜底"}
-                  </span>
+                  <div className={styles.itemDetails}>
+                    <span>删除时间：{formatDeletedAt(item.deletedAt)}</span>
+                    {item.trashOriginPath ? (
+                      <span>原位置：{item.trashOriginPath}</span>
+                    ) : null}
+                    {scopeSummary ? <span>{scopeSummary}</span> : null}
+                    <span>{getRestoreLocationLabel(item)}</span>
+                  </div>
                 </li>
               );
             })}

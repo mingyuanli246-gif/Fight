@@ -1,6 +1,8 @@
 .toolbar {
   display: flex;
   justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 12px;
 }
 
 .refreshButton,
@@ -52,6 +54,13 @@
   border: 1px solid rgba(180, 35, 24, 0.16);
 }
 
+.surfaceLead {
+  margin: 0 0 18px;
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--color-text-secondary);
+}
+
 .itemHeader {
   display: flex;
   align-items: flex-start;
@@ -80,4 +89,21 @@
   display: flex;
   gap: 10px;
   flex-shrink: 0;
+}
+
+.itemDetails {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+@media (max-width: 720px) {
+  .itemHeader {
+    flex-direction: column;
+  }
+
+  .itemActions {
+    width: 100%;
+    flex-wrap: wrap;
+  }
 }
