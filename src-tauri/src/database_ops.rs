@@ -36,6 +36,10 @@ const DEFAULT_REVIEW_PLAN_NAME: &str = "系统默认计划";
 const DEFAULT_REVIEW_STEP_OFFSETS: [i64; 4] = [2, 5, 10, 18];
 const LEGACY_RECOVERY_FOLDER_NAME: &str = "未归档迁移";
 const DEFAULT_TAG_COLOR: &str = "#FF3B30";
+const MANAGED_RESOURCE_KIND_NOTE_IMAGE: &str = "note_image";
+const MANAGED_RESOURCE_KIND_NOTEBOOK_COVER: &str = "notebook_cover";
+const RESOURCE_LINK_OWNER_TYPE_NOTE: &str = "note";
+const RESOURCE_LINK_OWNER_TYPE_NOTEBOOK_COVER: &str = "notebook_cover";
 const TAG_COLOR_PALETTE: [&str; 12] = [
     "#FF3B30", "#FF9500", "#FFCC00", "#34C759", "#00C7BE", "#5AC8FA", "#007AFF", "#5856D6",
     "#AF52DE", "#FF2D55", "#A2845E", "#8E8E93",
@@ -3111,6 +3115,10 @@ fn ensure_notebook_tree_constraints_tx_internal(connection: &mut Connection) -> 
         }
     }
 
+    if let Err(error) = rebuild_managed_resource_index_tx_internal(&transaction) {
+        eprintln!("[database_ops] managed resource index rebuild failed: {error}");
+    }
+
     transaction
         .commit()
         .map_err(|error| to_command_error("提交修复笔记结构事务", error))
@@ -4523,6 +4531,50 @@ fn extract_note_image_resource_paths(content: &str) -> Vec<String> {
     resource_paths.into_iter().collect()
 }
 
+fn normalize_note_image_resource_path_for_index(resource_path: &str) -> Option<String> {
+    let normalized_path = normalize_managed_resource_path(resource_path).ok()?;
+    normalized_path
+        .starts_with("resources/images/")
+        .then_some(normalized_path)
+}
+
+fn normalize_notebook_cover_resource_path_for_index(resource_path: &str) -> Option<String> {
+    let normalized_path = normalize_managed_resource_path(resource_path).ok()?;
+    normalized_path
+        .starts_with("resources/covers/")
+        .then_some(normalized_path)
+}
+
+fn extract_note_image_resource_path_from_tag_for_index(tag: &str) -> Option<String> {
+    let is_note_image = tag_has_attribute(tag, "data-note-image");
+    let is_image_tag = extract_tag_name(tag).as_deref() == Some("img");
+
+    if !is_note_image && !is_image_tag {
+        return None;
+    }
+
+    let resource_path = extract_tag_attribute(tag, "data-resource-path")?;
+    normalize_note_image_resource_path_for_index(&resource_path)
+}
+
+fn extract_note_image_resource_paths_from_html(content: &str) -> Vec<String> {
+    let mut resource_paths = BTreeSet::new();
+    let mut characters = content.chars().peekable();
+
+    while let Some(character) = characters.next() {
+        if character != '<' {
+            continue;
+        }
+
+        let tag = read_html_tag(&mut characters);
+        if let Some(resource_path) = extract_note_image_resource_path_from_tag_for_index(&tag) {
+            resource_paths.insert(resource_path);
+        }
+    }
+
+    resource_paths.into_iter().collect()
+}
+
 fn extract_indexable_plain_text(content: &str) -> String {
     let mut text = String::with_capacity(content.len());
     let mut last_was_space = false;
@@ -4795,6 +4847,148 @@ fn list_live_managed_resource_paths(connection: &Connection) -> Result<BTreeSet<
     }
 
     Ok(resource_paths)
+}
+
+fn insert_managed_resource_index_row(
+    connection: &Connection,
+    resource_path: &str,
+    resource_kind: &str,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "
+              INSERT OR IGNORE INTO managed_resources (
+                resource_path,
+                resource_kind,
+                size_bytes
+              )
+              VALUES (?1, ?2, 0)
+            ",
+            params![resource_path, resource_kind],
+        )
+        .map_err(|error| to_command_error("写入资源索引", error))?;
+    Ok(())
+}
+
+fn insert_resource_link_index_row(
+    connection: &Connection,
+    owner_type: &str,
+    owner_id: i64,
+    resource_path: &str,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "
+              INSERT OR IGNORE INTO resource_links (
+                owner_type,
+                owner_id,
+                resource_path
+              )
+              VALUES (?1, ?2, ?3)
+            ",
+            params![owner_type, owner_id, resource_path],
+        )
+        .map_err(|error| to_command_error("写入资源引用索引", error))?;
+    Ok(())
+}
+
+fn rebuild_managed_resource_index_tx_internal(connection: &Connection) -> Result<(), String> {
+    connection
+        .execute("DELETE FROM resource_links", [])
+        .map_err(|error| to_command_error("清空资源引用索引", error))?;
+    connection
+        .execute("DELETE FROM managed_resources", [])
+        .map_err(|error| to_command_error("清空资源索引", error))?;
+
+    let note_rows: Vec<(i64, String)> = {
+        let mut note_statement = connection
+            .prepare(
+                "
+                  SELECT id, COALESCE(content_plaintext, '')
+                  FROM notes
+                ",
+            )
+            .map_err(|error| to_command_error("读取正文图片引用", error))?;
+        let rows = note_statement
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|error| to_command_error("读取正文图片引用", error))?;
+
+        rows.map(|row| row.map_err(|error| to_command_error("读取正文图片引用", error)))
+            .collect::<Result<Vec<_>, _>>()?
+    };
+
+    for (note_id, content) in note_rows {
+        for resource_path in extract_note_image_resource_paths_from_html(&content) {
+            insert_managed_resource_index_row(
+                connection,
+                &resource_path,
+                MANAGED_RESOURCE_KIND_NOTE_IMAGE,
+            )?;
+            insert_resource_link_index_row(
+                connection,
+                RESOURCE_LINK_OWNER_TYPE_NOTE,
+                note_id,
+                &resource_path,
+            )?;
+        }
+    }
+
+    let notebook_rows: Vec<(i64, Option<String>)> = {
+        let mut notebook_statement = connection
+            .prepare(
+                "
+                  SELECT id, cover_image_path
+                  FROM notebooks
+                ",
+            )
+            .map_err(|error| to_command_error("读取封面图片引用", error))?;
+        let rows = notebook_statement
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)))
+            .map_err(|error| to_command_error("读取封面图片引用", error))?;
+
+        rows.map(|row| row.map_err(|error| to_command_error("读取封面图片引用", error)))
+            .collect::<Result<Vec<_>, _>>()?
+    };
+
+    for (notebook_id, cover_image_path) in notebook_rows {
+        let Some(resource_path) = cover_image_path
+            .as_deref()
+            .and_then(normalize_notebook_cover_resource_path_for_index)
+        else {
+            continue;
+        };
+
+        insert_managed_resource_index_row(
+            connection,
+            &resource_path,
+            MANAGED_RESOURCE_KIND_NOTEBOOK_COVER,
+        )?;
+        insert_resource_link_index_row(
+            connection,
+            RESOURCE_LINK_OWNER_TYPE_NOTEBOOK_COVER,
+            notebook_id,
+            &resource_path,
+        )?;
+    }
+
+    connection
+        .execute("UPDATE managed_resources SET ref_count = 0", [])
+        .map_err(|error| to_command_error("重置资源引用计数", error))?;
+    connection
+        .execute(
+            "
+              UPDATE managed_resources
+              SET ref_count = (
+                SELECT COUNT(*)
+                FROM resource_links
+                WHERE resource_links.resource_path = managed_resources.resource_path
+              )
+            ",
+            [],
+        )
+        .map_err(|error| to_command_error("刷新资源引用计数", error))?;
+
+    Ok(())
 }
 
 fn managed_resource_path_from_absolute_path(
@@ -6157,12 +6351,14 @@ mod tests {
         ensure_note_search_ready_internal, ensure_note_search_table,
         ensure_notebook_tree_constraints_tx_internal, ensure_recovery_notebook,
         ensure_review_feature_ready_internal, extract_indexable_plain_text,
+        extract_note_image_resource_paths_from_html,
         extract_managed_resource_path_from_text, extract_note_image_resource_paths,
         extract_tag_name, fetch_folder_trash_state, fetch_note_trash_state,
         get_note_review_schedule_tx_internal, get_review_schedule_dirty_note_ids,
         list_trash_roots_tx_internal, move_folder_to_notebook_top_tx_internal,
         move_folder_to_trash_tx_internal, move_note_to_trash_tx_internal, move_note_tx_internal,
-        normalize_managed_resource_path, normalize_tag_color, rebuild_note_search_index_internal,
+        normalize_managed_resource_path, normalize_tag_color,
+        rebuild_managed_resource_index_tx_internal, rebuild_note_search_index_internal,
         rename_review_plan_tx_internal, reorder_folders_tx_internal, reorder_notebooks_tx_internal,
         restore_trashed_item_tx_internal, save_note_content_with_tags_tx_internal,
         scan_orphan_image_resources_internal,
@@ -6239,6 +6435,24 @@ mod tests {
                   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                   FOREIGN KEY (notebook_id) REFERENCES notebooks(id) ON DELETE CASCADE,
                   FOREIGN KEY (folder_id) REFERENCES folders(id) ON DELETE SET NULL
+                );
+                CREATE TABLE managed_resources (
+                  resource_path TEXT PRIMARY KEY,
+                  resource_kind TEXT NOT NULL,
+                  size_bytes INTEGER NOT NULL DEFAULT 0,
+                  ref_count INTEGER NOT NULL DEFAULT 0,
+                  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  pending_delete_at TEXT,
+                  deleted_at TEXT,
+                  last_cleanup_error TEXT
+                );
+                CREATE TABLE resource_links (
+                  owner_type TEXT NOT NULL,
+                  owner_id INTEGER NOT NULL,
+                  resource_path TEXT NOT NULL,
+                  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  PRIMARY KEY (owner_type, owner_id, resource_path),
+                  FOREIGN KEY (resource_path) REFERENCES managed_resources(resource_path)
                 );
                 CREATE TABLE review_plans (
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -6729,6 +6943,202 @@ mod tests {
                 "real db note {note_id} should keep the same extracted resource paths",
             );
         }
+    }
+
+    #[test]
+    fn extract_note_image_resource_paths_from_html_extracts_note_image_paths_only() {
+        let content = concat!(
+            "<img data-note-image=\"true\" data-resource-path=\"resources/images/demo-a.png\" alt=\"A\" />",
+            "<img data-note-image='true' data-resource-path='resources/images/demo-b.png' alt='B' />",
+            "<img data-note-image=\"true\" data-resource-path=\" resources/images/demo-a.png \" alt=\"A2\" />",
+            "<img data-note-image=\"true\" data-resource-path=\"resources/covers/demo-cover.png\" alt=\"cover\" />",
+            "<img data-note-image=\"true\" data-resource-path=\"https://example.com/demo.png\" alt=\"external\" />",
+            "<img data-note-image=\"true\" data-resource-path=\"../escape.png\" alt=\"invalid\" />",
+            "<img src=\"asset://localhost/resources/images/demo-c.png\" alt=\"src only\" />",
+        );
+
+        let paths = extract_note_image_resource_paths_from_html(content);
+
+        assert_eq!(
+            paths,
+            vec![
+                "resources/images/demo-a.png".to_string(),
+                "resources/images/demo-b.png".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn rebuild_managed_resource_index_rebuilds_live_and_trashed_references() {
+        let connection = test_connection();
+        connection
+            .execute(
+                "INSERT INTO notebooks (id, name, cover_image_path) VALUES (1, '存活本', 'resources/covers/cover-a.png')",
+                [],
+            )
+            .expect("insert live notebook");
+        connection
+            .execute(
+                "INSERT INTO notebooks (id, name, cover_image_path, deleted_at) VALUES (2, '回收站本', 'resources/covers/cover-b.png', '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .expect("insert trashed notebook");
+        connection
+            .execute(
+                "INSERT INTO folders (id, notebook_id, name, sort_order) VALUES (1, 1, '收集箱', 0)",
+                [],
+            )
+            .expect("insert live folder");
+        connection
+            .execute(
+                "INSERT INTO folders (id, notebook_id, name, sort_order) VALUES (2, 2, '回收站文件夹', 0)",
+                [],
+            )
+            .expect("insert trashed folder");
+        connection
+            .execute(
+                "INSERT INTO notes (id, notebook_id, folder_id, title, content_plaintext) VALUES (?1, ?2, ?3, ?4, ?5)",
+                (
+                    1_i64,
+                    1_i64,
+                    1_i64,
+                    "存活文件",
+                    concat!(
+                        "<img data-note-image=\"true\" data-resource-path=\"resources/images/shared.png\" />",
+                        "<img data-note-image=\"true\" data-resource-path=\"resources/images/shared.png\" />",
+                        "<img data-note-image=\"true\" data-resource-path=\"resources/images/live-only.png\" />",
+                    ),
+                ),
+            )
+            .expect("insert live note");
+        connection
+            .execute(
+                "INSERT INTO notes (id, notebook_id, folder_id, title, content_plaintext, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                (
+                    2_i64,
+                    2_i64,
+                    2_i64,
+                    "回收站文件",
+                    "<img data-note-image=\"true\" data-resource-path=\"resources/images/shared.png\" /><img data-note-image=\"true\" data-resource-path=\"resources/images/trashed-only.png\" />",
+                    "2026-01-02T00:00:00Z",
+                ),
+            )
+            .expect("insert trashed note");
+        connection
+            .execute(
+                "INSERT INTO managed_resources (resource_path, resource_kind, size_bytes, ref_count, pending_delete_at, deleted_at, last_cleanup_error) VALUES ('resources/images/stale.png', 'note_image', 1, 99, '2026-01-01T00:00:00Z', NULL, 'stale')",
+                [],
+            )
+            .expect("insert stale resource");
+        connection
+            .execute(
+                "INSERT INTO resource_links (owner_type, owner_id, resource_path) VALUES ('note', 999, 'resources/images/stale.png')",
+                [],
+            )
+            .expect("insert stale link");
+
+        rebuild_managed_resource_index_tx_internal(&connection).expect("rebuild managed resource index");
+
+        let links: Vec<(String, i64, String)> = {
+            let mut statement = connection
+                .prepare(
+                    "
+                      SELECT owner_type, owner_id, resource_path
+                      FROM resource_links
+                      ORDER BY owner_type, owner_id, resource_path
+                    ",
+                )
+                .expect("prepare links query");
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .expect("query links")
+                .map(|row| row.expect("read link row"))
+                .collect()
+        };
+
+        assert_eq!(
+            links,
+            vec![
+                (
+                    "note".to_string(),
+                    1,
+                    "resources/images/live-only.png".to_string(),
+                ),
+                (
+                    "note".to_string(),
+                    1,
+                    "resources/images/shared.png".to_string(),
+                ),
+                (
+                    "note".to_string(),
+                    2,
+                    "resources/images/shared.png".to_string(),
+                ),
+                (
+                    "note".to_string(),
+                    2,
+                    "resources/images/trashed-only.png".to_string(),
+                ),
+                (
+                    "notebook_cover".to_string(),
+                    1,
+                    "resources/covers/cover-a.png".to_string(),
+                ),
+                (
+                    "notebook_cover".to_string(),
+                    2,
+                    "resources/covers/cover-b.png".to_string(),
+                ),
+            ]
+        );
+
+        let resources: Vec<(String, String, i64)> = {
+            let mut statement = connection
+                .prepare(
+                    "
+                      SELECT resource_path, resource_kind, ref_count
+                      FROM managed_resources
+                      ORDER BY resource_path
+                    ",
+                )
+                .expect("prepare resources query");
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .expect("query resources")
+                .map(|row| row.expect("read resource row"))
+                .collect()
+        };
+
+        assert_eq!(
+            resources,
+            vec![
+                (
+                    "resources/covers/cover-a.png".to_string(),
+                    "notebook_cover".to_string(),
+                    1,
+                ),
+                (
+                    "resources/covers/cover-b.png".to_string(),
+                    "notebook_cover".to_string(),
+                    1,
+                ),
+                (
+                    "resources/images/live-only.png".to_string(),
+                    "note_image".to_string(),
+                    1,
+                ),
+                (
+                    "resources/images/shared.png".to_string(),
+                    "note_image".to_string(),
+                    2,
+                ),
+                (
+                    "resources/images/trashed-only.png".to_string(),
+                    "note_image".to_string(),
+                    1,
+                ),
+            ]
+        );
     }
 
     #[test]

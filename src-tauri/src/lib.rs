@@ -96,6 +96,12 @@ pub fn run() {
             sql: include_str!("../migrations/0009_soft_delete_trash.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 10,
+            description: "create_managed_resource_index",
+            sql: include_str!("../migrations/0010_managed_resources.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     let app = tauri::Builder::default()
