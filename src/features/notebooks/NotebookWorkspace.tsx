@@ -18,9 +18,9 @@ import {
   duplicateNoteAbove,
   getNoteById,
   initializeNotebookDatabase,
-  listAllNotes,
   listAllFolders,
   listFoldersByNotebook,
+  listNotebookNoteCounts,
   listNotesByNotebook,
   listNotebooks,
   moveFolderToTrash,
@@ -35,7 +35,6 @@ import {
   reorderNotebooks,
   updateNotebookCoverImage,
 } from "./repository";
-import { groupNotebookNoteCounts } from "./notebookHomePresentation";
 import {
   hasNotebookUnsavedChanges,
   shouldPromptReviewScheduleSave,
@@ -44,6 +43,7 @@ import {
 import {
   clearManagedResourceResolution,
   primeManagedResourceResolution,
+  resolveLocalResourcePath,
 } from "./editorResources";
 import type { NoteEditorPaneRef } from "./NoteEditorPane";
 import { NotebookDetailWorkspace } from "./NotebookDetailWorkspace";
@@ -426,7 +426,9 @@ export const NotebookWorkspace = forwardRef<
   const [folders, setFolders] = useState<Folder[]>([]);
   const [allFolders, setAllFolders] = useState<Folder[]>([]);
   const [notes, setNotes] = useState<Note[]>([]);
-  const [allNotes, setAllNotes] = useState<Note[]>([]);
+  const [noteCountsByNotebook, setNoteCountsByNotebook] = useState<Record<number, number>>(
+    {},
+  );
   const [selectedNotebookId, setSelectedNotebookId] = useState<number | null>(
     null,
   );
@@ -479,10 +481,6 @@ export const NotebookWorkspace = forwardRef<
   const sortedNotebooks = useMemo(
     () => sortNotebooks(notebooks, homeSort),
     [homeSort, notebooks],
-  );
-  const notebookNoteCounts = useMemo(
-    () => groupNotebookNoteCounts(allNotes),
-    [allNotes],
   );
 
   const currentNotebook =
@@ -624,6 +622,13 @@ export const NotebookWorkspace = forwardRef<
   ) {
     const notebookList = await listNotebooks();
     setNotebooks(notebookList);
+    for (const notebook of notebookList) {
+      if (!notebook.coverImagePath) {
+        continue;
+      }
+
+      void resolveLocalResourcePath(notebook.coverImagePath);
+    }
 
     if (notebookList.length === 0) {
       setSelectedNotebookId(null);
@@ -632,7 +637,7 @@ export const NotebookWorkspace = forwardRef<
       setFolders([]);
       setAllFolders([]);
       setNotes([]);
-      setAllNotes([]);
+      setNoteCountsByNotebook({});
       return;
     }
 
@@ -645,11 +650,11 @@ export const NotebookWorkspace = forwardRef<
           ? selectedNotebookId
           : notebookList[0].id;
 
-    const [folderList, noteList, allFolderList, allNoteList] = await Promise.all([
+    const [folderList, noteList, allFolderList, notebookNoteCounts] = await Promise.all([
       listFoldersByNotebook(nextNotebookId),
       listNotesByNotebook(nextNotebookId),
       listAllFolders(),
-      listAllNotes(),
+      listNotebookNoteCounts(),
     ]);
 
     setSelectedNotebookId(nextNotebookId);
@@ -662,7 +667,7 @@ export const NotebookWorkspace = forwardRef<
     setFolders(folderList);
     setAllFolders(allFolderList);
     setNotes(noteList);
-    setAllNotes(allNoteList);
+    setNoteCountsByNotebook(notebookNoteCounts);
     setSelectedEntity(
       resolveSelection(nextNotebookId, folderList, noteList, preferredSelection),
     );
@@ -689,7 +694,7 @@ export const NotebookWorkspace = forwardRef<
       setFolders([]);
       setAllFolders([]);
       setNotes([]);
-      setAllNotes([]);
+      setNoteCountsByNotebook({});
       setSelectedNotebookId(null);
       setHomeSelectedNotebookId(null);
       setSelectedEntity(null);
@@ -1505,10 +1510,9 @@ export const NotebookWorkspace = forwardRef<
       {shellMode === "home" ? (
         <NotebookHomeWorkspace
           notebooks={sortedNotebooks}
-          selectedNotebookId={homeSelectedNotebookId}
           disabled={isBusy}
           dragBusy={isNotebookOrderSaving}
-          noteCountsByNotebook={notebookNoteCounts}
+          noteCountsByNotebook={noteCountsByNotebook}
           sort={homeSort}
           onSortChange={setHomeSort}
           onSelectNotebook={setHomeSelectedNotebookId}

@@ -1,5 +1,5 @@
 .shell {
-  --shell-rail-width: 156px;
+  --shell-rail-width: 128px;
   display: grid;
   grid-template-columns: var(--shell-rail-width) minmax(0, 1fr);
   width: 100%;

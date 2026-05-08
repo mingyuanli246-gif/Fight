@@ -1,9 +1,9 @@
 export type NotebookCoverThemeKey =
-  | "blue"
-  | "purple"
-  | "pink"
-  | "yellow"
-  | "green";
+  | "green-study"
+  | "blue-mountain"
+  | "purple-planet"
+  | "pink-biology"
+  | "yellow-math";
 
 export interface NotebookCoverTheme {
   key: NotebookCoverThemeKey;
@@ -11,24 +11,23 @@ export interface NotebookCoverTheme {
 }
 
 const NOTEBOOK_COVER_THEMES: NotebookCoverTheme[] = [
-  { key: "blue", accent: "#6f9dff" },
-  { key: "purple", accent: "#8e7cf8" },
-  { key: "pink", accent: "#f3a6c5" },
-  { key: "yellow", accent: "#f2ca58" },
-  { key: "green", accent: "#a5d062" },
+  { key: "green-study", accent: "#a5d062" },
+  { key: "blue-mountain", accent: "#6f9dff" },
+  { key: "purple-planet", accent: "#8e7cf8" },
+  { key: "pink-biology", accent: "#f3a6c5" },
+  { key: "yellow-math", accent: "#f2ca58" },
 ];
 
-function normalizeThemeIndex(index: number) {
-  if (!Number.isFinite(index)) {
-    return 0;
-  }
+const NOTEBOOK_COVER_THEME_KEYS = new Set<NotebookCoverThemeKey>(
+  NOTEBOOK_COVER_THEMES.map((theme) => theme.key),
+);
 
-  const roundedIndex = Math.trunc(index);
-  const normalized = roundedIndex % NOTEBOOK_COVER_THEMES.length;
-  return normalized >= 0
-    ? normalized
-    : normalized + NOTEBOOK_COVER_THEMES.length;
-}
+const NOTEBOOK_COVER_THEME_BY_KEY = NOTEBOOK_COVER_THEMES.reduce<
+  Record<NotebookCoverThemeKey, NotebookCoverTheme>
+>((themeMap, theme) => {
+  themeMap[theme.key] = theme;
+  return themeMap;
+}, {} as Record<NotebookCoverThemeKey, NotebookCoverTheme>);
 
 function parseTimestamp(value: string) {
   return new Date(value.replace(" ", "T"));
@@ -38,17 +37,52 @@ function padTimePart(value: number) {
   return String(value).padStart(2, "0");
 }
 
-export function getNotebookCoverTheme(index: number) {
-  return NOTEBOOK_COVER_THEMES[normalizeThemeIndex(index)] ?? NOTEBOOK_COVER_THEMES[0];
+export function stableHash(identity: string | number) {
+  const bytes = new TextEncoder().encode(String(identity));
+  let hash = 2166136261;
+
+  for (const value of bytes) {
+    hash ^= value;
+    hash = Math.imul(hash, 16777619);
+  }
+
+  return hash >>> 0;
 }
 
-export function groupNotebookNoteCounts(
-  notes: Array<{ notebookId: number }>,
-) {
-  return notes.reduce<Record<number, number>>((counts, note) => {
-    counts[note.notebookId] = (counts[note.notebookId] ?? 0) + 1;
-    return counts;
-  }, {});
+export function isValidNotebookCoverThemeKey(
+  value: unknown,
+): value is NotebookCoverThemeKey {
+  return typeof value === "string" && NOTEBOOK_COVER_THEME_KEYS.has(value as NotebookCoverThemeKey);
+}
+
+export function getNotebookCoverThemeByIdentity(identity: string | number) {
+  const themeIndex = stableHash(identity) % NOTEBOOK_COVER_THEMES.length;
+  return NOTEBOOK_COVER_THEMES[themeIndex] ?? NOTEBOOK_COVER_THEMES[0];
+}
+
+export function resolveNotebookCoverThemeKey({
+  id,
+  coverThemeKey,
+}: {
+  id: string | number;
+  coverThemeKey: string | null;
+}) {
+  if (isValidNotebookCoverThemeKey(coverThemeKey)) {
+    return coverThemeKey;
+  }
+
+  return getNotebookCoverThemeByIdentity(id).key;
+}
+
+export function resolveNotebookCoverTheme({
+  id,
+  coverThemeKey,
+}: {
+  id: string | number;
+  coverThemeKey: string | null;
+}) {
+  const resolvedKey = resolveNotebookCoverThemeKey({ id, coverThemeKey });
+  return NOTEBOOK_COVER_THEME_BY_KEY[resolvedKey];
 }
 
 export function formatNotebookUpdatedLabel(

@@ -9,6 +9,10 @@ import {
   TAG_ORDER,
 } from "./constants";
 import { getNotebookDatabase } from "./db";
+import {
+  isValidNotebookCoverThemeKey,
+  resolveNotebookCoverThemeKey,
+} from "./notebookHomePresentation";
 import { extractIndexablePlainText } from "./richTextContent";
 import { findFirstExactSearchMatch } from "./searchQuery";
 import { DEFAULT_TAG_COLOR, normalizeTagColor } from "./tagColors";
@@ -45,6 +49,16 @@ type TagWithCountRow = TagWithCount;
 type TagContentPreviewRow = TagContentPreviewResult;
 type CountRow = {
   count: number;
+};
+
+type NotebookThemeRow = {
+  id: number;
+  coverThemeKey: string | null;
+};
+
+type NotebookNoteCountRow = {
+  notebookId: number;
+  noteCount: number;
 };
 
 let noteSearchReadyPromise: Promise<void> | null = null;
@@ -480,6 +494,7 @@ async function fetchNotebookById(database: Database, id: number) {
         id,
         name,
         cover_image_path AS coverImagePath,
+        cover_theme_key AS coverThemeKey,
         custom_sort_order AS customSortOrder,
         created_at AS createdAt,
         updated_at AS updatedAt
@@ -489,6 +504,37 @@ async function fetchNotebookById(database: Database, id: number) {
     [id],
     "目标笔记本不存在。",
   );
+}
+
+async function ensureNotebookCoverThemeKeys(database: Database) {
+  const notebooks = await database.select<NotebookThemeRow[]>(
+    `
+      SELECT
+        id,
+        cover_theme_key AS coverThemeKey
+      FROM notebooks
+    `,
+  );
+
+  for (const notebook of notebooks) {
+    if (isValidNotebookCoverThemeKey(notebook.coverThemeKey)) {
+      continue;
+    }
+
+    const nextThemeKey = resolveNotebookCoverThemeKey({
+      id: notebook.id,
+      coverThemeKey: notebook.coverThemeKey,
+    });
+
+    await database.execute(
+      `
+        UPDATE notebooks
+        SET cover_theme_key = $1
+        WHERE id = $2
+      `,
+      [nextThemeKey, notebook.id],
+    );
+  }
 }
 
 async function fetchFolderById(database: Database, id: number) {
@@ -656,6 +702,7 @@ export async function getNoteById(id: number) {
 export async function initializeNotebookDatabase() {
   return withRepositoryError("数据库初始化", async () => {
     const database = await getNotebookDatabase();
+    await ensureNotebookCoverThemeKeys(database);
     await ensureNoteSearchReady(database);
     await ensureNotebookTreeConstraintsCommand();
   });
@@ -671,6 +718,7 @@ export async function listNotebooks() {
           id,
           name,
           cover_image_path AS coverImagePath,
+          cover_theme_key AS coverThemeKey,
           custom_sort_order AS customSortOrder,
           created_at AS createdAt,
           updated_at AS updatedAt
@@ -679,6 +727,45 @@ export async function listNotebooks() {
         ${NOTEBOOK_ORDER}
       `,
     );
+  });
+}
+
+export async function listNotebookNoteCounts() {
+  return withRepositoryError("读取笔记本统计", async () => {
+    const database = await getNotebookDatabase();
+    const rows = await database.select<NotebookNoteCountRow[]>(
+      `
+        SELECT
+          notebooks.id AS notebookId,
+          COALESCE(
+            SUM(
+              CASE
+                WHEN notes.id IS NOT NULL
+                  AND (
+                    notes.folder_id IS NULL
+                    OR folders.deleted_at IS NULL
+                  )
+                THEN 1
+                ELSE 0
+              END
+            ),
+            0
+          ) AS noteCount
+        FROM notebooks
+        LEFT JOIN notes
+          ON notes.notebook_id = notebooks.id
+          AND notes.deleted_at IS NULL
+        LEFT JOIN folders
+          ON folders.id = notes.folder_id
+        WHERE notebooks.deleted_at IS NULL
+        GROUP BY notebooks.id
+      `,
+    );
+
+    return rows.reduce<Record<number, number>>((counts, row) => {
+      counts[row.notebookId] = row.noteCount;
+      return counts;
+    }, {});
   });
 }
 
@@ -858,29 +945,6 @@ export async function listNotesByNotebook(notebookId: number) {
         ${NOTE_ORDER}
       `,
       [notebookId],
-    );
-  });
-}
-
-export async function listAllNotes() {
-  return withRepositoryError("读取全部文件", async () => {
-    const database = await getNotebookDatabase();
-
-    return database.select<Note[]>(
-      `
-        SELECT
-          id,
-          notebook_id AS notebookId,
-          folder_id AS folderId,
-          sort_order AS sortOrder,
-          title,
-          content_plaintext AS contentPlaintext,
-          created_at AS createdAt,
-          updated_at AS updatedAt
-        FROM notes
-        WHERE deleted_at IS NULL
-        ${NOTE_ORDER}
-      `,
     );
   });
 }

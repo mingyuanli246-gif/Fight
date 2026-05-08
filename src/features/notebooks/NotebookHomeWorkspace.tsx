@@ -4,7 +4,6 @@ import {
   MeasuringStrategy,
   PointerSensor,
   pointerWithin,
-  useDraggable,
   useDroppable,
   useSensor,
   useSensors,
@@ -20,8 +19,6 @@ import {
   useMemo,
   useRef,
   useState,
-  type CSSProperties,
-  type MouseEvent as ReactMouseEvent,
 } from "react";
 import { GlobalSearch } from "../../app/layout/GlobalSearch";
 import blueCoverImage from "../../assets/notebook-covers/blue.png";
@@ -29,27 +26,19 @@ import greenCoverImage from "../../assets/notebook-covers/green.png";
 import pinkCoverImage from "../../assets/notebook-covers/pink.png";
 import purpleCoverImage from "../../assets/notebook-covers/purple.png";
 import yellowCoverImage from "../../assets/notebook-covers/yellow.png";
+import { NotebookCard, NotebookDragPreview } from "./NotebookCard";
 import type { NoteOpenTarget, Notebook, NotebookHomeSort } from "./types";
-import { ManagedResourceImage } from "./ManagedResourceImage";
 import {
-  CheckIcon,
-  ClockIcon,
-  FileTextIcon,
-  FolderMoveIcon,
-  MoreIcon,
-  PencilIcon,
   SortIcon,
 } from "./NotebookUiIcons";
 import {
-  formatNotebookUpdatedLabel,
-  getNotebookCoverTheme,
   type NotebookCoverTheme,
+  resolveNotebookCoverTheme,
 } from "./notebookHomePresentation";
 import styles from "./NotebookWorkspaceShell.module.css";
 
 interface NotebookHomeWorkspaceProps {
   notebooks: Notebook[];
-  selectedNotebookId: number | null;
   disabled: boolean;
   dragBusy: boolean;
   noteCountsByNotebook: Record<number, number>;
@@ -86,31 +75,6 @@ interface NotebookShellLayout {
   right: number;
 }
 
-interface NotebookGridCardProps {
-  notebook: Notebook;
-  coverTheme: NotebookCoverTheme;
-  coverImageSrc: string;
-  noteCount: number;
-  isSelected: boolean;
-  isEditing: boolean;
-  disabled: boolean;
-  menuDisabled: boolean;
-  dragEnabled: boolean;
-  isDragging: boolean;
-  showTailInsertionBand: boolean;
-  dropIndicatorSide: NotebookDropIndicator["side"] | null;
-  renameValue: string;
-  onRenameValueChange: (value: string) => void;
-  onSubmitRename: () => void;
-  onCancelRename: () => void;
-  onStartRename: (notebook: Notebook) => void;
-  onOpenNotebook: (notebookId: number) => void;
-  onOpenContextMenu: (event: ReactMouseEvent<HTMLElement>) => void;
-  onOpenActionMenu: (notebookId: number, anchorRect: DOMRect) => void;
-  shouldSuppressNotebookOpen: () => boolean;
-  onShellRefChange: (notebookId: number, node: HTMLDivElement | null) => void;
-}
-
 interface NotebookInsertionBandProps {
   droppableId: string;
   notebookId: number;
@@ -134,11 +98,11 @@ const CONTEXT_MENU_MIN_WIDTH = 180;
 const CONTEXT_MENU_VIEWPORT_MARGIN = 12;
 
 const COVER_THEME_IMAGES: Record<NotebookCoverTheme["key"], string> = {
-  blue: blueCoverImage,
-  purple: purpleCoverImage,
-  pink: pinkCoverImage,
-  yellow: yellowCoverImage,
-  green: greenCoverImage,
+  "green-study": greenCoverImage,
+  "blue-mountain": blueCoverImage,
+  "purple-planet": purpleCoverImage,
+  "pink-biology": pinkCoverImage,
+  "yellow-math": yellowCoverImage,
 };
 
 function reorderNotebookIds(
@@ -165,91 +129,6 @@ function areArraysEqual(left: number[], right: number[]) {
   }
 
   return left.every((value, index) => value === right[index]);
-}
-
-function getNotebookCoverFallbackStyle(coverImageSrc: string): CSSProperties {
-  return {
-    backgroundColor: "#f4f6fb",
-    backgroundImage: `url(${coverImageSrc})`,
-    backgroundPosition: "center",
-    backgroundRepeat: "no-repeat",
-    backgroundSize: "cover",
-  };
-}
-
-function NotebookCoverArtwork({
-  notebook,
-  coverImageSrc,
-}: {
-  notebook: Notebook;
-  coverImageSrc: string;
-}) {
-  if (notebook.coverImagePath) {
-    return (
-      <ManagedResourceImage
-        resourcePath={notebook.coverImagePath}
-        alt={`${notebook.name} 封面`}
-        imageClassName={styles.notebookCoverImage}
-        fallbackClassName={styles.notebookCoverFallback}
-        loadingClassName={styles.notebookCoverFallback}
-        fallbackTitle=""
-        fallbackMessage=""
-        fallbackStyle={getNotebookCoverFallbackStyle(coverImageSrc)}
-      />
-    );
-  }
-
-  return (
-    <img
-      className={styles.notebookCoverImage}
-      src={coverImageSrc}
-      alt={`${notebook.name} 封面`}
-      loading="lazy"
-      decoding="async"
-      draggable={false}
-    />
-  );
-}
-
-function NotebookDragPreview({
-  notebook,
-  coverTheme,
-  coverImageSrc,
-  noteCount,
-  isSelected,
-}: {
-  notebook: Notebook;
-  coverTheme: NotebookCoverTheme;
-  coverImageSrc: string;
-  noteCount: number;
-  isSelected: boolean;
-}) {
-  return (
-    <article
-      className={`${styles.notebookCard} ${styles.notebookCardOverlay} ${
-        isSelected ? styles.notebookCardSelected : ""
-      }`}
-      data-drag-overlay="true"
-    >
-      <div className={styles.notebookCover}>
-        <NotebookCoverArtwork notebook={notebook} coverImageSrc={coverImageSrc} />
-        <span
-          className={styles.notebookCoverRibbon}
-          style={{ "--notebook-ribbon-color": coverTheme.accent } as CSSProperties}
-          aria-hidden="true"
-        />
-      </div>
-      <div className={styles.notebookCardInfo}>
-        <div className={styles.notebookCardNameRow}>
-          <h4 className={styles.notebookCardName}>{notebook.name}</h4>
-        </div>
-        <div className={styles.notebookStatRow}>
-          <FileTextIcon className={styles.inlineMetaIcon} />
-          <span>{noteCount} 条笔记</span>
-        </div>
-      </div>
-    </article>
-  );
 }
 
 function NotebookInsertionBand({
@@ -282,265 +161,8 @@ function NotebookInsertionBand({
   );
 }
 
-function NotebookGridCard({
-  notebook,
-  coverTheme,
-  coverImageSrc,
-  noteCount,
-  isSelected,
-  isEditing,
-  disabled,
-  menuDisabled,
-  dragEnabled,
-  isDragging,
-  showTailInsertionBand,
-  dropIndicatorSide,
-  renameValue,
-  onRenameValueChange,
-  onSubmitRename,
-  onCancelRename,
-  onStartRename,
-  onOpenNotebook,
-  onOpenContextMenu,
-  onOpenActionMenu,
-  shouldSuppressNotebookOpen,
-  onShellRefChange,
-}: NotebookGridCardProps) {
-  const clickTimerRef = useRef<number | null>(null);
-  const { attributes, listeners, setNodeRef: setDraggableNodeRef } = useDraggable({
-    id: `notebook-${notebook.id}`,
-    data: {
-      type: "notebook-card",
-      notebookId: notebook.id,
-    },
-    disabled: !dragEnabled,
-  });
-  const { setNodeRef: setDroppableNodeRef } = useDroppable({
-    id: `notebook-${notebook.id}`,
-    data: {
-      type: "notebook-card",
-      notebookId: notebook.id,
-    },
-    disabled: !dragEnabled,
-  });
-
-  useEffect(() => {
-    return () => {
-      if (clickTimerRef.current !== null) {
-        window.clearTimeout(clickTimerRef.current);
-      }
-    };
-  }, []);
-
-  const setNodeRef = useCallback(
-    (node: HTMLElement | null) => {
-      setDraggableNodeRef(node);
-      setDroppableNodeRef(node);
-    },
-    [setDraggableNodeRef, setDroppableNodeRef],
-  );
-  const updatedLabel = formatNotebookUpdatedLabel(notebook.updatedAt);
-  const ribbonStyle = {
-    "--notebook-ribbon-color": coverTheme.accent,
-  } as CSSProperties;
-
-  return (
-    <div
-      ref={(node) => onShellRefChange(notebook.id, node)}
-      className={styles.notebookCardShell}
-    >
-      <NotebookInsertionBand
-        droppableId={`notebook-insert-before-${notebook.id}`}
-        notebookId={notebook.id}
-        side="before"
-        position="before"
-        enabled={dragEnabled}
-      />
-      <article
-        ref={setNodeRef}
-        className={`${styles.notebookCard} ${
-          isSelected ? styles.notebookCardSelected : ""
-        } ${isDragging ? styles.notebookCardDragging : ""} ${
-          dropIndicatorSide === "before" ? styles.notebookCardDropBefore : ""
-        } ${dropIndicatorSide === "after" ? styles.notebookCardDropAfter : ""}`}
-        onContextMenu={onOpenContextMenu}
-        {...attributes}
-        {...listeners}
-      >
-        <div className={styles.notebookCover}>
-          <button
-            type="button"
-            className={styles.notebookCoverOpenButton}
-            onClick={() => {
-              if (shouldSuppressNotebookOpen()) {
-                return;
-              }
-
-              onOpenNotebook(notebook.id);
-            }}
-            disabled={disabled}
-            aria-label={`打开笔记本：${notebook.name}`}
-          >
-            <NotebookCoverArtwork notebook={notebook} coverImageSrc={coverImageSrc} />
-          </button>
-          <span
-            className={styles.notebookCoverRibbon}
-            style={ribbonStyle}
-            aria-hidden="true"
-          />
-        </div>
-
-        <div className={styles.notebookCardInfo}>
-          <div className={styles.notebookCardNameRow}>
-            {isEditing ? (
-              <div className={styles.inlineNameEditor}>
-                <input
-                  type="text"
-                  className={`${styles.inlineNameInput} ${styles.inlineNameInputCard}`}
-                  value={renameValue}
-                  onChange={(event) => onRenameValueChange(event.currentTarget.value)}
-                  maxLength={80}
-                  autoFocus
-                  onClick={(event) => event.stopPropagation()}
-                  onPointerDown={(event) => event.stopPropagation()}
-                  onBlur={onCancelRename}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      event.preventDefault();
-                      void onSubmitRename();
-                    }
-
-                    if (event.key === "Escape") {
-                      onCancelRename();
-                    }
-                  }}
-                />
-              </div>
-            ) : (
-              <button
-                type="button"
-                className={styles.ghostTitleButton}
-                onClick={() => {
-                  if (shouldSuppressNotebookOpen()) {
-                    return;
-                  }
-
-                  if (clickTimerRef.current !== null) {
-                    window.clearTimeout(clickTimerRef.current);
-                  }
-
-                  clickTimerRef.current = window.setTimeout(() => {
-                    onOpenNotebook(notebook.id);
-                    clickTimerRef.current = null;
-                  }, 220);
-                }}
-                onDoubleClick={() => {
-                  if (clickTimerRef.current !== null) {
-                    window.clearTimeout(clickTimerRef.current);
-                    clickTimerRef.current = null;
-                  }
-
-                  onStartRename(notebook);
-                }}
-              >
-                <h4 className={styles.notebookCardName}>{notebook.name}</h4>
-              </button>
-            )}
-          </div>
-          <div className={styles.notebookInfoStack}>
-            <div className={styles.notebookStatRow}>
-              <FileTextIcon className={styles.inlineMetaIcon} />
-              <span>{noteCount} 条笔记</span>
-            </div>
-            <div className={styles.notebookStatRow}>
-              <ClockIcon className={styles.inlineMetaIcon} />
-              <span>{updatedLabel}</span>
-            </div>
-          </div>
-          <div className={styles.notebookActionBar}>
-            <div className={styles.notebookActionGroup}>
-              <button
-                type="button"
-                className={styles.notebookActionButton}
-                aria-label={`编辑笔记本：${notebook.name}`}
-                disabled={disabled || isEditing}
-                onPointerDown={(event) => event.stopPropagation()}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onStartRename(notebook);
-                }}
-              >
-                <PencilIcon className={styles.cardActionIcon} />
-              </button>
-              <button
-                type="button"
-                className={styles.notebookActionButton}
-                aria-label="笔记本历史（暂未开放）"
-                disabled
-                onPointerDown={(event) => event.stopPropagation()}
-              >
-                <ClockIcon className={styles.cardActionIcon} />
-              </button>
-              <button
-                type="button"
-                className={styles.notebookActionButton}
-                aria-label="移动笔记本（暂未开放）"
-                disabled
-                onPointerDown={(event) => event.stopPropagation()}
-              >
-                <FolderMoveIcon className={styles.cardActionIcon} />
-              </button>
-              <button
-                type="button"
-                className={styles.notebookActionButton}
-                aria-label="标记完成（暂未开放）"
-                disabled
-                onPointerDown={(event) => event.stopPropagation()}
-              >
-                <CheckIcon className={styles.cardActionIcon} />
-              </button>
-            </div>
-            <button
-              type="button"
-              className={styles.notebookActionButton}
-              aria-label={`${notebook.name} 操作菜单`}
-              disabled={menuDisabled || isEditing}
-              onPointerDown={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-              }}
-              onClick={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-
-                if (menuDisabled || isEditing) {
-                  return;
-                }
-
-                onOpenActionMenu(notebook.id, event.currentTarget.getBoundingClientRect());
-              }}
-            >
-              <MoreIcon className={styles.cardActionIcon} />
-            </button>
-          </div>
-        </div>
-      </article>
-      {showTailInsertionBand ? (
-        <NotebookInsertionBand
-          droppableId={`notebook-insert-after-${notebook.id}`}
-          notebookId={notebook.id}
-          side="after"
-          position="after"
-          enabled={dragEnabled}
-        />
-      ) : null}
-    </div>
-  );
-}
-
 export function NotebookHomeWorkspace({
   notebooks,
-  selectedNotebookId,
   disabled,
   dragBusy,
   noteCountsByNotebook,
@@ -1146,58 +768,73 @@ export function NotebookHomeWorkspace({
             void handleDragEnd(event);
           }}
         >
-          <section className={styles.homeGrid}>
-            {notebooks.map((notebook, index) => {
-              const coverTheme = getNotebookCoverTheme(index);
-              const coverImageSrc = COVER_THEME_IMAGES[coverTheme.key];
+          <div className={styles.homeGridScrollArea}>
+            <section className={styles.homeGrid}>
+              {notebooks.map((notebook) => {
+                const coverTheme = resolveNotebookCoverTheme(notebook);
+                const coverImageSrc = COVER_THEME_IMAGES[coverTheme.key];
 
-              return (
-                <NotebookGridCard
-                  key={notebook.id}
-                  notebook={notebook}
-                  coverTheme={coverTheme}
-                  coverImageSrc={coverImageSrc}
-                  noteCount={noteCountsByNotebook[notebook.id] ?? 0}
-                  isSelected={notebook.id === selectedNotebookId}
-                  isEditing={notebook.id === editingNotebookId}
-                  disabled={disabled}
-                  menuDisabled={disabled || dragBusy || isCreating}
-                  dragEnabled={isDragEnabled && notebook.id !== editingNotebookId}
-                  isDragging={notebook.id === activeNotebookId}
-                  showTailInsertionBand={
-                    notebook.id === notebooks[notebooks.length - 1]?.id
-                  }
-                  dropIndicatorSide={
-                    dropIndicator?.notebookId === notebook.id ? dropIndicator.side : null
-                  }
-                  renameValue={renameValue}
-                  onRenameValueChange={setRenameValue}
-                  onSubmitRename={submitRename}
-                  onCancelRename={() => {
-                    setEditingNotebookId(null);
-                    setRenameValue("");
-                  }}
-                  onStartRename={startRename}
-                  onOpenNotebook={onOpenNotebook}
-                  onOpenContextMenu={(event) => {
-                    event.preventDefault();
-                    openNotebookContextMenu(notebook.id, event.clientX, event.clientY);
-                  }}
-                  onOpenActionMenu={openNotebookActionMenu}
-                  shouldSuppressNotebookOpen={shouldSuppressNotebookOpen}
-                  onShellRefChange={setNotebookShellRef}
-                />
-              );
-            })}
-          </section>
+                return (
+                  <div
+                    key={notebook.id}
+                    ref={(node) => setNotebookShellRef(notebook.id, node)}
+                    className={styles.notebookCardShell}
+                  >
+                    <NotebookInsertionBand
+                      droppableId={`notebook-insert-before-${notebook.id}`}
+                      notebookId={notebook.id}
+                      side="before"
+                      position="before"
+                      enabled={isDragEnabled && notebook.id !== editingNotebookId}
+                    />
+                    <NotebookCard
+                      notebook={notebook}
+                      coverTheme={coverTheme}
+                      coverImageSrc={coverImageSrc}
+                      noteCount={noteCountsByNotebook[notebook.id] ?? 0}
+                      isEditing={notebook.id === editingNotebookId}
+                      disabled={disabled}
+                      menuDisabled={disabled || dragBusy || isCreating}
+                      dragEnabled={isDragEnabled && notebook.id !== editingNotebookId}
+                      isDragging={notebook.id === activeNotebookId}
+                      dropIndicatorSide={
+                        dropIndicator?.notebookId === notebook.id ? dropIndicator.side : null
+                      }
+                      renameValue={renameValue}
+                      onRenameValueChange={setRenameValue}
+                      onSubmitRename={submitRename}
+                      onCancelRename={() => {
+                        setEditingNotebookId(null);
+                        setRenameValue("");
+                      }}
+                      onStartRename={startRename}
+                      onOpenNotebook={onOpenNotebook}
+                      onOpenContextMenu={(event) => {
+                        event.preventDefault();
+                        openNotebookContextMenu(notebook.id, event.clientX, event.clientY);
+                      }}
+                      onOpenActionMenu={openNotebookActionMenu}
+                      shouldSuppressNotebookOpen={shouldSuppressNotebookOpen}
+                    />
+                    {notebook.id === notebooks[notebooks.length - 1]?.id ? (
+                      <NotebookInsertionBand
+                        droppableId={`notebook-insert-after-${notebook.id}`}
+                        notebookId={notebook.id}
+                        side="after"
+                        position="after"
+                        enabled={isDragEnabled && notebook.id !== editingNotebookId}
+                      />
+                    ) : null}
+                  </div>
+                );
+              })}
+            </section>
+          </div>
 
           <DragOverlay>
             {activeNotebook
               ? (() => {
-                  const activeIndex = notebooks.findIndex(
-                    (notebook) => notebook.id === activeNotebook.id,
-                  );
-                  const coverTheme = getNotebookCoverTheme(activeIndex);
+                  const coverTheme = resolveNotebookCoverTheme(activeNotebook);
 
                   return (
                     <NotebookDragPreview
@@ -1205,7 +842,6 @@ export function NotebookHomeWorkspace({
                       coverTheme={coverTheme}
                       coverImageSrc={COVER_THEME_IMAGES[coverTheme.key]}
                       noteCount={noteCountsByNotebook[activeNotebook.id] ?? 0}
-                      isSelected={activeNotebook.id === selectedNotebookId}
                     />
                   );
                 })()

@@ -4,7 +4,7 @@
   width: calc(100% - 32px);
   height: calc(100% - 32px);
   margin: 16px;
-  padding: 16px 10px;
+  padding: 14px 8px;
   background: #ffffff;
   border-radius: 16px;
   box-shadow: 0 8px 30px rgba(0, 0, 0, 0.04);
@@ -14,7 +14,8 @@
   display: flex;
   flex: 1;
   flex-direction: column;
-  gap: 10px;
+  align-items: center;
+  gap: 8px;
 }
 
 .item {
@@ -22,14 +23,14 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  width: 100%;
-  min-height: 88px;
-  padding: 12px 8px;
+  gap: 7px;
+  width: 78px;
+  min-height: 76px;
+  padding: 10px 6px;
   color: #8c97a8;
   background: transparent;
   border: 0;
-  border-radius: 16px;
+  border-radius: 14px;
   cursor: pointer;
   transition:
     transform 160ms ease,
@@ -50,7 +51,7 @@
 }
 
 .item:focus-visible {
-  outline: 2px solid rgba(59, 130, 246, 0.42);
+  outline: 2px solid rgba(59, 130, 246, 0.16);
   outline-offset: 2px;
 }
 

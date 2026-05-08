@@ -99,6 +99,12 @@ pub fn run() {
             sql: include_str!("../migrations/0010_managed_resources.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 11,
+            description: "add_notebook_cover_theme_key",
+            sql: include_str!("../migrations/0011_notebook_cover_theme_key.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     let app = tauri::Builder::default()

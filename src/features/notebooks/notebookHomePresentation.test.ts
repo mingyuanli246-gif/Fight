@@ -1,32 +1,51 @@
+// @ts-nocheck
 import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
   formatNotebookUpdatedLabel,
-  getNotebookCoverTheme,
-  groupNotebookNoteCounts,
+  getNotebookCoverThemeByIdentity,
+  isValidNotebookCoverThemeKey,
+  resolveNotebookCoverThemeKey,
+  stableHash,
 } from "./notebookHomePresentation.ts";
 
-test("cover theme rotates through the five built-in themes by index", () => {
-  assert.equal(getNotebookCoverTheme(0).key, "blue");
-  assert.equal(getNotebookCoverTheme(1).key, "purple");
-  assert.equal(getNotebookCoverTheme(2).key, "pink");
-  assert.equal(getNotebookCoverTheme(3).key, "yellow");
-  assert.equal(getNotebookCoverTheme(4).key, "green");
-  assert.equal(getNotebookCoverTheme(5).key, "blue");
+test("stableHash is deterministic for the same identity", () => {
+  assert.equal(stableHash(42), stableHash(42));
+  assert.equal(stableHash("notebook-42"), stableHash("notebook-42"));
 });
 
-test("note counts are grouped by notebook id", () => {
-  const result = groupNotebookNoteCounts([
-    { id: 1, notebookId: 12 },
-    { id: 2, notebookId: 12 },
-    { id: 3, notebookId: 18 },
-  ]);
+test("resolveNotebookCoverThemeKey keeps valid persisted keys", () => {
+  assert.equal(
+    resolveNotebookCoverThemeKey({ id: 7, coverThemeKey: "purple-planet" }),
+    "purple-planet",
+  );
+});
 
-  assert.deepEqual(result, {
-    12: 2,
-    18: 1,
-  });
+test("resolveNotebookCoverThemeKey falls back to stable hash when key is missing", () => {
+  const expectedTheme = getNotebookCoverThemeByIdentity(7).key;
+  assert.equal(resolveNotebookCoverThemeKey({ id: 7, coverThemeKey: null }), expectedTheme);
+});
+
+test("resolveNotebookCoverThemeKey falls back to stable hash when key is invalid", () => {
+  const expectedTheme = getNotebookCoverThemeByIdentity("notebook-7").key;
+  assert.equal(
+    resolveNotebookCoverThemeKey({
+      id: "notebook-7",
+      coverThemeKey: "pink" as never,
+    }),
+    expectedTheme,
+  );
+});
+
+test("theme key validator only accepts the persisted five keys", () => {
+  assert.equal(isValidNotebookCoverThemeKey("green-study"), true);
+  assert.equal(isValidNotebookCoverThemeKey("blue-mountain"), true);
+  assert.equal(isValidNotebookCoverThemeKey("purple-planet"), true);
+  assert.equal(isValidNotebookCoverThemeKey("pink-biology"), true);
+  assert.equal(isValidNotebookCoverThemeKey("yellow-math"), true);
+  assert.equal(isValidNotebookCoverThemeKey("blue"), false);
+  assert.equal(isValidNotebookCoverThemeKey(""), false);
 });
 
 test("updated label shows today when the notebook was updated on the same day", () => {

@@ -2,6 +2,7 @@ export interface Notebook {
   id: number;
   name: string;
   coverImagePath: string | null;
+  coverThemeKey: string | null;
   customSortOrder: number;
   createdAt: string;
   updatedAt: string;

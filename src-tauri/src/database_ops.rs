@@ -41,6 +41,13 @@ const TAG_COLOR_PALETTE: [&str; 12] = [
     "#FF3B30", "#FF9500", "#FFCC00", "#34C759", "#00C7BE", "#5AC8FA", "#007AFF", "#5856D6",
     "#AF52DE", "#FF2D55", "#A2845E", "#8E8E93",
 ];
+const NOTEBOOK_COVER_THEME_KEYS: [&str; 5] = [
+    "green-study",
+    "blue-mountain",
+    "purple-planet",
+    "pink-biology",
+    "yellow-math",
+];
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -48,6 +55,7 @@ pub struct NotebookRecord {
     pub id: i64,
     pub name: String,
     pub cover_image_path: Option<String>,
+    pub cover_theme_key: Option<String>,
     pub custom_sort_order: i64,
     pub created_at: String,
     pub updated_at: String,
@@ -503,6 +511,46 @@ fn fetch_note_by_id(connection: &Connection, note_id: i64) -> Result<NoteRecord,
     fetch_note_by_id_internal(connection, note_id, false)
 }
 
+fn stable_hash(value: &str) -> u32 {
+    let mut hash: u32 = 2_166_136_261;
+
+    for byte in value.as_bytes() {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(16_777_619);
+    }
+
+    hash
+}
+
+fn resolve_notebook_cover_theme_key_from_identity(identity: &str) -> &'static str {
+    let index = (stable_hash(identity) as usize) % NOTEBOOK_COVER_THEME_KEYS.len();
+    NOTEBOOK_COVER_THEME_KEYS
+        .get(index)
+        .copied()
+        .unwrap_or(NOTEBOOK_COVER_THEME_KEYS[0])
+}
+
+fn assign_notebook_cover_theme_key(
+    connection: &Connection,
+    notebook_id: i64,
+) -> Result<String, String> {
+    let theme_key = resolve_notebook_cover_theme_key_from_identity(&notebook_id.to_string())
+        .to_string();
+
+    connection
+        .execute(
+            "
+              UPDATE notebooks
+              SET cover_theme_key = ?1
+              WHERE id = ?2
+            ",
+            params![theme_key, notebook_id],
+        )
+        .map_err(|error| to_command_error("写入笔记本封面主题", error))?;
+
+    Ok(theme_key)
+}
+
 fn fetch_notebook_by_id(
     connection: &Connection,
     notebook_id: i64,
@@ -522,6 +570,7 @@ fn fetch_notebook_by_id_internal(
                 id,
                 name,
                 cover_image_path,
+                cover_theme_key,
                 custom_sort_order,
                 created_at,
                 updated_at
@@ -535,9 +584,10 @@ fn fetch_notebook_by_id_internal(
                     id: row.get(0)?,
                     name: row.get(1)?,
                     cover_image_path: row.get(2)?,
-                    custom_sort_order: row.get(3)?,
-                    created_at: row.get(4)?,
-                    updated_at: row.get(5)?,
+                    cover_theme_key: row.get(3)?,
+                    custom_sort_order: row.get(4)?,
+                    created_at: row.get(5)?,
+                    updated_at: row.get(6)?,
                 })
             },
         )
@@ -1296,16 +1346,19 @@ fn ensure_recovery_notebook(connection: &Connection) -> Result<i64, String> {
               INSERT INTO notebooks (
                 name,
                 cover_image_path,
+                cover_theme_key,
                 custom_sort_order,
                 is_recovery_notebook
               )
-              VALUES (?1, NULL, ?2, 1)
+              VALUES (?1, NULL, NULL, ?2, 1)
             ",
             params!["已恢复", custom_sort_order],
         )
         .map_err(|error| to_command_error("创建系统恢复笔记本", error))?;
 
-    Ok(connection.last_insert_rowid())
+    let notebook_id = connection.last_insert_rowid();
+    assign_notebook_cover_theme_key(connection, notebook_id)?;
+    Ok(notebook_id)
 }
 
 fn find_live_recovery_notebook_id(connection: &Connection) -> Result<Option<i64>, String> {
@@ -1968,14 +2021,15 @@ fn create_notebook_tx_internal(
     transaction
         .execute(
             "
-              INSERT INTO notebooks (name, cover_image_path, custom_sort_order)
-              VALUES (?1, NULL, ?2)
+              INSERT INTO notebooks (name, cover_image_path, cover_theme_key, custom_sort_order)
+              VALUES (?1, NULL, NULL, ?2)
             ",
             params![name, custom_sort_order],
         )
         .map_err(|error| to_command_error("创建笔记本", error))?;
 
     let notebook_id = transaction.last_insert_rowid();
+    assign_notebook_cover_theme_key(&transaction, notebook_id)?;
     transaction
         .commit()
         .map_err(|error| to_command_error("提交创建笔记本事务", error))?;
@@ -6421,6 +6475,7 @@ mod tests {
         purge_trashed_item_tx_internal, rebuild_managed_resource_index_tx_internal,
         rebuild_note_search_index_internal, release_resource_links_for_owner_tx,
         rename_review_plan_tx_internal, reorder_folders_tx_internal, reorder_notebooks_tx_internal,
+        resolve_notebook_cover_theme_key_from_identity,
         restore_trashed_item_tx_internal, save_note_content_with_tags_tx_internal,
         save_note_review_schedule_tx_internal, set_note_review_schedule_dirty_tx_internal,
         set_review_task_completed_tx_internal, sync_note_resource_links_tx,
@@ -6449,6 +6504,7 @@ mod tests {
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
                   name TEXT NOT NULL,
                   cover_image_path TEXT,
+                  cover_theme_key TEXT,
                   custom_sort_order INTEGER NOT NULL DEFAULT 0,
                   deleted_at TEXT,
                   is_trash_root INTEGER NOT NULL DEFAULT 0,
@@ -7301,6 +7357,10 @@ mod tests {
 
         assert_eq!(notebook.name, "测试本 C");
         assert_eq!(notebook.custom_sort_order, 2);
+        assert_eq!(
+            notebook.cover_theme_key.as_deref(),
+            Some(resolve_notebook_cover_theme_key_from_identity(&notebook.id.to_string()))
+        );
     }
 
     #[test]
