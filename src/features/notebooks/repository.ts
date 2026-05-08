@@ -862,6 +862,29 @@ export async function listNotesByNotebook(notebookId: number) {
   });
 }
 
+export async function listAllNotes() {
+  return withRepositoryError("读取全部文件", async () => {
+    const database = await getNotebookDatabase();
+
+    return database.select<Note[]>(
+      `
+        SELECT
+          id,
+          notebook_id AS notebookId,
+          folder_id AS folderId,
+          sort_order AS sortOrder,
+          title,
+          content_plaintext AS contentPlaintext,
+          created_at AS createdAt,
+          updated_at AS updatedAt
+        FROM notes
+        WHERE deleted_at IS NULL
+        ${NOTE_ORDER}
+      `,
+    );
+  });
+}
+
 export async function createNote(
   notebookId: number,
   folderId: number | null,

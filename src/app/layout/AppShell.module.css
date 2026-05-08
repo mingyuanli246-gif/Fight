@@ -1,11 +1,12 @@
 .shell {
+  --shell-rail-width: 156px;
   display: grid;
-  grid-template-columns: var(--rail-width) minmax(0, 1fr);
+  grid-template-columns: var(--shell-rail-width) minmax(0, 1fr);
   width: 100%;
   min-width: var(--app-min-width);
   min-height: var(--app-min-height);
   height: 100vh;
-  background: var(--color-app-background);
+  background: #f7f8fa;
 }
 
 .shellNoRail {
@@ -18,9 +19,9 @@
   gap: 22px;
   min-width: 0;
   min-height: 0;
-  padding: 30px 32px;
+  padding: 24px;
   overflow: auto;
-  background: var(--color-app-background);
+  background: #f7f8fa;
 }
 
 .topBar {
@@ -42,7 +43,7 @@
   gap: 0;
   padding: 0 20px 20px;
   overflow: hidden;
-  background: var(--color-app-background);
+  background: #f7f8fa;
 }
 
 .contentInnerImmersive {

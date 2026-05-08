@@ -83,7 +83,7 @@
 .homeShell {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 22px;
   min-height: 100%;
 }
 
@@ -93,7 +93,7 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
-  gap: 18px;
+  gap: 16px;
 }
 
 .homeSearchBand {
@@ -102,20 +102,20 @@
   display: flex;
   grid-column: 2;
   justify-self: center;
-  width: min(780px, 100%);
+  width: min(680px, 100%);
 }
 
 .notebookHomeSearchRoot {
   position: relative;
   z-index: 10;
-  width: min(540px, 100%);
-  max-width: min(540px, 100%);
+  width: min(500px, 100%);
+  max-width: min(500px, 100%);
 }
 
 .notebookHomeSearchBox {
-  min-height: 52px;
-  padding: 0 16px;
-  border-radius: 16px;
+  min-height: 56px;
+  padding: 0 18px;
+  border-radius: 18px;
 }
 
 .homeToolbarActions {
@@ -123,7 +123,7 @@
   grid-column: 3;
   justify-self: end;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
 }
 
 .menuAnchor {
@@ -138,7 +138,7 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 40px;
+  min-height: 42px;
   border-radius: 14px;
   font-size: 13px;
   font-weight: 700;
@@ -168,16 +168,17 @@
 }
 
 .primaryButton {
-  padding: 0 16px;
-  color: var(--color-selected-foreground);
-  background: var(--color-accent-strong);
+  padding: 0 18px;
+  color: #f8fbff;
+  background: #4a83f4;
+  box-shadow: 0 12px 24px rgba(74, 131, 244, 0.2);
 }
 
 .secondaryButton {
   padding: 0 14px;
   color: var(--color-text-primary);
-  background: rgba(255, 255, 255, 0.88);
-  border-color: var(--color-border-soft);
+  background: rgba(255, 255, 255, 0.92);
+  border-color: rgba(148, 163, 184, 0.2);
 }
 
 .dangerButton {
@@ -188,10 +189,10 @@
 
 .iconButton,
 .ghostButton {
-  width: 40px;
+  width: 42px;
   color: var(--color-text-primary);
-  background: rgba(255, 255, 255, 0.86);
-  border-color: var(--color-border-soft);
+  background: rgba(255, 255, 255, 0.92);
+  border-color: rgba(148, 163, 184, 0.2);
 }
 
 .ghostButton {
@@ -221,7 +222,7 @@
   width: 220px;
   padding: 8px;
   background: rgba(255, 255, 255, 0.98);
-  border: 1px solid var(--color-border-soft);
+  border: 1px solid rgba(148, 163, 184, 0.18);
   border-radius: 18px;
   box-shadow: 0 18px 40px rgba(15, 23, 42, 0.12);
   backdrop-filter: blur(10px);
@@ -242,15 +243,15 @@
 
 .sortMenuButton:hover,
 .sortMenuButtonActive {
-  background: var(--color-accent-soft);
+  background: rgba(73, 132, 255, 0.12);
 }
 
 .homeGrid {
   position: relative;
   z-index: 1;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(168px, 188px));
-  gap: 20px 18px;
+  grid-template-columns: repeat(4, 270px);
+  gap: 28px 0;
   align-items: start;
   justify-content: space-between;
 }
@@ -259,34 +260,43 @@
   position: relative;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  width: 270px;
   padding: 0;
   text-align: left;
-  background: transparent;
-  border: 0;
+  background: #ffffff;
+  border: 1px solid rgba(229, 233, 240, 0.92);
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow:
+    0 12px 28px rgba(15, 23, 42, 0.05),
+    0 3px 10px rgba(15, 23, 42, 0.03);
   cursor: pointer;
-  transition: transform 180ms ease;
+  transition:
+    transform 180ms ease,
+    box-shadow 180ms ease,
+    border-color 180ms ease;
 }
 
 .notebookCardShell {
   position: relative;
   display: flex;
   flex-direction: column;
+  width: 270px;
 }
 
 .notebookCard:hover {
-  transform: scale(1.05);
+  transform: translateY(-4px);
+  box-shadow:
+    0 20px 40px rgba(15, 23, 42, 0.08),
+    0 8px 18px rgba(15, 23, 42, 0.05);
   z-index: 1;
 }
 
-.notebookCardSelected .notebookCover {
-  box-shadow: none;
-}
-
-.notebookCard:hover .notebookCover {
+.notebookCardSelected {
+  border-color: rgba(74, 131, 244, 0.28);
   box-shadow:
-    0 18px 34px rgba(15, 23, 42, 0.08),
-    0 6px 12px rgba(15, 23, 42, 0.06);
+    0 18px 36px rgba(15, 23, 42, 0.07),
+    0 0 0 1px rgba(74, 131, 244, 0.14);
 }
 
 .notebookCardDragging {
@@ -294,7 +304,7 @@
 }
 
 .notebookCardOverlay {
-  width: 188px;
+  width: 270px;
   padding: 0;
   pointer-events: none;
   cursor: grabbing;
@@ -306,8 +316,8 @@
 .notebookCardDropAfter:not(.notebookCardDropBefore)::after {
   content: "";
   position: absolute;
-  top: 8px;
-  bottom: 44px;
+  top: 10px;
+  bottom: 10px;
   width: 3px;
   border-radius: 999px;
   background: rgba(37, 99, 235, 0.92);
@@ -316,11 +326,11 @@
 }
 
 .notebookCardDropBefore::before {
-  left: -9px;
+  left: -12px;
 }
 
 .notebookCardDropAfter::after {
-  right: -9px;
+  right: -12px;
 }
 
 .notebookDropBand {
@@ -333,33 +343,21 @@
 }
 
 .notebookDropBandBefore {
-  top: -16px;
+  top: -18px;
 }
 
 .notebookDropBandAfter {
-  bottom: -16px;
-}
-
-.notebookCardSelected:hover .notebookCover {
-  box-shadow:
-    0 20px 40px rgba(15, 23, 42, 0.1),
-    0 8px 16px rgba(15, 23, 42, 0.07);
+  bottom: -18px;
 }
 
 .notebookCover {
   position: relative;
-  aspect-ratio: 5 / 7;
+  width: 270px;
+  height: 180px;
   overflow: hidden;
-  width: 100%;
   padding: 0;
   border: 0;
-  border-radius: 22px;
-  cursor: pointer;
-  transition:
-    transform 180ms ease,
-    box-shadow 180ms ease;
-  background: linear-gradient(135deg, rgba(15, 23, 42, 0.06), rgba(96, 165, 250, 0.12));
-  outline: none;
+  background: #eef2f9;
 }
 
 .notebookCoverOpenButton {
@@ -381,64 +379,7 @@
 
 .notebookCoverOpenButton:focus-visible {
   outline: none;
-  box-shadow:
-    0 0 0 3px rgba(96, 165, 250, 0.18),
-    0 18px 34px rgba(15, 23, 42, 0.08),
-    0 6px 12px rgba(15, 23, 42, 0.06);
-}
-
-.notebookCoverMenuButton {
-  position: absolute;
-  top: 6px;
-  right: 7px;
-  z-index: 2;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 24px;
-  padding: 0;
-  color: rgba(15, 23, 42, 0.72);
-  appearance: none;
-  background: transparent;
-  border: 0;
-  border-radius: 0;
-  box-shadow: none;
-  cursor: pointer;
-  opacity: 0;
-  transition:
-    color 160ms ease,
-    opacity 160ms ease;
-}
-
-.notebookCard:hover .notebookCoverMenuButton,
-.notebookCoverMenuButton:focus-visible {
-  color: rgba(15, 23, 42, 0.82);
-  opacity: 1;
-}
-
-.notebookCoverMenuButton:hover:enabled {
-  color: rgba(15, 23, 42, 0.98);
-}
-
-.notebookCoverMenuButton:disabled {
-  cursor: not-allowed;
-  opacity: 0.38;
-}
-
-.notebookCoverMenuDots {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 3px;
-  filter: drop-shadow(0 1px 2px rgba(255, 255, 255, 0.86));
-}
-
-.notebookCoverMenuDots span {
-  width: 4px;
-  height: 4px;
-  border-radius: 999px;
-  background: currentColor;
+  box-shadow: inset 0 0 0 3px rgba(74, 131, 244, 0.16);
 }
 
 .notebookCoverMedia,
@@ -454,41 +395,47 @@
   object-fit: cover;
 }
 
+.notebookCoverRibbon {
+  position: absolute;
+  top: 0;
+  right: 9.26%;
+  bottom: 0;
+  z-index: 1;
+  width: 4.63%;
+  height: 100%;
+  background: var(--notebook-ribbon-color, #6f9dff);
+  pointer-events: none;
+  box-shadow:
+    inset 1px 0 0 rgba(255, 255, 255, 0.18),
+    inset -1px 0 0 rgba(15, 23, 42, 0.06);
+}
+
 .notebookCoverFallback {
-  display: flex;
-  align-items: flex-end;
-  padding: 16px;
+  display: block;
 }
 
-.notebookCoverFallbackText {
-  font-size: 13px;
-  line-height: 1.6;
-  color: rgba(15, 23, 42, 0.72);
-}
-
-.notebookCardMeta {
+.notebookCardInfo {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 8px;
+  gap: 10px;
   min-width: 0;
-  text-align: center;
+  padding: 16px 20px 16px 16px;
 }
 
 .notebookCardNameRow {
   display: flex;
-  justify-content: center;
+  justify-content: flex-start;
   min-width: 0;
   width: 100%;
-  min-height: 26px;
+  min-height: 22px;
 }
 
 .notebookCardName {
   margin: 0;
-  font-size: 15px;
-  line-height: 1.4;
+  font-size: 16px;
+  line-height: 1.35;
   font-weight: 700;
-  color: var(--color-text-primary);
+  color: #111827;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -496,11 +443,11 @@
 
 .ghostTitleButton {
   display: inline-flex;
-  justify-content: center;
+  justify-content: flex-start;
   min-width: 0;
   width: 100%;
   padding: 0;
-  text-align: center;
+  text-align: left;
   background: transparent;
   border: 0;
   cursor: pointer;
@@ -510,7 +457,80 @@
 .ghostTitleButton:focus-visible {
   outline: none;
   border-radius: 10px;
-  box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.16);
+  box-shadow: 0 0 0 3px rgba(74, 131, 244, 0.16);
+}
+
+.notebookInfoStack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.notebookStatRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #888888;
+}
+
+.notebookStatRow span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inlineMetaIcon,
+.cardActionIcon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.notebookActionBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.notebookActionGroup {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.notebookActionButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  color: #888888;
+  background: transparent;
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+  transition:
+    color 150ms ease,
+    background-color 150ms ease,
+    opacity 150ms ease;
+}
+
+.notebookActionButton:hover:enabled,
+.notebookActionButton:focus-visible:enabled {
+  color: #5f6b7a;
+  background: rgba(148, 163, 184, 0.1);
+  outline: none;
+}
+
+.notebookActionButton:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .inlineInput {
@@ -533,11 +553,6 @@
   position: relative;
   width: 100%;
   min-width: 0;
-}
-
-.inlineNameEditorCentered {
-  display: flex;
-  justify-content: center;
 }
 
 .inlineNameInput {
@@ -569,10 +584,10 @@
   font-weight: 700;
 }
 
-.inlineNameInputCentered {
-  text-align: center;
-  font-size: 15px;
-  line-height: 1.4;
+.inlineNameInputCard {
+  text-align: left;
+  font-size: 16px;
+  line-height: 1.35;
   font-weight: 700;
 }
 

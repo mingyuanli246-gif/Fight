@@ -18,6 +18,7 @@ import {
   duplicateNoteAbove,
   getNoteById,
   initializeNotebookDatabase,
+  listAllNotes,
   listAllFolders,
   listFoldersByNotebook,
   listNotesByNotebook,
@@ -34,6 +35,7 @@ import {
   reorderNotebooks,
   updateNotebookCoverImage,
 } from "./repository";
+import { groupNotebookNoteCounts } from "./notebookHomePresentation";
 import {
   hasNotebookUnsavedChanges,
   shouldPromptReviewScheduleSave,
@@ -424,6 +426,7 @@ export const NotebookWorkspace = forwardRef<
   const [folders, setFolders] = useState<Folder[]>([]);
   const [allFolders, setAllFolders] = useState<Folder[]>([]);
   const [notes, setNotes] = useState<Note[]>([]);
+  const [allNotes, setAllNotes] = useState<Note[]>([]);
   const [selectedNotebookId, setSelectedNotebookId] = useState<number | null>(
     null,
   );
@@ -476,6 +479,10 @@ export const NotebookWorkspace = forwardRef<
   const sortedNotebooks = useMemo(
     () => sortNotebooks(notebooks, homeSort),
     [homeSort, notebooks],
+  );
+  const notebookNoteCounts = useMemo(
+    () => groupNotebookNoteCounts(allNotes),
+    [allNotes],
   );
 
   const currentNotebook =
@@ -625,6 +632,7 @@ export const NotebookWorkspace = forwardRef<
       setFolders([]);
       setAllFolders([]);
       setNotes([]);
+      setAllNotes([]);
       return;
     }
 
@@ -637,10 +645,11 @@ export const NotebookWorkspace = forwardRef<
           ? selectedNotebookId
           : notebookList[0].id;
 
-    const [folderList, noteList, allFolderList] = await Promise.all([
+    const [folderList, noteList, allFolderList, allNoteList] = await Promise.all([
       listFoldersByNotebook(nextNotebookId),
       listNotesByNotebook(nextNotebookId),
       listAllFolders(),
+      listAllNotes(),
     ]);
 
     setSelectedNotebookId(nextNotebookId);
@@ -653,6 +662,7 @@ export const NotebookWorkspace = forwardRef<
     setFolders(folderList);
     setAllFolders(allFolderList);
     setNotes(noteList);
+    setAllNotes(allNoteList);
     setSelectedEntity(
       resolveSelection(nextNotebookId, folderList, noteList, preferredSelection),
     );
@@ -679,6 +689,7 @@ export const NotebookWorkspace = forwardRef<
       setFolders([]);
       setAllFolders([]);
       setNotes([]);
+      setAllNotes([]);
       setSelectedNotebookId(null);
       setHomeSelectedNotebookId(null);
       setSelectedEntity(null);
@@ -1497,6 +1508,7 @@ export const NotebookWorkspace = forwardRef<
           selectedNotebookId={homeSelectedNotebookId}
           disabled={isBusy}
           dragBusy={isNotebookOrderSaving}
+          noteCountsByNotebook={notebookNoteCounts}
           sort={homeSort}
           onSortChange={setHomeSort}
           onSelectNotebook={setHomeSelectedNotebookId}

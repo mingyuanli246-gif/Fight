@@ -21,14 +21,14 @@ export const navigationItems: NavigationItem[] = [
     Icon: NotebookIcon,
   },
   {
-    key: "reviewTasks",
-    label: "复习任务",
-    Icon: CalendarIcon,
+    key: "tagPlaza",
+    label: "标签",
+    Icon: TagIcon,
   },
   {
-    key: "tagPlaza",
-    label: "标签广场",
-    Icon: TagIcon,
+    key: "reviewTasks",
+    label: "复习",
+    Icon: CalendarIcon,
   },
   {
     key: "trash",

@@ -20,27 +20,39 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type MouseEvent as ReactMouseEvent,
 } from "react";
 import { GlobalSearch } from "../../app/layout/GlobalSearch";
+import blueCoverImage from "../../assets/notebook-covers/blue.png";
+import greenCoverImage from "../../assets/notebook-covers/green.png";
+import pinkCoverImage from "../../assets/notebook-covers/pink.png";
+import purpleCoverImage from "../../assets/notebook-covers/purple.png";
+import yellowCoverImage from "../../assets/notebook-covers/yellow.png";
 import type { NoteOpenTarget, Notebook, NotebookHomeSort } from "./types";
 import { ManagedResourceImage } from "./ManagedResourceImage";
-import { SortIcon } from "./NotebookUiIcons";
+import {
+  CheckIcon,
+  ClockIcon,
+  FileTextIcon,
+  FolderMoveIcon,
+  MoreIcon,
+  PencilIcon,
+  SortIcon,
+} from "./NotebookUiIcons";
+import {
+  formatNotebookUpdatedLabel,
+  getNotebookCoverTheme,
+  type NotebookCoverTheme,
+} from "./notebookHomePresentation";
 import styles from "./NotebookWorkspaceShell.module.css";
-
-const COVER_FALLBACKS = [
-  "linear-gradient(135deg, #e0f2fe 0%, #dbeafe 48%, #f8fafc 100%)",
-  "linear-gradient(135deg, #fae8ff 0%, #ede9fe 48%, #f8fafc 100%)",
-  "linear-gradient(135deg, #dcfce7 0%, #d1fae5 48%, #f8fafc 100%)",
-  "linear-gradient(135deg, #fef3c7 0%, #fee2e2 48%, #fff7ed 100%)",
-  "linear-gradient(135deg, #e2e8f0 0%, #dbeafe 44%, #f8fafc 100%)",
-];
 
 interface NotebookHomeWorkspaceProps {
   notebooks: Notebook[];
   selectedNotebookId: number | null;
   disabled: boolean;
   dragBusy: boolean;
+  noteCountsByNotebook: Record<number, number>;
   sort: NotebookHomeSort;
   onSortChange: (sort: NotebookHomeSort) => void;
   onSelectNotebook: (notebookId: number) => void;
@@ -76,6 +88,9 @@ interface NotebookShellLayout {
 
 interface NotebookGridCardProps {
   notebook: Notebook;
+  coverTheme: NotebookCoverTheme;
+  coverImageSrc: string;
+  noteCount: number;
   isSelected: boolean;
   isEditing: boolean;
   disabled: boolean;
@@ -118,10 +133,13 @@ const NOTEBOOK_EDGE_BUFFER = 12;
 const CONTEXT_MENU_MIN_WIDTH = 180;
 const CONTEXT_MENU_VIEWPORT_MARGIN = 12;
 
-function getNotebookFallbackBackground(notebook: Notebook) {
-  const seed = (notebook.id + notebook.name.length) % COVER_FALLBACKS.length;
-  return COVER_FALLBACKS[seed] ?? COVER_FALLBACKS[0];
-}
+const COVER_THEME_IMAGES: Record<NotebookCoverTheme["key"], string> = {
+  blue: blueCoverImage,
+  purple: purpleCoverImage,
+  pink: pinkCoverImage,
+  yellow: yellowCoverImage,
+  green: greenCoverImage,
+};
 
 function reorderNotebookIds(
   notebookIds: number[],
@@ -149,11 +167,61 @@ function areArraysEqual(left: number[], right: number[]) {
   return left.every((value, index) => value === right[index]);
 }
 
+function getNotebookCoverFallbackStyle(coverImageSrc: string): CSSProperties {
+  return {
+    backgroundColor: "#f4f6fb",
+    backgroundImage: `url(${coverImageSrc})`,
+    backgroundPosition: "center",
+    backgroundRepeat: "no-repeat",
+    backgroundSize: "cover",
+  };
+}
+
+function NotebookCoverArtwork({
+  notebook,
+  coverImageSrc,
+}: {
+  notebook: Notebook;
+  coverImageSrc: string;
+}) {
+  if (notebook.coverImagePath) {
+    return (
+      <ManagedResourceImage
+        resourcePath={notebook.coverImagePath}
+        alt={`${notebook.name} 封面`}
+        imageClassName={styles.notebookCoverImage}
+        fallbackClassName={styles.notebookCoverFallback}
+        loadingClassName={styles.notebookCoverFallback}
+        fallbackTitle=""
+        fallbackMessage=""
+        fallbackStyle={getNotebookCoverFallbackStyle(coverImageSrc)}
+      />
+    );
+  }
+
+  return (
+    <img
+      className={styles.notebookCoverImage}
+      src={coverImageSrc}
+      alt={`${notebook.name} 封面`}
+      loading="lazy"
+      decoding="async"
+      draggable={false}
+    />
+  );
+}
+
 function NotebookDragPreview({
   notebook,
+  coverTheme,
+  coverImageSrc,
+  noteCount,
   isSelected,
 }: {
   notebook: Notebook;
+  coverTheme: NotebookCoverTheme;
+  coverImageSrc: string;
+  noteCount: number;
   isSelected: boolean;
 }) {
   return (
@@ -164,22 +232,20 @@ function NotebookDragPreview({
       data-drag-overlay="true"
     >
       <div className={styles.notebookCover}>
-        <ManagedResourceImage
-          resourcePath={notebook.coverImagePath}
-          alt={`${notebook.name} 封面`}
-          imageClassName={styles.notebookCoverImage}
-          fallbackClassName={styles.notebookCoverFallback}
-          loadingClassName={styles.notebookCoverFallback}
-          fallbackTitle=""
-          fallbackMessage=""
-          fallbackStyle={{
-            background: getNotebookFallbackBackground(notebook),
-          }}
+        <NotebookCoverArtwork notebook={notebook} coverImageSrc={coverImageSrc} />
+        <span
+          className={styles.notebookCoverRibbon}
+          style={{ "--notebook-ribbon-color": coverTheme.accent } as CSSProperties}
+          aria-hidden="true"
         />
       </div>
-      <div className={styles.notebookCardMeta}>
+      <div className={styles.notebookCardInfo}>
         <div className={styles.notebookCardNameRow}>
           <h4 className={styles.notebookCardName}>{notebook.name}</h4>
+        </div>
+        <div className={styles.notebookStatRow}>
+          <FileTextIcon className={styles.inlineMetaIcon} />
+          <span>{noteCount} 条笔记</span>
         </div>
       </div>
     </article>
@@ -218,6 +284,9 @@ function NotebookInsertionBand({
 
 function NotebookGridCard({
   notebook,
+  coverTheme,
+  coverImageSrc,
+  noteCount,
   isSelected,
   isEditing,
   disabled,
@@ -270,6 +339,10 @@ function NotebookGridCard({
     },
     [setDraggableNodeRef, setDroppableNodeRef],
   );
+  const updatedLabel = formatNotebookUpdatedLabel(notebook.updatedAt);
+  const ribbonStyle = {
+    "--notebook-ribbon-color": coverTheme.accent,
+  } as CSSProperties;
 
   return (
     <div
@@ -308,56 +381,22 @@ function NotebookGridCard({
             disabled={disabled}
             aria-label={`打开笔记本：${notebook.name}`}
           >
-            <ManagedResourceImage
-              resourcePath={notebook.coverImagePath}
-              alt={`${notebook.name} 封面`}
-              imageClassName={styles.notebookCoverImage}
-              fallbackClassName={styles.notebookCoverFallback}
-              loadingClassName={styles.notebookCoverFallback}
-              fallbackTitle=""
-              fallbackMessage=""
-              fallbackStyle={{
-                background: getNotebookFallbackBackground(notebook),
-              }}
-            />
+            <NotebookCoverArtwork notebook={notebook} coverImageSrc={coverImageSrc} />
           </button>
-          <button
-            type="button"
-            className={styles.notebookCoverMenuButton}
-            aria-label={`${notebook.name} 操作菜单`}
-            disabled={menuDisabled || isEditing}
-            onPointerDown={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-            }}
-            onClick={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-
-              if (menuDisabled || isEditing) {
-                return;
-              }
-
-              onOpenActionMenu(notebook.id, event.currentTarget.getBoundingClientRect());
-            }}
-          >
-            <span className={styles.notebookCoverMenuDots} aria-hidden="true">
-              <span />
-              <span />
-              <span />
-            </span>
-          </button>
+          <span
+            className={styles.notebookCoverRibbon}
+            style={ribbonStyle}
+            aria-hidden="true"
+          />
         </div>
 
-        <div className={styles.notebookCardMeta}>
+        <div className={styles.notebookCardInfo}>
           <div className={styles.notebookCardNameRow}>
             {isEditing ? (
-              <div
-                className={`${styles.inlineNameEditor} ${styles.inlineNameEditorCentered}`}
-              >
+              <div className={styles.inlineNameEditor}>
                 <input
                   type="text"
-                  className={`${styles.inlineNameInput} ${styles.inlineNameInputCentered}`}
+                  className={`${styles.inlineNameInput} ${styles.inlineNameInputCard}`}
                   value={renameValue}
                   onChange={(event) => onRenameValueChange(event.currentTarget.value)}
                   maxLength={80}
@@ -408,6 +447,82 @@ function NotebookGridCard({
               </button>
             )}
           </div>
+          <div className={styles.notebookInfoStack}>
+            <div className={styles.notebookStatRow}>
+              <FileTextIcon className={styles.inlineMetaIcon} />
+              <span>{noteCount} 条笔记</span>
+            </div>
+            <div className={styles.notebookStatRow}>
+              <ClockIcon className={styles.inlineMetaIcon} />
+              <span>{updatedLabel}</span>
+            </div>
+          </div>
+          <div className={styles.notebookActionBar}>
+            <div className={styles.notebookActionGroup}>
+              <button
+                type="button"
+                className={styles.notebookActionButton}
+                aria-label={`编辑笔记本：${notebook.name}`}
+                disabled={disabled || isEditing}
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onStartRename(notebook);
+                }}
+              >
+                <PencilIcon className={styles.cardActionIcon} />
+              </button>
+              <button
+                type="button"
+                className={styles.notebookActionButton}
+                aria-label="笔记本历史（暂未开放）"
+                disabled
+                onPointerDown={(event) => event.stopPropagation()}
+              >
+                <ClockIcon className={styles.cardActionIcon} />
+              </button>
+              <button
+                type="button"
+                className={styles.notebookActionButton}
+                aria-label="移动笔记本（暂未开放）"
+                disabled
+                onPointerDown={(event) => event.stopPropagation()}
+              >
+                <FolderMoveIcon className={styles.cardActionIcon} />
+              </button>
+              <button
+                type="button"
+                className={styles.notebookActionButton}
+                aria-label="标记完成（暂未开放）"
+                disabled
+                onPointerDown={(event) => event.stopPropagation()}
+              >
+                <CheckIcon className={styles.cardActionIcon} />
+              </button>
+            </div>
+            <button
+              type="button"
+              className={styles.notebookActionButton}
+              aria-label={`${notebook.name} 操作菜单`}
+              disabled={menuDisabled || isEditing}
+              onPointerDown={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+              }}
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+
+                if (menuDisabled || isEditing) {
+                  return;
+                }
+
+                onOpenActionMenu(notebook.id, event.currentTarget.getBoundingClientRect());
+              }}
+            >
+              <MoreIcon className={styles.cardActionIcon} />
+            </button>
+          </div>
         </div>
       </article>
       {showTailInsertionBand ? (
@@ -428,6 +543,7 @@ export function NotebookHomeWorkspace({
   selectedNotebookId,
   disabled,
   dragBusy,
+  noteCountsByNotebook,
   sort,
   onSortChange,
   onSelectNotebook,
@@ -1031,49 +1147,69 @@ export function NotebookHomeWorkspace({
           }}
         >
           <section className={styles.homeGrid}>
-            {notebooks.map((notebook) => (
-              <NotebookGridCard
-                key={notebook.id}
-                notebook={notebook}
-                isSelected={notebook.id === selectedNotebookId}
-                isEditing={notebook.id === editingNotebookId}
-                disabled={disabled}
-                menuDisabled={disabled || dragBusy || isCreating}
-                dragEnabled={isDragEnabled && notebook.id !== editingNotebookId}
-                isDragging={notebook.id === activeNotebookId}
-                showTailInsertionBand={
-                  notebook.id === notebooks[notebooks.length - 1]?.id
-                }
-                dropIndicatorSide={
-                  dropIndicator?.notebookId === notebook.id ? dropIndicator.side : null
-                }
-                renameValue={renameValue}
-                onRenameValueChange={setRenameValue}
-                onSubmitRename={submitRename}
-                onCancelRename={() => {
-                  setEditingNotebookId(null);
-                  setRenameValue("");
-                }}
-                onStartRename={startRename}
-                onOpenNotebook={onOpenNotebook}
-                onOpenContextMenu={(event) => {
-                  event.preventDefault();
-                  openNotebookContextMenu(notebook.id, event.clientX, event.clientY);
-                }}
-                onOpenActionMenu={openNotebookActionMenu}
-                shouldSuppressNotebookOpen={shouldSuppressNotebookOpen}
-                onShellRefChange={setNotebookShellRef}
-              />
-            ))}
+            {notebooks.map((notebook, index) => {
+              const coverTheme = getNotebookCoverTheme(index);
+              const coverImageSrc = COVER_THEME_IMAGES[coverTheme.key];
+
+              return (
+                <NotebookGridCard
+                  key={notebook.id}
+                  notebook={notebook}
+                  coverTheme={coverTheme}
+                  coverImageSrc={coverImageSrc}
+                  noteCount={noteCountsByNotebook[notebook.id] ?? 0}
+                  isSelected={notebook.id === selectedNotebookId}
+                  isEditing={notebook.id === editingNotebookId}
+                  disabled={disabled}
+                  menuDisabled={disabled || dragBusy || isCreating}
+                  dragEnabled={isDragEnabled && notebook.id !== editingNotebookId}
+                  isDragging={notebook.id === activeNotebookId}
+                  showTailInsertionBand={
+                    notebook.id === notebooks[notebooks.length - 1]?.id
+                  }
+                  dropIndicatorSide={
+                    dropIndicator?.notebookId === notebook.id ? dropIndicator.side : null
+                  }
+                  renameValue={renameValue}
+                  onRenameValueChange={setRenameValue}
+                  onSubmitRename={submitRename}
+                  onCancelRename={() => {
+                    setEditingNotebookId(null);
+                    setRenameValue("");
+                  }}
+                  onStartRename={startRename}
+                  onOpenNotebook={onOpenNotebook}
+                  onOpenContextMenu={(event) => {
+                    event.preventDefault();
+                    openNotebookContextMenu(notebook.id, event.clientX, event.clientY);
+                  }}
+                  onOpenActionMenu={openNotebookActionMenu}
+                  shouldSuppressNotebookOpen={shouldSuppressNotebookOpen}
+                  onShellRefChange={setNotebookShellRef}
+                />
+              );
+            })}
           </section>
 
           <DragOverlay>
-            {activeNotebook ? (
-              <NotebookDragPreview
-                notebook={activeNotebook}
-                isSelected={activeNotebook.id === selectedNotebookId}
-              />
-            ) : null}
+            {activeNotebook
+              ? (() => {
+                  const activeIndex = notebooks.findIndex(
+                    (notebook) => notebook.id === activeNotebook.id,
+                  );
+                  const coverTheme = getNotebookCoverTheme(activeIndex);
+
+                  return (
+                    <NotebookDragPreview
+                      notebook={activeNotebook}
+                      coverTheme={coverTheme}
+                      coverImageSrc={COVER_THEME_IMAGES[coverTheme.key]}
+                      noteCount={noteCountsByNotebook[activeNotebook.id] ?? 0}
+                      isSelected={activeNotebook.id === selectedNotebookId}
+                    />
+                  );
+                })()
+              : null}
           </DragOverlay>
         </DndContext>
       ) : null}
