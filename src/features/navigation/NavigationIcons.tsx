@@ -85,19 +85,20 @@ export function TrashIcon(props: SVGProps<SVGSVGElement>) {
 
 export function SettingsIcon(props: SVGProps<SVGSVGElement>) {
   return (
-    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" {...props}>
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      {...props}
+    >
       <path
-        d="M12 9.25A2.75 2.75 0 1 0 12 14.75A2.75 2.75 0 1 0 12 9.25Z"
-        stroke="currentColor"
-        strokeWidth="1.8"
+        d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"
       />
-      <path
-        d="M12 3.5 13 5.68a1 1 0 0 0 .75.56l2.4.31-.95 2.23a1 1 0 0 0 .16.92l1.56 1.82-1.95 1.22a1 1 0 0 0-.45.81l-.06 2.42-2.33-.63a1 1 0 0 0-.91.18L10 18.5 8.79 16.5a1 1 0 0 0-.86-.48l-2.41.08.62-2.34a1 1 0 0 0-.18-.91L4.5 11.03l2.01-1.12a1 1 0 0 0 .5-.78l.16-2.41 2.3.73a1 1 0 0 0 .92-.14L12 3.5Z"
-        stroke="currentColor"
-        strokeWidth="1.55"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
+      <circle cx="12" cy="12" r="3" />
     </svg>
   );
 }

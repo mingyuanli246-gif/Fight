@@ -271,24 +271,14 @@
 
 .notebookCard {
   position: relative;
-  display: flex;
-  flex-direction: column;
+  display: block;
   width: 224px;
   padding: 0;
   text-align: left;
-  background: #ffffff;
-  border: 1px solid rgba(229, 233, 240, 0.92);
-  border-radius: 12px;
-  overflow: hidden;
-  box-shadow:
-    0 12px 28px rgba(15, 23, 42, 0.05),
-    0 3px 10px rgba(15, 23, 42, 0.03);
+  background: transparent;
+  border: 0;
   cursor: pointer;
   outline: none;
-  transition:
-    transform 180ms ease,
-    box-shadow 180ms ease,
-    border-color 180ms ease;
 }
 
 .notebookCardShell {
@@ -298,15 +288,37 @@
   width: 224px;
 }
 
-.notebookCard:hover {
-  transform: translateY(-4px);
+.notebookCardVisual {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  background: #ffffff;
+  border: 1px solid rgba(229, 233, 240, 0.92);
+  border-radius: 12px;
+  overflow: hidden;
   box-shadow:
-    0 20px 40px rgba(15, 23, 42, 0.08),
-    0 8px 18px rgba(15, 23, 42, 0.05);
+    0 12px 28px rgba(15, 23, 42, 0.05),
+    0 3px 10px rgba(15, 23, 42, 0.03);
+  transform: translateZ(0);
+  will-change: transform;
+  transition:
+    transform 160ms ease,
+    box-shadow 160ms ease,
+    border-color 160ms ease;
+}
+
+.notebookCard:not(.notebookCardDragging):hover .notebookCardVisual {
+  transform: translateY(-2px) scale(1.01);
+  box-shadow:
+    0 18px 34px rgba(15, 23, 42, 0.07),
+    0 7px 16px rgba(15, 23, 42, 0.05);
+}
+
+.notebookCard:not(.notebookCardDragging):hover {
   z-index: 1;
 }
 
-.notebookCard:focus-visible {
+.notebookCard:focus-visible .notebookCardVisual {
   box-shadow:
     0 18px 36px rgba(15, 23, 42, 0.07),
     0 0 0 2px rgba(59, 130, 246, 0.14);
@@ -321,8 +333,11 @@
   padding: 0;
   pointer-events: none;
   cursor: grabbing;
-  transform: none;
   opacity: 0.98;
+}
+
+.notebookCardOverlay .notebookCardVisual {
+  transform: none;
 }
 
 .notebookCardDropBefore:not(.notebookCardDropAfter)::before,

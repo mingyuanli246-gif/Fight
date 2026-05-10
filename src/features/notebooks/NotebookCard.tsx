@@ -161,111 +161,113 @@ function NotebookCardComponent({
       {...attributes}
       {...listeners}
     >
-      <div className={styles.notebookCover}>
-        <NotebookCoverArtwork notebook={notebook} coverImageSrc={coverImageSrc} />
-        {shouldShowRibbon ? (
-          <span
-            className={styles.notebookCoverRibbon}
-            style={ribbonStyle}
-            aria-hidden="true"
-          />
-        ) : null}
-      </div>
+      <div className={styles.notebookCardVisual}>
+        <div className={styles.notebookCover}>
+          <NotebookCoverArtwork notebook={notebook} coverImageSrc={coverImageSrc} />
+          {shouldShowRibbon ? (
+            <span
+              className={styles.notebookCoverRibbon}
+              style={ribbonStyle}
+              aria-hidden="true"
+            />
+          ) : null}
+        </div>
 
-      <div className={styles.notebookCardInfo}>
-        <div className={styles.notebookCardNameRow}>
-          {isEditing ? (
-            <div className={styles.inlineNameEditor}>
-              <input
-                type="text"
-                className={`${styles.inlineNameInput} ${styles.inlineNameInputCard}`}
-                value={renameValue}
-                onChange={(event) => onRenameValueChange(event.currentTarget.value)}
-                maxLength={80}
-                autoFocus
-                onClick={(event) => event.stopPropagation()}
-                onPointerDown={(event) => event.stopPropagation()}
-                onBlur={onCancelRename}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    event.preventDefault();
-                    void onSubmitRename();
+        <div className={styles.notebookCardInfo}>
+          <div className={styles.notebookCardNameRow}>
+            {isEditing ? (
+              <div className={styles.inlineNameEditor}>
+                <input
+                  type="text"
+                  className={`${styles.inlineNameInput} ${styles.inlineNameInputCard}`}
+                  value={renameValue}
+                  onChange={(event) => onRenameValueChange(event.currentTarget.value)}
+                  maxLength={80}
+                  autoFocus
+                  onClick={(event) => event.stopPropagation()}
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onBlur={onCancelRename}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      void onSubmitRename();
+                    }
+
+                    if (event.key === "Escape") {
+                      onCancelRename();
+                    }
+                  }}
+                />
+              </div>
+            ) : (
+              <button
+                type="button"
+                className={styles.ghostTitleButton}
+                onClick={(event) => {
+                  event.stopPropagation();
+
+                  if (shouldSuppressNotebookOpen()) {
+                    return;
                   }
 
-                  if (event.key === "Escape") {
-                    onCancelRename();
+                  if (clickTimerRef.current !== null) {
+                    window.clearTimeout(clickTimerRef.current);
                   }
+
+                  clickTimerRef.current = window.setTimeout(() => {
+                    onOpenNotebook(notebook.id);
+                    clickTimerRef.current = null;
+                  }, 220);
                 }}
-              />
+                onDoubleClick={(event) => {
+                  event.stopPropagation();
+
+                  if (clickTimerRef.current !== null) {
+                    window.clearTimeout(clickTimerRef.current);
+                    clickTimerRef.current = null;
+                  }
+
+                  onStartRename(notebook);
+                }}
+              >
+                <h4 className={styles.notebookCardName}>{notebook.name}</h4>
+              </button>
+            )}
+          </div>
+          <div className={styles.notebookInfoStack}>
+            <div className={styles.notebookStatRow}>
+              <FileTextIcon className={styles.inlineMetaIcon} />
+              <span>{noteCount} 条笔记</span>
             </div>
-          ) : (
+            <div className={styles.notebookStatRow}>
+              <ClockIcon className={styles.inlineMetaIcon} />
+              <span>{updatedLabel}</span>
+            </div>
+          </div>
+          <div className={styles.notebookMenuRow}>
             <button
               type="button"
-              className={styles.ghostTitleButton}
+              className={styles.notebookMenuButton}
+              aria-label={`${notebook.name} 操作菜单`}
+              disabled={menuDisabled || isEditing}
+              onPointerDown={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+              }}
               onClick={(event) => {
+                event.preventDefault();
                 event.stopPropagation();
 
-                if (shouldSuppressNotebookOpen()) {
+                if (menuDisabled || isEditing) {
                   return;
                 }
 
-                if (clickTimerRef.current !== null) {
-                  window.clearTimeout(clickTimerRef.current);
-                }
-
-                clickTimerRef.current = window.setTimeout(() => {
-                  onOpenNotebook(notebook.id);
-                  clickTimerRef.current = null;
-                }, 220);
-              }}
-              onDoubleClick={(event) => {
-                event.stopPropagation();
-
-                if (clickTimerRef.current !== null) {
-                  window.clearTimeout(clickTimerRef.current);
-                  clickTimerRef.current = null;
-                }
-
-                onStartRename(notebook);
+                onOpenActionMenu(notebook.id, event.currentTarget.getBoundingClientRect());
               }}
             >
-              <h4 className={styles.notebookCardName}>{notebook.name}</h4>
+              <MoreIcon className={styles.cardActionIcon} />
             </button>
-          )}
-        </div>
-        <div className={styles.notebookInfoStack}>
-          <div className={styles.notebookStatRow}>
-            <FileTextIcon className={styles.inlineMetaIcon} />
-            <span>{noteCount} 条笔记</span>
           </div>
-          <div className={styles.notebookStatRow}>
-            <ClockIcon className={styles.inlineMetaIcon} />
-            <span>{updatedLabel}</span>
-          </div>
-        </div>
-        <div className={styles.notebookMenuRow}>
-          <button
-            type="button"
-            className={styles.notebookMenuButton}
-            aria-label={`${notebook.name} 操作菜单`}
-            disabled={menuDisabled || isEditing}
-            onPointerDown={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-            }}
-            onClick={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-
-              if (menuDisabled || isEditing) {
-                return;
-              }
-
-              onOpenActionMenu(notebook.id, event.currentTarget.getBoundingClientRect());
-            }}
-          >
-            <MoreIcon className={styles.cardActionIcon} />
-          </button>
         </div>
       </div>
     </article>
@@ -306,28 +308,31 @@ export function NotebookDragPreview({
       className={`${styles.notebookCard} ${styles.notebookCardOverlay}`}
       data-drag-overlay="true"
     >
-      <div className={styles.notebookCover}>
-        <NotebookCoverArtwork notebook={notebook} coverImageSrc={coverImageSrc} />
-        {shouldShowRibbon ? (
-          <span
-            className={styles.notebookCoverRibbon}
-            style={{ "--notebook-ribbon-color": coverTheme.accent } as CSSProperties}
-            aria-hidden="true"
-          />
-        ) : null}
-      </div>
-      <div className={styles.notebookCardInfo}>
-        <div className={styles.notebookCardNameRow}>
-          <h4 className={styles.notebookCardName}>{notebook.name}</h4>
+      <div className={styles.notebookCardVisual}>
+        <div className={styles.notebookCover}>
+          <NotebookCoverArtwork notebook={notebook} coverImageSrc={coverImageSrc} />
+          {shouldShowRibbon ? (
+            <span
+              className={styles.notebookCoverRibbon}
+              style={{ "--notebook-ribbon-color": coverTheme.accent } as CSSProperties}
+              aria-hidden="true"
+            />
+          ) : null}
         </div>
-        <div className={styles.notebookInfoStack}>
-          <div className={styles.notebookStatRow}>
-            <FileTextIcon className={styles.inlineMetaIcon} />
-            <span>{noteCount} 条笔记</span>
+
+        <div className={styles.notebookCardInfo}>
+          <div className={styles.notebookCardNameRow}>
+            <h4 className={styles.notebookCardName}>{notebook.name}</h4>
           </div>
-          <div className={styles.notebookStatRow}>
-            <ClockIcon className={styles.inlineMetaIcon} />
-            <span>{formatNotebookUpdatedLabel(notebook.updatedAt)}</span>
+          <div className={styles.notebookInfoStack}>
+            <div className={styles.notebookStatRow}>
+              <FileTextIcon className={styles.inlineMetaIcon} />
+              <span>{noteCount} 条笔记</span>
+            </div>
+            <div className={styles.notebookStatRow}>
+              <ClockIcon className={styles.inlineMetaIcon} />
+              <span>{formatNotebookUpdatedLabel(notebook.updatedAt)}</span>
+            </div>
           </div>
         </div>
       </div>
